@@ -1,0 +1,199 @@
+"""Tests for :mod:`notes_app.asciidoc.ast`.
+
+These are smoke tests rather than behavioural tests: the AST module
+defines no behaviour beyond what dataclasses provide. We assert the
+shape (field names, frozenness) and the basic construction shape so
+that accidentally renaming a field or unfreezing a node is caught here
+rather than later in the parser.
+"""
+
+from __future__ import annotations
+
+import unittest
+from dataclasses import FrozenInstanceError, fields, is_dataclass
+
+from notes_app.asciidoc.ast import (
+    Bold,
+    CodeBlock,
+    Document,
+    Image,
+    Italic,
+    ListItem,
+    OrderedList,
+    Paragraph,
+    Section,
+    Strikethrough,
+    Text,
+    Underline,
+    UnorderedList,
+)
+
+
+# ---------------------------------------------------------------------------
+# Shared fixtures
+# ---------------------------------------------------------------------------
+
+
+def _make_text(content: str = "hello", line: int = 1) -> Text:
+    return Text(content=content, source_line=line)
+
+
+# ---------------------------------------------------------------------------
+# Construction & field-set
+# ---------------------------------------------------------------------------
+
+
+class AstNodeShapeTests(unittest.TestCase):
+    """Each node is a dataclass with a fixed, exact field set."""
+
+    def test_each_class_is_a_dataclass(self) -> None:
+        classes = (
+            Text,
+            Bold,
+            Italic,
+            Strikethrough,
+            Underline,
+            Paragraph,
+            Section,
+            ListItem,
+            OrderedList,
+            UnorderedList,
+            CodeBlock,
+            Image,
+            Document,
+        )
+        for cls in classes:
+            with self.subTest(cls=cls.__name__):
+                self.assertTrue(
+                    is_dataclass(cls),
+                    f"{cls.__name__} should be a dataclass",
+                )
+
+    def test_field_sets(self) -> None:
+        cases: tuple[tuple[type, set[str]], ...] = (
+            (Text, {"content", "source_line"}),
+            (Bold, {"children", "source_line"}),
+            (Italic, {"children", "source_line"}),
+            (Strikethrough, {"children", "source_line"}),
+            (Underline, {"children", "source_line"}),
+            (Paragraph, {"inlines", "source_line"}),
+            (Section, {"level", "title", "blocks", "source_line"}),
+            (ListItem, {"inlines", "source_line"}),
+            (OrderedList, {"items", "source_line"}),
+            (UnorderedList, {"items", "source_line"}),
+            (CodeBlock, {"language", "content", "source_line"}),
+            (Image, {"filename", "attrs", "source_line"}),
+            (Document, {"title", "blocks", "source_line"}),
+        )
+        for cls, expected in cases:
+            with self.subTest(cls=cls.__name__):
+                names = {f.name for f in fields(cls)}
+                self.assertEqual(names, expected)
+
+
+class AstFrozenTests(unittest.TestCase):
+    """Mutating any field on any node raises :class:`FrozenInstanceError`."""
+
+    def test_text_is_frozen(self) -> None:
+        node = _make_text()
+        with self.assertRaises(FrozenInstanceError):
+            node.content = "mutated"  # type: ignore[misc]
+
+    def test_section_is_frozen(self) -> None:
+        section = Section(
+            level=2,
+            title=(_make_text("t"),),
+            blocks=(),
+            source_line=1,
+        )
+        with self.assertRaises(FrozenInstanceError):
+            section.level = 3  # type: ignore[misc]
+
+    def test_document_is_frozen(self) -> None:
+        document = Document(title=None, blocks=(), source_line=1)
+        with self.assertRaises(FrozenInstanceError):
+            document.blocks = ()  # type: ignore[misc]
+
+
+class AstConstructionTests(unittest.TestCase):
+    """Each node accepts the documented arguments and exposes them back."""
+
+    def test_text(self) -> None:
+        node = Text(content="hi", source_line=4)
+        self.assertEqual(node.content, "hi")
+        self.assertEqual(node.source_line, 4)
+
+    def test_bold_holds_children_as_tuple(self) -> None:
+        node = Bold(
+            children=(_make_text("a"), _make_text("b")),
+            source_line=2,
+        )
+        self.assertIsInstance(node.children, tuple)
+        self.assertEqual(len(node.children), 2)
+        self.assertEqual(node.source_line, 2)
+
+    def test_section_records_level_and_title(self) -> None:
+        title = (_make_text("Heading"),)
+        section = Section(
+            level=3,
+            title=title,
+            blocks=(Paragraph(inlines=(_make_text("body"),), source_line=2),),
+            source_line=1,
+        )
+        self.assertEqual(section.level, 3)
+        self.assertIs(section.title, title)
+        self.assertEqual(len(section.blocks), 1)
+
+    def test_code_block_language_optional(self) -> None:
+        with_lang = CodeBlock(
+            language="python",
+            content="print('x')",
+            source_line=10,
+        )
+        no_lang = CodeBlock(
+            language=None,
+            content="raw",
+            source_line=10,
+        )
+        self.assertEqual(with_lang.language, "python")
+        self.assertIsNone(no_lang.language)
+
+    def test_image_carries_filename_and_attrs(self) -> None:
+        image = Image(filename="cat.png", attrs="alt=Cat", source_line=5)
+        self.assertEqual(image.filename, "cat.png")
+        self.assertEqual(image.attrs, "alt=Cat")
+
+    def test_document_title_optional(self) -> None:
+        without = Document(title=None, blocks=(), source_line=1)
+        with_title = Document(
+            title=(_make_text("Title"),),
+            blocks=(),
+            source_line=1,
+        )
+        self.assertIsNone(without.title)
+        self.assertIsNotNone(with_title.title)
+
+    def test_lists_hold_list_items(self) -> None:
+        item = ListItem(inlines=(_make_text("x"),), source_line=2)
+        ordered = OrderedList(items=(item,), source_line=2)
+        unordered = UnorderedList(items=(item,), source_line=2)
+        self.assertEqual(ordered.items, (item,))
+        self.assertEqual(unordered.items, (item,))
+
+
+class AstEqualityTests(unittest.TestCase):
+    """Frozen tuples make AST equality structural and useful in tests."""
+
+    def test_two_paragraphs_with_equal_inlines_are_equal(self) -> None:
+        a = Paragraph(inlines=(_make_text("x"),), source_line=1)
+        b = Paragraph(inlines=(_make_text("x"),), source_line=1)
+        self.assertEqual(a, b)
+
+    def test_paragraphs_with_different_lines_differ(self) -> None:
+        a = Paragraph(inlines=(_make_text("x"),), source_line=1)
+        b = Paragraph(inlines=(_make_text("x"),), source_line=2)
+        self.assertNotEqual(a, b)
+
+
+if __name__ == "__main__":
+    unittest.main()
