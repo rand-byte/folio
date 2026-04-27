@@ -1,0 +1,2 @@
+Symbolic SVG icons for the sidebar (matches `data.jsx`).
+Populated in build-order step 9. One file per `NotebookIcon` value.

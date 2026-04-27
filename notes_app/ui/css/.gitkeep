@@ -1,0 +1,5 @@
+/* Application-level GTK CSS. Populated in build-order step 8.
+
+   Loaded once via Gtk.CssProvider at startup. Themes the sidebar, note
+   list, and the embedded code-block widget used by the rendered view.
+*/

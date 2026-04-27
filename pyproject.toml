@@ -1,0 +1,29 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "notes-app"
+version = "0.1.0"
+description = "AsciiDoc note-taking application"
+requires-python = ">=3.13"
+readme = "README.md"
+
+# Runtime dependencies are intentionally empty for the foundation step.
+# `pygobject` and `gtksourceview` bindings are added in step 8 when the
+# UI layer first becomes a dependency. SQLite is in the standard library.
+dependencies = []
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["notes_app*"]
+
+# PyGObject does not ship type stubs or a ``py.typed`` marker, so
+# ``from gi.repository import Gtk`` always trips mypy's import-untyped
+# check. The override below is project-wide so each future module that
+# refers to GTK does not need a per-file ``# type: ignore`` comment.
+# This is configuration of the type checker — not suppression of real
+# type errors in our own code.
+[[tool.mypy.overrides]]
+module = ["gi.*"]
+ignore_missing_imports = true
