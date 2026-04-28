@@ -7,5 +7,20 @@ injection, and translate user gestures into repository calls plus state
 mutations. Widgets subscribe to ``AppState`` via GObject signals — they
 never read from another widget.
 
+Modules
+-------
+* :mod:`notes_app.controllers.app_state` — the :class:`AppState`
+  GObject carrying selection, selected note id, view mode, and query,
+  with a payload-free signal per field.
+* :mod:`notes_app.controllers.note_controller` — orchestrates note
+  CRUD plus attachment add/remove on top of
+  :class:`NoteRepositoryProtocol` and :class:`AttachmentStoreProtocol`.
+* :mod:`notes_app.controllers.notebook_controller` — orchestrates
+  notebook CRUD on top of :class:`NotebookRepositoryProtocol`.
+* :mod:`notes_app.controllers._storage_errors` — private helper
+  shared by the two controllers above; encapsulates the
+  catch-:class:`sqlite3.DatabaseError`-emit-toast-re-raise pattern
+  exactly once so the two controllers cannot drift.
+
 Populated by build-order step 7.
 """
