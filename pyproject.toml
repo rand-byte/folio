@@ -9,10 +9,20 @@ description = "AsciiDoc note-taking application"
 requires-python = ">=3.13"
 readme = "README.md"
 
-# Runtime dependencies are intentionally empty for the foundation step.
-# `pygobject` and `gtksourceview` bindings are added in step 8 when the
-# UI layer first becomes a dependency. SQLite is in the standard library.
-dependencies = []
+# Runtime dependencies. Build step 8 introduces the UI layer, which is
+# the first runtime caller of ``gi.repository``; ``PyGObject`` is the
+# Python-side binding that makes that import work. The GTK 4 typelib
+# itself is a system package (``gir1.2-gtk-4.0`` on Debian/Ubuntu, the
+# equivalents elsewhere) — distributing system packages is out of
+# scope for ``pyproject.toml``. SQLite is in the standard library.
+# ``GtkSourceView`` bindings join the list at build step 10 when the
+# editor pane lands.
+dependencies = [
+    "PyGObject>=3.50",
+]
+
+[project.scripts]
+notes-app = "notes_app.__main__:main"
 
 [tool.setuptools.packages.find]
 where = ["."]
