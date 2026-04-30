@@ -9,14 +9,12 @@ description = "AsciiDoc note-taking application"
 requires-python = ">=3.13"
 readme = "README.md"
 
-# Runtime dependencies. Build step 8 introduces the UI layer, which is
-# the first runtime caller of ``gi.repository``; ``PyGObject`` is the
-# Python-side binding that makes that import work. The GTK 4 typelib
-# itself is a system package (``gir1.2-gtk-4.0`` on Debian/Ubuntu, the
-# equivalents elsewhere) — distributing system packages is out of
-# scope for ``pyproject.toml``. SQLite is in the standard library.
-# ``GtkSourceView`` bindings join the list at build step 10 when the
-# editor pane lands.
+# Runtime dependencies. ``PyGObject`` is the Python-side binding for
+# GTK 4 (build step 8 onwards) and GtkSourceView 5 (build step 10
+# onwards); both typelibs are system packages. On Debian/Ubuntu the
+# packages are ``gir1.2-gtk-4.0`` and ``gir1.2-gtksource-5``;
+# equivalents exist on other distributions. SQLite is in the standard
+# library.
 dependencies = [
     "PyGObject>=3.50",
 ]
@@ -27,6 +25,19 @@ notes-app = "notes_app.__main__:main"
 [tool.setuptools.packages.find]
 where = ["."]
 include = ["notes_app*"]
+
+# The bundled GtkSourceView language definition is loaded at runtime
+# by :mod:`notes_app.ui.note_editor`. Listing it here ensures it ships
+# in the wheel alongside the Python sources rather than being silently
+# dropped by the default include rules. Application CSS and SVG
+# assets that already lived under ``ui/css`` and ``ui/icons`` are
+# included by the same mechanism.
+[tool.setuptools.package-data]
+notes_app = [
+    "asciidoc/language_spec.lang",
+    "ui/css/*.css",
+    "ui/icons/*.svg",
+]
 
 # PyGObject does not ship type stubs or a ``py.typed`` marker, so
 # ``from gi.repository import Gtk`` always trips mypy's import-untyped

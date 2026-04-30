@@ -1,0 +1,174 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  Notes App AsciiDoc subset — GtkSourceView 5 language definition.
+
+  This grammar covers EXACTLY the constructs the parser at build step 4
+  understands (see notes_app/asciidoc/parser.py and section 7 of
+  plan.md): document title, sections (== through six equals signs),
+  unordered lists (asterisk item), ordered lists (dot item), code
+  blocks (four-hyphen fences, with optional [source,lang] directive),
+  image macros (image::file[]), and the four inline styles bold (*x*),
+  italic (_x_), strikethrough ([.line-through]#x#), and underline
+  ([.underline]#x#). Anything outside this subset is intentionally NOT
+  highlighted; it is a parse error at render time and the editor lets
+  the raw text show through.
+
+  Build steps 13 to 15 extend this file with monospace, links, tables,
+  admonitions, and blockquotes. Adding those constructs here ahead of
+  time would highlight text the parser still rejects, which is exactly
+  the dishonest UX feedback we are trying to avoid.
+
+  Style ids reference def.lang (shipped with GtkSourceView) so any
+  installed style scheme renders sensible colours without bundling our
+  own.
+
+  Note on XML comment escaping: XML disallows the literal sequence
+  consisting of two adjacent hyphens inside a comment, which is why
+  the AsciiDoc fence (four hyphens) is described in prose above
+  rather than reproduced verbatim. Fence regexes inside <start>
+  and <end> tags are NOT in comments and reproduce the syntax as-is.
+-->
+<language id="notes-asciidoc" name="Notes AsciiDoc" version="2.0" _section="Markup">
+  <metadata>
+    <property name="mimetypes">text/x-notes-asciidoc</property>
+    <property name="globs">*.adoc</property>
+    <property name="line-comment-start">//</property>
+  </metadata>
+
+  <styles>
+    <style id="heading"      name="Heading"        map-to="def:heading"/>
+    <style id="bold"         name="Bold"           map-to="def:strong-emphasis"/>
+    <style id="italic"       name="Italic"         map-to="def:emphasis"/>
+    <style id="strikethrough" name="Strikethrough" map-to="def:deletion"/>
+    <style id="underline"    name="Underline"      map-to="def:underlined"/>
+    <style id="list-marker"  name="List Marker"    map-to="def:list-marker"/>
+    <style id="code-block"   name="Code Block"     map-to="def:preformatted-section"/>
+    <style id="code-fence"   name="Code Fence"     map-to="def:preprocessor"/>
+    <style id="image-macro"  name="Image Macro"    map-to="def:link-destination"/>
+  </styles>
+
+  <definitions>
+    <!--
+      Code block: a region between two lines containing exactly four
+      hyphens (with no other characters). The optional [source,lang]
+      directive on the line directly above is NOT consumed by this
+      region — it is matched separately so the directive itself
+      highlights even if the fence is malformed. Inside the fence the
+      content is monospace / preformatted; no inline markers are
+      interpreted, matching the parser's verbatim treatment.
+    -->
+    <context id="code-block" style-ref="code-block" class="no-spell-check">
+      <start>^----\s*$</start>
+      <end>^----\s*$</end>
+      <include>
+        <context sub-pattern="0" where="start" style-ref="code-fence"/>
+        <context sub-pattern="0" where="end" style-ref="code-fence"/>
+      </include>
+    </context>
+
+    <!--
+      Heading line: 1..6 leading '=' followed by at least one space and
+      some content. The parser rejects mid-document level-1 headings as
+      UNKNOWN_BLOCK, but level 1 IS valid as the document title — and
+      the highlighter cannot tell which one it is looking at without
+      a parser. Highlighting all six levels uniformly is the honest
+      compromise: the rendered view is the place mistakes are
+      surfaced, not the editor gutter.
+    -->
+    <context id="heading" style-ref="heading">
+      <match>^={1,6}[ \t]+\S.*$</match>
+    </context>
+
+    <!--
+      Unordered list bullet: '*' followed by a space, at the start of a
+      line. Only the marker is styled — the rest of the line is plain
+      text so inline emphasis inside list items still picks up the
+      bold/italic contexts below.
+    -->
+    <context id="unordered-list-bullet" style-ref="list-marker">
+      <match>^\*[ \t]+</match>
+    </context>
+
+    <!--
+      Ordered list bullet: '.' followed by a space, at the start of a
+      line. Same scoping as unordered.
+    -->
+    <context id="ordered-list-bullet" style-ref="list-marker">
+      <match>^\.[ \t]+</match>
+    </context>
+
+    <!--
+      Source directive: [source,lang] on its own line. Highlighted
+      whether or not the next line is a fence — the parser performs the
+      pairing; the highlighter only colours the directive.
+    -->
+    <context id="source-directive" style-ref="code-fence">
+      <match>^\[source(?:,[^\]]*)?\][ \t]*$</match>
+    </context>
+
+    <!--
+      Image macro: image::filename[attrs]. The whole line is coloured
+      so the user sees at a glance that the line is structural rather
+      than prose. The parser checks bracket pairing; the highlighter
+      tolerates malformed attrs and lets the parser report the error.
+    -->
+    <context id="image-macro" style-ref="image-macro">
+      <match>^image::[^\[\]\s]+\[[^\]]*\]\s*$</match>
+    </context>
+
+    <!--
+      Inline bold: *...* on a single line, with the asterisks adjacent
+      to non-whitespace characters (matches the parser's rule that
+      ``* foo *`` is plain prose, not a bold span). The negative
+      lookahead before the opening '*' prevents confusion with the
+      unordered-list bullet at column 0.
+    -->
+    <context id="inline-bold" style-ref="bold">
+      <match>(?&lt;![\w*])\*(?=\S)[^*\n]*\S\*(?![\w])</match>
+    </context>
+
+    <!--
+      Inline italic: _..._ on a single line, same shape rules.
+    -->
+    <context id="inline-italic" style-ref="italic">
+      <match>(?&lt;![\w_])_(?=\S)[^_\n]*\S_(?![\w])</match>
+    </context>
+
+    <!--
+      Inline strikethrough: [.line-through]#text# on a single line.
+      The ``#…#`` content is part of the highlighted run so the user
+      sees the full marker. The text itself is not nested into other
+      contexts to keep the regex simple.
+    -->
+    <context id="inline-strikethrough" style-ref="strikethrough">
+      <match>\[\.line-through\]#[^#\n]+#</match>
+    </context>
+
+    <!--
+      Inline underline: [.underline]#text# on a single line, same
+      shape as strikethrough.
+    -->
+    <context id="inline-underline" style-ref="underline">
+      <match>\[\.underline\]#[^#\n]+#</match>
+    </context>
+
+    <!-- Top-level dispatch: order matters for overlapping patterns.
+         Block-level constructs are tried first so a line beginning
+         with ``*`` is recognised as a list item before the inline
+         bold context can match the asterisk. -->
+    <context id="notes-asciidoc">
+      <include>
+        <context ref="code-block"/>
+        <context ref="source-directive"/>
+        <context ref="heading"/>
+        <context ref="image-macro"/>
+        <context ref="unordered-list-bullet"/>
+        <context ref="ordered-list-bullet"/>
+        <context ref="inline-strikethrough"/>
+        <context ref="inline-underline"/>
+        <context ref="inline-bold"/>
+        <context ref="inline-italic"/>
+      </include>
+    </context>
+  </definitions>
+</language>

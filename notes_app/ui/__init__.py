@@ -8,20 +8,31 @@ unit-testable with fake controllers.
 
 Modules
 -------
-* :mod:`notes_app.ui.application` (step 8) — the
+* :mod:`notes_app.ui.application` (step 8; rewritten step 10) — the
   :class:`Gtk.Application` subclass that opens the database, runs
-  migrations, builds repositories and :class:`AppState`, and presents
-  the main window.
-* :mod:`notes_app.ui.main_window` (step 8 stub; rewritten step 9) —
-  the single top-level :class:`Gtk.ApplicationWindow`. Today it hosts
-  one :class:`NoteView`; step 9 turns it into the three-pane shell.
+  migrations, builds repositories, :class:`AppState`, and the
+  :class:`NoteController` the editor depends on, then presents the
+  main window.
+* :mod:`notes_app.ui.main_window` (step 8 stub; rewritten step 9;
+  rewritten step 10) — the single top-level :class:`Gtk.ApplicationWindow`.
+  Composes sidebar, note list, and a :class:`Gtk.Stack` switching
+  between :class:`NoteView` and :class:`NoteEditor` keyed on
+  :attr:`AppState.view_mode`.
 * :mod:`notes_app.ui.note_view` (step 8) — the rendered-note pane.
   Owns :class:`ArticleContainer` (the fixed-width column that absorbs
   wide-window slack as side margins) and the :class:`Gtk.ScrolledWindow`
   + read-only :class:`Gtk.TextView` stack the renderer populates.
+* :mod:`notes_app.ui.sidebar` (step 9) — the library / notebooks tree
+  on the left.
+* :mod:`notes_app.ui.note_list` (step 9) — the middle pane listing
+  notes for the current selection / smart filter.
+* :mod:`notes_app.ui.note_editor` (step 10) — the source editor.
+  GtkSourceView 5 over the bundled ``notes-asciidoc`` language, a
+  toolbar exposing the step-4 core constructs (heading / bold /
+  italic / strikethrough / underline / lists / code block / image
+  macro), and a debounced auto-save that flushes through
+  :meth:`NoteController.update_source` 300 ms after the user pauses.
 
-Build steps still to populate this layer: 9 (sidebar + note list +
-real three-pane shell), 10 (editor with ``GtkSourceView``), 11 (image
-flow against the real attachment store), 12 (toolbar + dialogs), and
-16 (link handler).
+Build steps still to populate this layer: 11 (image flow against the
+real attachment store), 12 (toolbar + dialogs), and 16 (link handler).
 """
