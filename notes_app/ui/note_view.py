@@ -6,8 +6,8 @@ Principles & invariants
   stateless with respect to notes — every render rebuilds the buffer
   from scratch, driven by :class:`AppState`. It never calls into
   ``storage`` directly with concrete classes; reads go through
-  :class:`NoteRepositoryProtocol`. Mutations are not its concern (those
-  flow through :class:`NoteController`, added later).
+  :class:`NoteRepositoryProtocol` and (from build step 11)
+  :class:`AttachmentStoreProtocol`.
 * The pane's layout is the three-step stack from §2 of the plan:
   ``Gtk.ScrolledWindow`` (horizontal AUTOMATIC, vertical AUTOMATIC) →
   :class:`ArticleContainer` (a ``Gtk.Box`` subclass that enforces the
@@ -34,13 +34,24 @@ Principles & invariants
   on ``self`` only when the values would actually change, so the
   ``queue_resize`` that follows a margin write does not introduce an
   oscillating layout pass.
-* Image resolution flows through an injected
-  :data:`ImageBytesResolver`. Step 8 wires :func:`_placeholder_image_bytes`,
-  which always returns ``b""`` so the renderer's decode-failure branch
-  fires and produces its small ``[Image: filename]`` placeholder. The
-  real attachment store arrives at step 11; the only change required
-  there is the resolver passed to :class:`NoteView` — the renderer and
-  this module stay untouched.
+* Image resolution flows through an :data:`ImageBytesResolver` built
+  internally by :class:`NoteView` from an injected
+  :class:`AttachmentStoreProtocol`. The resolver is a closure over
+  ``self``: each call reads :attr:`_current_note_id` (set on every
+  :meth:`refresh`) and asks the attachment store for the matching
+  metadata-then-bytes. Tests that don't care about images can
+  construct :class:`NoteView` with ``attachments=None`` — the
+  fallback :func:`_placeholder_image_bytes` resolver is wired and
+  every image renders as the small ``[Image: filename]`` placeholder
+  widget. Tests that *do* care wire a fake :class:`AttachmentStoreProtocol`.
+* Filename-to-attachment lookup is intentionally O(N) per image
+  (linear scan of the metadata list). For the v1 expectation of "a
+  handful of images per note" this is dominated by the texture decode
+  cost; introducing a per-note dict cache would add stale-cache
+  hazards across edits (rename / delete attachment) for no measurable
+  win. If the assumption breaks the cache lives at the resolver
+  level — keyed by ``(note_id, filename)`` — and the renderer above
+  stays untouched.
 * The widget tree is constructed once at ``__init__``. :meth:`refresh`
   re-runs the parser and renderer against the currently selected note,
   but never reshapes the widget tree. This keeps GTK's child-anchor
@@ -66,6 +77,7 @@ from notes_app.config.defaults import TARGET_CHARS_PER_LINE
 from notes_app.controllers.app_state import AppState
 from notes_app.models.parse_error import ParseError
 from notes_app.storage.protocols import (
+    AttachmentStoreProtocol,
     ImageBytesResolver,
     NoteRepositoryProtocol,
 )
@@ -90,14 +102,16 @@ all) keeps the column at least usable rather than collapsing to zero.
 
 
 def _placeholder_image_bytes(_filename: str) -> bytes:
-    """Step-8 image resolver: always return invalid (empty) bytes.
+    """Fallback image resolver used when no attachment store is wired.
 
     The renderer attempts ``Gdk.Texture.new_from_bytes`` on the result.
     Empty bytes raise ``GLib.Error``, which the renderer catches and
     converts into its small ``[Image: filename]`` placeholder widget.
-    The real attachment-backed resolver lands at build step 11; this
-    function is replaced wholesale at that point. No image bytes ever
-    enter memory through this path.
+
+    Production wires a real :class:`AttachmentStoreProtocol` so this
+    function is bypassed; it remains as a graceful degradation for
+    tests and for the (defensive) case where the application is
+    constructed without attachment plumbing.
     """
     del _filename  # unused — the placeholder is filename-independent
     return b""
@@ -235,8 +249,17 @@ class NoteView(Gtk.Box):
 
     Read access to the underlying note goes through the protocol
     parameter — concrete repositories are not imported. Image bytes
-    flow through the injected :data:`ImageBytesResolver`; step 8 wires
-    :func:`_placeholder_image_bytes`.
+    flow through an internally-built :data:`ImageBytesResolver` that
+    closes over an injected :class:`AttachmentStoreProtocol`; if the
+    store is ``None`` (test default) the fallback
+    :func:`_placeholder_image_bytes` is wired instead.
+
+    The instance-attribute count exceeds pylint's default ceiling of
+    seven because step 11 introduces two new fields
+    (:attr:`_attachments`, :attr:`_current_note_id`) on top of the
+    five already required to wire the renderer + selection plumbing.
+    Splitting these into a helper class would obscure the obvious
+    "the view holds the things it needs to render" relationship.
     """
 
     # Only fields used outside ``__init__`` are stored on ``self``.
@@ -244,26 +267,32 @@ class NoteView(Gtk.Box):
     # (``Gtk.TextTagTable``, :class:`ArticleContainer`,
     # ``Gtk.ScrolledWindow``) are kept alive by their GTK parent-child
     # references — adding them as ``self.`` attributes would duplicate
-    # those references for no behavioural benefit and pushes the class
-    # past pylint's instance-attribute limit. The test suite walks the
-    # widget tree from the outermost container when it needs to inspect
-    # any of them (see ``_find_text_view_buffer``).
+    # those references for no behavioural benefit.
     _note_repository: NoteRepositoryProtocol
+    _attachments: AttachmentStoreProtocol | None
     _app_state: AppState
     _buffer: Gtk.TextBuffer
     _text_view: Gtk.TextView
     _renderer: TextBufferRenderer
+    _current_note_id: str | None
 
     def __init__(
         self,
         *,
         note_repository: NoteRepositoryProtocol,
         app_state: AppState,
-        image_bytes_for: ImageBytesResolver = _placeholder_image_bytes,
+        attachments: AttachmentStoreProtocol | None = None,
     ) -> None:
         super().__init__(orientation=Gtk.Orientation.VERTICAL, spacing=0)
         self._note_repository = note_repository
+        self._attachments = attachments
         self._app_state = app_state
+        # ``_current_note_id`` is the note whose source is presently
+        # rendered in the buffer. The image-bytes resolver reads this
+        # to scope its filename lookup to the right note's
+        # attachments. ``refresh`` updates it on every render so the
+        # closure always sees the current note context.
+        self._current_note_id = None
 
         # Build the text-buffer rendering substrate. The tag table is
         # owned by the buffer in GTK 4; constructing the buffer with
@@ -306,15 +335,13 @@ class NoteView(Gtk.Box):
         scrolled_window.set_vexpand(True)
         self.append(scrolled_window)
 
-        # The renderer: receives the column-width resolver as a bound
-        # method on the local ``article_container`` so it always sees
-        # the live value rather than a snapshot. The closure keeps the
-        # container alive even though we don't store it on ``self`` —
-        # but the scrolled window also holds a strong reference, so
-        # the closure here is just one of several ways the container
-        # stays reachable.
+        # The renderer's image-bytes resolver is built here so it
+        # closes over ``self`` and reads the live ``_current_note_id``
+        # / ``_attachments`` rather than a snapshot. The
+        # ``column_width_px`` resolver is the container's bound method
+        # for the same reason.
         self._renderer = TextBufferRenderer(
-            image_bytes_for=image_bytes_for,
+            image_bytes_for=self._resolve_image_bytes,
             column_width_px=article_container.target_column_width,
             tag_table=tag_table,
         )
@@ -346,24 +373,35 @@ class NoteView(Gtk.Box):
 
         Behaviour:
 
-        * No selection → buffer cleared.
+        * No selection → buffer cleared, ``_current_note_id`` cleared.
         * Selection points to a note that no longer exists → buffer
-          cleared. The note-list widget elsewhere will pick a new
-          selection on its next refresh; this view does not second-guess.
+          cleared, ``_current_note_id`` cleared. The note-list widget
+          elsewhere will pick a new selection on its next refresh;
+          this view does not second-guess.
         * Parse error in the source → buffer left untouched (so the
           previous valid render stays visible). The plan's error-
           handling policy is to surface parse errors via the editor
           gutter; doing nothing here is what preserves that contract.
+          ``_current_note_id`` IS still updated to the new selection
+          so the next render attempt and any image lookup target the
+          right note.
         """
         note_id = self._app_state.selected_note_id
         if note_id is None:
+            self._current_note_id = None
             self._buffer.set_text("")
             return
         try:
             note = self._note_repository.get(note_id)
         except KeyError:
+            self._current_note_id = None
             self._buffer.set_text("")
             return
+        # Update the resolver's view of "current note" BEFORE invoking
+        # the renderer, so any image macro encountered during the
+        # render walk sees the right scope. Updating after would race
+        # with the renderer's own image-resolver calls.
+        self._current_note_id = note.id
         try:
             self._renderer.render_into(
                 note.source,
@@ -409,6 +447,61 @@ class NoteView(Gtk.Box):
         into the renderer's pure-AST interface.
         """
         self._text_view.add_child_at_anchor(widget, anchor)
+
+    def _resolve_image_bytes(self, filename: str) -> bytes:
+        """The :data:`ImageBytesResolver` plugged into the renderer.
+
+        Reads :attr:`_current_note_id` (set by :meth:`refresh`) and
+        looks up the matching attachment in
+        :attr:`_attachments`. Returns the bytes if found; an empty
+        ``bytes`` if not — which causes the renderer to fall back to
+        its ``[Image: filename]`` placeholder widget. This matches
+        the placeholder-bytes contract from build step 8.
+
+        Lookup is a linear scan over
+        :meth:`AttachmentStoreProtocol.list_for_note`. For v1's
+        "handful of images per note" this is cheaper than a per-note
+        dict cache that would have to be invalidated on every
+        attachment add / remove. The list call itself is metadata-
+        only: the BLOB column is not selected.
+        """
+        if self._attachments is None:
+            return _placeholder_image_bytes(filename)
+        if self._current_note_id is None:
+            # Defensive: a malformed renderer call before refresh has
+            # set the current note would land here. The placeholder
+            # contract keeps the document viewable.
+            return _placeholder_image_bytes(filename)
+        for attachment in self._attachments.list_for_note(self._current_note_id):
+            if attachment.filename == filename:
+                return self._attachments.get_bytes(attachment.id)
+        # No match — the image macro references a filename that has
+        # no attachment row. The renderer's decode-failure branch
+        # produces the placeholder widget on empty bytes, which is
+        # the right user-visible signal for "image not found".
+        return _placeholder_image_bytes(filename)
+
+    @property
+    def current_note_id(self) -> str | None:
+        """The id of the note presently rendered in the buffer.
+
+        ``None`` when no note is selected or the selection points at
+        a deleted note. Public read-only because the image-bytes
+        resolver tests need to verify the closure follows the
+        selection.
+        """
+        return self._current_note_id
+
+    @property
+    def image_bytes_resolver(self) -> ImageBytesResolver:
+        """The bound resolver method exposed for tests.
+
+        Tests that want to verify the resolver's behaviour without
+        rendering a document call this method directly. The returned
+        callable is the same object the renderer holds, so any state
+        mutation (e.g. a selection change) is visible through it.
+        """
+        return self._resolve_image_bytes
 
 
 # ---------------------------------------------------------------------------

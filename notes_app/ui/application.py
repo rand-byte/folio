@@ -4,11 +4,11 @@ Principles & invariants
 -----------------------
 * :class:`NotesApplication` is the single point in the program that
   composes the layered architecture into a runnable system. It owns
-  the :class:`Database`, the repositories, :class:`AppState`, and the
-  controllers that the UI layer's editor and (future) buttons drive.
-  Every other module receives those as parameters. No other module
-  reaches for a global "the database" or "the app state" —
-  composition flows top-down from here.
+  the :class:`Database`, the repositories, the :class:`AttachmentStore`,
+  :class:`AppState`, and the controllers that the UI layer's editor
+  and (future) buttons drive. Every other module receives those as
+  parameters. No other module reaches for a global "the database" or
+  "the app state" — composition flows top-down from here.
 * :meth:`do_activate` is the only :class:`Gtk.Application` vfunc this
   class overrides. The application is registered as a
   :class:`Gio.ApplicationFlags.FLAGS_NONE` (single-instance) app; a
@@ -16,11 +16,12 @@ Principles & invariants
   the existing window rather than opening a new one. That matches the
   design's single-window assumption.
 * Long-lived resources (the :class:`Database`, the repositories,
-  :class:`AppState`, the :class:`NoteController`) are initialised
-  once on the first activation and reused on every subsequent
-  activation. The migration runner is invoked exactly once per
-  process lifetime; it is itself idempotent, but skipping the work
-  avoids redundant version reads on activations past the first.
+  the :class:`AttachmentStore`, :class:`AppState`, the
+  :class:`NoteController`) are initialised once on the first
+  activation and reused on every subsequent activation. The
+  migration runner is invoked exactly once per process lifetime;
+  it is itself idempotent, but skipping the work avoids redundant
+  version reads on activations past the first.
 * The seeded welcome note is loaded by id (:data:`SEED_WELCOME_NOTE_ID`).
   If the user has deleted it, the application falls back to the most
   recently modified note in the library (:meth:`NoteRepositoryProtocol.list_all`
@@ -34,20 +35,17 @@ Principles & invariants
   process-level crash with the original traceback. That is the right
   failure mode at this layer — better than swallowing the error and
   showing an empty window with no explanation.
-* :class:`_PlaceholderAttachmentStore` is a build-step-10 stand-in
-  for :class:`AttachmentStoreProtocol`. The editor pane delivered at
-  step 10 only routes through :meth:`NoteController.update_source`,
-  which never touches the attachment store; the store is required
-  in the controller's constructor so it is wired here, but the real
-  BLOB-backed implementation does not arrive until step 11. Every
-  method of the placeholder raises :class:`NotImplementedError` so
-  any caller that bypasses the editor and exercises the attachment
-  paths fails loudly instead of silently dropping data.
+* From build step 11 the :class:`AttachmentStore` is wired in for
+  real: image attachments now flow end-to-end through the editor's
+  Image button → :class:`Gtk.FileDialog` → :class:`NoteController.add_attachment`
+  → :class:`AttachmentStore.add_for_note` → SQLite BLOB; and the
+  rendered view's image-bytes resolver (built inside
+  :class:`NoteView`) closes over the same store to fetch bytes by
+  filename when an image macro is encountered. The step-10
+  :class:`_PlaceholderAttachmentStore` is removed.
 """
 
 from __future__ import annotations
-
-from pathlib import Path
 
 import gi
 
@@ -60,7 +58,7 @@ from notes_app.config.defaults import SEED_WELCOME_NOTE_ID
 from notes_app.config.paths import database_path
 from notes_app.controllers.app_state import AppState
 from notes_app.controllers.note_controller import NoteController
-from notes_app.models.attachment import Attachment
+from notes_app.storage.attachment_store import AttachmentStore
 from notes_app.storage.database import Database
 from notes_app.storage.migrations import apply_pending
 from notes_app.storage.note_repository import NoteRepository
@@ -78,63 +76,19 @@ record under it.
 """
 
 
-class _PlaceholderAttachmentStore:
-    """Step-10 stand-in for :class:`AttachmentStoreProtocol`.
-
-    The editor delivered at step 10 only exercises
-    :meth:`NoteController.update_source`, which does not touch the
-    attachment store. The controller's constructor still requires an
-    attachment store argument, so we provide this stand-in until
-    step 11 lands the real BLOB-backed implementation.
-
-    Every method raises :class:`NotImplementedError` so any caller
-    that bypasses the editor and reaches the attachment paths fails
-    loudly. There is intentionally no "soft" fallback: silently
-    accepting an attachment add and dropping the bytes would be a
-    data-loss surprise the moment step 11 forgot to swap the store
-    out.
-    """
-
-    def add_for_note(
-        self,
-        note_id: str,
-        source_path: Path,
-    ) -> Attachment:
-        del note_id, source_path  # explicit no-op, helps lint readability
-        raise NotImplementedError(
-            "Attachments are not available until build step 11.",
-        )
-
-    def remove(self, attachment_id: str) -> None:
-        del attachment_id
-        raise NotImplementedError(
-            "Attachments are not available until build step 11.",
-        )
-
-    def list_for_note(self, note_id: str) -> list[Attachment]:
-        del note_id
-        raise NotImplementedError(
-            "Attachments are not available until build step 11.",
-        )
-
-    def get_bytes(self, attachment_id: str) -> bytes:
-        del attachment_id
-        raise NotImplementedError(
-            "Attachments are not available until build step 11.",
-        )
-
-
 class NotesApplication(Gtk.Application):
     """The application's :class:`Gtk.Application` subclass.
 
-    Holds the long-lived dependencies — database, repositories, app
-    state, and the editor's :class:`NoteController` — and presents a
-    :class:`MainWindow` on activation.
+    Holds the long-lived dependencies — database, repositories,
+    attachment store, app state, and the editor's
+    :class:`NoteController` — and presents a :class:`MainWindow` on
+    activation.
     """
 
     _database: Database | None
     _note_repository: NoteRepository | None
     _notebook_repository: NotebookRepository | None
+    _attachment_store: AttachmentStore | None
     _app_state: AppState | None
     _note_controller: NoteController | None
 
@@ -146,6 +100,7 @@ class NotesApplication(Gtk.Application):
         self._database = None
         self._note_repository = None
         self._notebook_repository = None
+        self._attachment_store = None
         self._app_state = None
         self._note_controller = None
 
@@ -171,7 +126,7 @@ class NotesApplication(Gtk.Application):
 
     def _initialise_runtime(self) -> None:
         """Open the database, run migrations, build repositories,
-        the app state, and the note controller.
+        the attachment store, the app state, and the note controller.
 
         Runs exactly once per process. The database path is resolved
         through :func:`database_path`, which honours
@@ -184,13 +139,11 @@ class NotesApplication(Gtk.Application):
         apply_pending(self._database)
         self._note_repository = NoteRepository(self._database)
         self._notebook_repository = NotebookRepository(self._database)
+        self._attachment_store = AttachmentStore(self._database)
         self._app_state = AppState()
-        # Step-10 placeholder for the attachment store; step 11 swaps
-        # it for the real BLOB-backed implementation.
-        attachments = _PlaceholderAttachmentStore()
         self._note_controller = NoteController(
             repository=self._note_repository,
-            attachments=attachments,
+            attachments=self._attachment_store,
             app_state=self._app_state,
         )
 
@@ -211,6 +164,7 @@ class NotesApplication(Gtk.Application):
         # :meth:`_initialise_runtime` ran first.
         assert self._note_repository is not None
         assert self._notebook_repository is not None
+        assert self._attachment_store is not None
         assert self._app_state is not None
         assert self._note_controller is not None
 
@@ -220,6 +174,7 @@ class NotesApplication(Gtk.Application):
             notebook_repository=self._notebook_repository,
             note_controller=self._note_controller,
             app_state=self._app_state,
+            attachment_store=self._attachment_store,
         )
         self._select_initial_note(self._note_repository, self._app_state)
         return window

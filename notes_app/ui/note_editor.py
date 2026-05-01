@@ -70,17 +70,49 @@ Principles & invariants
   does not yet have, which the strict-mode policy of the parser
   would surface as a parse error the moment the user clicked the
   premature button.
-* The image button at step 10 inserts a *placeholder* macro
-  (``image::filename.png[]``); the :class:`Gtk.FileDialog` flow that
-  attaches an actual file lands at step 11 alongside
-  :class:`AttachmentStoreProtocol`. The placeholder gives the user
-  a syntactically valid macro body to edit, and crucially does
-  **not** depend on attachments being plumbed in.
+* The image button opens a :class:`Gtk.FileDialog` (the GTK 4.10
+  current API; :class:`Gtk.FileChooserDialog` is deprecated). On a
+  successful pick it routes the chosen path through
+  :meth:`NoteController.add_attachment`, which performs validation
+  (size cap, MIME allow-list, readability) inside
+  :class:`AttachmentStore`. On success the controller returns an
+  :class:`Attachment`; the editor inserts an
+  ``image::<filename>[]`` macro referring to the attachment's
+  filename. On rejection the controller's
+  ``attachment-rejected`` signal emits a typed reason for the
+  outer toast layer to surface — the editor itself does not
+  insert anything in that case (no half-formed macro left in the
+  buffer).
+* The dialog *opener* is injected as a :data:`FileDialogOpener`
+  callable so tests can drive the post-pick code path
+  synchronously, without spinning a real dialog. Production wires
+  :func:`default_file_dialog_opener` from
+  :mod:`notes_app.ui._image_picker`, which constructs a
+  :class:`Gtk.FileDialog` configured with image-only filters and
+  invokes its asynchronous ``open()``. The injection pattern
+  mirrors :data:`TimeoutScheduler` / :data:`TimeoutCanceller`.
+* The image button is **disabled** while no note is currently
+  selected. Without a note id, attachments cannot be associated
+  with anything, and silently inserting a macro into an
+  empty/unselectable buffer would be confusing. The button's
+  sensitivity tracks :attr:`AppState.selected_note_id` via the
+  same selection-changed signal already wired for the buffer
+  load.
 * GTK 4 currency: :class:`GtkSource.Buffer` (not the deprecated
   :class:`GtkSource.Buffer` v3 paths), :meth:`Gtk.Box.append`,
   :meth:`Gtk.Button.set_child` (rather than the long-form box-of-
   icon-and-label). No deprecated-in-4.18 calls.
 """
+
+# pylint: disable=too-many-lines
+# Step 11 brought the editor just over pylint's default 1000-line
+# ceiling because the image-button file-dialog flow adds wiring at
+# every layer of the class: a new injected dependency, a new field,
+# a button-construction helper, two click-handler methods, and
+# selection-driven sensitivity tracking. The file-dialog opener
+# itself was already extracted to ``_image_picker.py``; further
+# splitting would scatter tightly coupled code across files for no
+# readability benefit.
 
 from __future__ import annotations
 
@@ -101,6 +133,10 @@ from notes_app import asciidoc as _asciidoc_pkg
 from notes_app.controllers.app_state import AppState
 from notes_app.controllers.note_controller import NoteController
 from notes_app.storage.protocols import NoteRepositoryProtocol
+from notes_app.ui._image_picker import (
+    FileDialogOpener,
+    default_file_dialog_opener,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -165,7 +201,17 @@ _HEADING_TEXT: Final[str] = "== Heading"
 _BULLET_LIST_TEXT: Final[str] = "* item"
 _NUMBERED_LIST_TEXT: Final[str] = ". item"
 _CODE_BLOCK_TEMPLATE: Final[str] = "----\ncode\n----"
-_IMAGE_PLACEHOLDER_TEXT: Final[str] = "image::filename.png[]"
+
+
+def _image_macro_for_filename(filename: str) -> str:
+    """Build the AsciiDoc image macro that references ``filename``.
+
+    The macro is the line ``image::<filename>[]`` — empty attribute
+    list because the v1 parser ignores image attributes. Centralised
+    so the editor's toolbar handler and any future "insert image"
+    code path share one source of truth.
+    """
+    return f"image::{filename}[]"
 
 _BOLD_DELIMITER: Final[str] = "*"
 _ITALIC_DELIMITER: Final[str] = "_"
@@ -475,9 +521,11 @@ class NoteEditor(Gtk.Box):  # pylint: disable=too-many-instance-attributes
     _app_state: AppState
     _schedule_timeout: TimeoutScheduler
     _cancel_timeout: TimeoutCanceller
+    _open_file_dialog: FileDialogOpener
 
     _buffer: GtkSource.Buffer
     _source_view: GtkSource.View
+    _image_button: Gtk.Button
 
     _current_note_id: str | None
     """Id of the note whose source is presently in the buffer.
@@ -517,6 +565,7 @@ class NoteEditor(Gtk.Box):  # pylint: disable=too-many-instance-attributes
         app_state: AppState,
         schedule_timeout: TimeoutScheduler = _default_timeout_scheduler,
         cancel_timeout: TimeoutCanceller = _default_timeout_canceller,
+        file_dialog_opener: FileDialogOpener = default_file_dialog_opener,
     ) -> None:
         super().__init__(orientation=Gtk.Orientation.VERTICAL, spacing=0)
         self._note_repository = note_repository
@@ -524,6 +573,7 @@ class NoteEditor(Gtk.Box):  # pylint: disable=too-many-instance-attributes
         self._app_state = app_state
         self._schedule_timeout = schedule_timeout
         self._cancel_timeout = cancel_timeout
+        self._open_file_dialog = file_dialog_opener
 
         self._current_note_id = None
         self._pending_save_handle = None
@@ -712,7 +762,7 @@ class NoteEditor(Gtk.Box):  # pylint: disable=too-many-instance-attributes
 
         toolbar.append(Gtk.Separator.new(Gtk.Orientation.VERTICAL))
 
-        # Blocks group: code block + image-macro placeholder.
+        # Blocks group: code block + image (file dialog).
         toolbar.append(
             self._make_insert_button(
                 label="</>",
@@ -720,13 +770,14 @@ class NoteEditor(Gtk.Box):  # pylint: disable=too-many-instance-attributes
                 text=_CODE_BLOCK_TEMPLATE,
             )
         )
-        toolbar.append(
-            self._make_insert_button(
-                label="Image",
-                tooltip="Insert image macro",
-                text=_IMAGE_PLACEHOLDER_TEXT,
-            )
-        )
+        # The image button is the one toolbar button whose handler is
+        # not a one-line wrapper around the pure helpers — it opens
+        # a file dialog, validates the pick through the controller,
+        # and only then inserts a macro. The button reference is kept
+        # on ``self`` so :meth:`_on_selected_note_changed` can toggle
+        # its sensitivity (no selection → image button disabled).
+        self._image_button = self._make_image_button()
+        toolbar.append(self._image_button)
 
         # A horizontal-expanding spacer pushes the trailing AsciiDoc
         # label to the right edge.
@@ -784,6 +835,84 @@ class NoteEditor(Gtk.Box):  # pylint: disable=too-many-instance-attributes
         )
         return button
 
+    def _make_image_button(self) -> Gtk.Button:
+        """Build the toolbar's Image button.
+
+        Unlike the other toolbar buttons, the image button's click
+        handler opens an injected file dialog, awaits the result
+        asynchronously, and on a non-cancelled pick routes the path
+        through :meth:`NoteController.add_attachment`. A successful
+        attachment add is followed by an ``image::<filename>[]``
+        macro insertion at the cursor; a rejection (size cap, MIME
+        type, unreadable file) emits the controller's typed
+        ``attachment-rejected`` signal — already wired by upstream
+        layers to a toast — and inserts nothing.
+
+        Initial sensitivity tracks the current selection: no note
+        selected → button disabled. The
+        :meth:`_on_selected_note_changed` handler updates this on
+        every selection change.
+        """
+        button = Gtk.Button.new_with_label("Image")
+        button.set_tooltip_text("Insert image")
+        button.set_sensitive(self._current_note_id is not None)
+        button.connect("clicked", lambda _b: self._on_image_button_clicked())
+        return button
+
+    def _on_image_button_clicked(self) -> None:
+        """Open the file dialog and queue the post-pick handler.
+
+        The button's sensitivity already gates this on a non-None
+        selection, but the defensive check inside is what protects
+        against a programmatic ``button.emit("clicked")`` from a
+        future caller that bypasses the sensitivity check.
+        """
+        if self._current_note_id is None:
+            return
+        # ``self`` is the parent widget for the dialog; the default
+        # opener walks up to the root window.
+        self._open_file_dialog(self, self._on_image_picked)
+
+    def _on_image_picked(self, source_path: Path | None) -> None:
+        """Handle the file-dialog result.
+
+        ``source_path`` is :data:`None` when the user cancelled or
+        when the dialog backend reported an error. In both cases we
+        insert nothing — silence is the correct UX for "user changed
+        their mind".
+
+        On a real path, route through
+        :meth:`NoteController.add_attachment`. The controller emits
+        the typed rejection signal on failure (and returns
+        :data:`None` to us); on success it returns an
+        :class:`Attachment` whose filename we splice into the macro.
+        """
+        if source_path is None:
+            return
+        if self._current_note_id is None:
+            # Selection cleared between the dialog opening and the
+            # callback. Without a note id the attachment cannot be
+            # associated with anything; silently bailing is the
+            # least-surprising outcome.
+            return
+        attachment = self._note_controller.add_attachment(
+            self._current_note_id,
+            source_path,
+        )
+        if attachment is None:
+            # Rejected — controller already emitted
+            # ``attachment-rejected``. The toast layer reacts; the
+            # editor leaves the buffer untouched.
+            return
+        # The macro references the *stored* filename (which equals
+        # ``source_path.name``). Using the stored filename rather
+        # than the original path means the macro stays valid even
+        # if the source file is later moved or deleted.
+        insert_block_line(
+            self._buffer,
+            text=_image_macro_for_filename(attachment.filename),
+        )
+
     # ------------------------------------------------------------------
     # Selection / load handling
     # ------------------------------------------------------------------
@@ -814,6 +943,13 @@ class NoteEditor(Gtk.Box):  # pylint: disable=too-many-instance-attributes
         set so the buffer's ``changed`` handler short-circuits; the
         load itself must not queue an auto-save back into the same
         row.
+
+        After the buffer is updated, the image button's sensitivity
+        is synchronised to the current selection: a ``None`` id
+        disables the button (no note to attach to), any other id
+        enables it. The toggle happens *after* the load so the
+        button's enabled state mirrors the actual editing target,
+        not a transient mid-load state.
         """
         note_id = self._app_state.selected_note_id
 
@@ -833,6 +969,15 @@ class NoteEditor(Gtk.Box):  # pylint: disable=too-many-instance-attributes
             self._current_note_id = note.id
         finally:
             self._loading_note = False
+            # ``_image_button`` may not exist yet on the very first
+            # ``__init__``-time call (the toolbar is built before
+            # the load runs). Guard with ``hasattr``; the toolbar
+            # construction sets the initial sensitivity itself, so
+            # the very first load does not need to touch the button.
+            if hasattr(self, "_image_button"):
+                self._image_button.set_sensitive(
+                    self._current_note_id is not None
+                )
 
     # ------------------------------------------------------------------
     # Auto-save plumbing

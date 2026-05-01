@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import unittest
 from datetime import UTC, datetime, timedelta
+from pathlib import Path
 
 import gi
 
@@ -14,6 +15,8 @@ from gi.repository import Gdk, Gtk  # noqa: E402
 
 from notes_app.config.defaults import TARGET_CHARS_PER_LINE
 from notes_app.controllers.app_state import AppState
+from notes_app.enums import MimeKind
+from notes_app.models.attachment import Attachment
 from notes_app.models.note import Note
 from notes_app.ui.note_view import (
     ArticleContainer,
@@ -105,6 +108,59 @@ class _FakeNoteRepository:
 
     def delete(self, _note_id: str) -> None:
         raise NotImplementedError
+
+
+class _FakeAttachmentStore:
+    """Minimal :class:`AttachmentStoreProtocol` impl for view tests.
+
+    The store is dict-backed: :attr:`metadata` is a per-note list of
+    :class:`Attachment` instances, :attr:`blobs` maps attachment id
+    to bytes. Tests prime both directly (no ``add_for_note`` flow
+    involved — that's the editor's concern) and assert on the
+    ``calls_*`` lists to verify the resolver called the right methods
+    in the right order.
+    """
+
+    metadata_by_note: dict[str, list[Attachment]]
+    blobs: dict[str, bytes]
+    list_calls: list[str]
+    get_bytes_calls: list[str]
+
+    def __init__(self) -> None:
+        self.metadata_by_note = {}
+        self.blobs = {}
+        self.list_calls = []
+        self.get_bytes_calls = []
+
+    # --- helpers used by tests to seed the store ---
+
+    def seed(self, note_id: str, filename: str, data: bytes) -> Attachment:
+        attachment = Attachment(
+            id=f"att-{len(self.blobs) + 1}",
+            note_id=note_id,
+            filename=filename,
+            byte_size=len(data),
+            mime_type=MimeKind.PNG,
+        )
+        self.metadata_by_note.setdefault(note_id, []).append(attachment)
+        self.blobs[attachment.id] = data
+        return attachment
+
+    # --- protocol surface ---
+
+    def add_for_note(self, _note_id: str, _source_path: Path) -> Attachment:
+        raise NotImplementedError
+
+    def remove(self, _attachment_id: str) -> None:
+        raise NotImplementedError
+
+    def list_for_note(self, note_id: str) -> list[Attachment]:
+        self.list_calls.append(note_id)
+        return list(self.metadata_by_note.get(note_id, ()))
+
+    def get_bytes(self, attachment_id: str) -> bytes:
+        self.get_bytes_calls.append(attachment_id)
+        return self.blobs[attachment_id]
 
 
 # ---------------------------------------------------------------------------
@@ -402,6 +458,173 @@ def _find_text_view_buffer(view: NoteView) -> Gtk.TextBuffer:
         f"article child should be a TextView, got {type(text_view).__name__}"
     )
     return text_view.get_buffer()
+
+
+# ---------------------------------------------------------------------------
+# Image-bytes resolver: integration with AttachmentStoreProtocol
+# ---------------------------------------------------------------------------
+
+
+_PNG_FIXTURE: bytes = bytes.fromhex(
+    "89504e470d0a1a0a"
+    "0000000d49484452000000010000000108060000001f15c489"
+    "0000000a49444154789c63000100000500010d0a2db4"
+    "0000000049454e44ae426082"
+)
+"""Real-shape PNG bytes for resolver-round-trip tests.
+
+The renderer-level tests use the same shape; here the bytes are
+opaque payload — the resolver does not decode, only fetches.
+"""
+
+
+@unittest.skipUnless(_display_available(), "no GDK display")
+class NoteViewImageResolverTests(unittest.TestCase):
+    """Pin the wiring between :class:`NoteView` and the injected
+    :class:`AttachmentStoreProtocol`. The resolver is the
+    construction-time hook the renderer holds, so we exercise it via
+    :attr:`NoteView.image_bytes_resolver` rather than rendering a
+    full document — the renderer is tested elsewhere.
+    """
+
+    def _build_view(
+        self,
+        *,
+        attachments: _FakeAttachmentStore | None,
+    ) -> tuple[NoteView, _FakeNoteRepository, AppState]:
+        repo = _FakeNoteRepository()
+        repo.notes["note-A"] = _make_note("note-A")
+        repo.notes["note-B"] = _make_note(
+            "note-B", source="= Other\n\nbody.\n"
+        )
+        state = AppState()
+        view = NoteView(
+            note_repository=repo,
+            app_state=state,
+            attachments=attachments,
+        )
+        return view, repo, state
+
+    def test_resolver_returns_empty_bytes_when_no_store_wired(self) -> None:
+        # Without an attachment store, every resolver call is the
+        # placeholder. Matches the step-8 behaviour for tests that
+        # don't care about images.
+        view, _, state = self._build_view(attachments=None)
+        state.set_selected_note_id("note-A")
+        self.assertEqual(view.image_bytes_resolver("any.png"), b"")
+
+    def test_resolver_returns_empty_bytes_when_no_note_selected(self) -> None:
+        store = _FakeAttachmentStore()
+        view, _, _state = self._build_view(attachments=store)
+        # Construction with no selection leaves _current_note_id None.
+        self.assertIsNone(view.current_note_id)
+        # Resolver short-circuits before consulting the store.
+        self.assertEqual(view.image_bytes_resolver("foo.png"), b"")
+        self.assertEqual(store.list_calls, [])
+        self.assertEqual(store.get_bytes_calls, [])
+
+    def test_resolver_returns_attached_bytes_for_matching_filename(self) -> None:
+        store = _FakeAttachmentStore()
+        attachment = store.seed("note-A", "photo.png", _PNG_FIXTURE)
+        view, _, state = self._build_view(attachments=store)
+
+        state.set_selected_note_id("note-A")
+        self.assertEqual(view.current_note_id, "note-A")
+
+        result = view.image_bytes_resolver("photo.png")
+        self.assertEqual(result, _PNG_FIXTURE)
+
+        # The resolver consulted the store correctly: list scoped to
+        # the current note id, then get_bytes for the matching id.
+        self.assertIn("note-A", store.list_calls)
+        self.assertEqual(store.get_bytes_calls, [attachment.id])
+
+    def test_resolver_returns_empty_bytes_for_unknown_filename(self) -> None:
+        store = _FakeAttachmentStore()
+        store.seed("note-A", "real.png", _PNG_FIXTURE)
+        view, _, state = self._build_view(attachments=store)
+        state.set_selected_note_id("note-A")
+
+        result = view.image_bytes_resolver("missing.png")
+        # Empty bytes → renderer falls back to placeholder. The list
+        # was consulted, but get_bytes was NOT called for an
+        # unmatched filename — that would be a wasted BLOB read.
+        self.assertEqual(result, b"")
+        self.assertEqual(store.get_bytes_calls, [])
+
+    def test_resolver_scopes_lookup_to_current_note(self) -> None:
+        # Two notes, each with a same-named attachment. Switching
+        # selection must change the resolver's answer.
+        store = _FakeAttachmentStore()
+        store.seed("note-A", "shared.png", b"A's bytes")
+        store.seed("note-B", "shared.png", b"B's bytes")
+        view, _, state = self._build_view(attachments=store)
+
+        state.set_selected_note_id("note-A")
+        self.assertEqual(view.image_bytes_resolver("shared.png"), b"A's bytes")
+
+        state.set_selected_note_id("note-B")
+        self.assertEqual(view.image_bytes_resolver("shared.png"), b"B's bytes")
+
+    def test_resolver_clears_when_selection_clears(self) -> None:
+        store = _FakeAttachmentStore()
+        store.seed("note-A", "photo.png", _PNG_FIXTURE)
+        view, _, state = self._build_view(attachments=store)
+        state.set_selected_note_id("note-A")
+        # Sanity: before clearing, lookup returns bytes.
+        self.assertEqual(view.image_bytes_resolver("photo.png"), _PNG_FIXTURE)
+        store.list_calls.clear()
+        store.get_bytes_calls.clear()
+
+        state.set_selected_note_id(None)
+        # After clearing, the resolver does not touch the store.
+        self.assertEqual(view.image_bytes_resolver("photo.png"), b"")
+        self.assertEqual(store.list_calls, [])
+        self.assertEqual(store.get_bytes_calls, [])
+        self.assertIsNone(view.current_note_id)
+
+    def test_resolver_clears_on_unknown_selection(self) -> None:
+        # A stale selection (e.g. note deleted out from under the
+        # view) must not leave the resolver pointing at the old id.
+        store = _FakeAttachmentStore()
+        store.seed("note-A", "photo.png", _PNG_FIXTURE)
+        view, _, state = self._build_view(attachments=store)
+        state.set_selected_note_id("note-A")
+        self.assertEqual(view.current_note_id, "note-A")
+
+        state.set_selected_note_id("does-not-exist")
+        self.assertIsNone(view.current_note_id)
+        self.assertEqual(view.image_bytes_resolver("photo.png"), b"")
+
+
+@unittest.skipUnless(_display_available(), "no GDK display")
+class NoteViewAttachmentSmokeTests(unittest.TestCase):
+    """Construction smoke: ``NoteView`` accepts an ``attachments``
+    parameter and renders cleanly with one wired."""
+
+    def test_constructs_with_attachment_store(self) -> None:
+        repo = _FakeNoteRepository()
+        repo.notes["note-A"] = _make_note("note-A")
+        store = _FakeAttachmentStore()
+        state = AppState()
+        view = NoteView(
+            note_repository=repo,
+            app_state=state,
+            attachments=store,
+        )
+        self.assertIsInstance(view, Gtk.Box)
+        # No selection at construction → no lookup yet.
+        self.assertEqual(store.list_calls, [])
+
+    def test_default_attachments_is_none_for_back_compat(self) -> None:
+        # Existing callers (tests, the legacy main_window construction
+        # path) build ``NoteView`` without an ``attachments`` kwarg.
+        # That must keep working — the parameter has a default of
+        # ``None`` and the resolver falls back to placeholder bytes.
+        repo = _FakeNoteRepository()
+        state = AppState()
+        view = NoteView(note_repository=repo, app_state=state)
+        self.assertEqual(view.image_bytes_resolver("any.png"), b"")
 
 
 if __name__ == "__main__":

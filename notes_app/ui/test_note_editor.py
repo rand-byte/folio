@@ -18,8 +18,10 @@ from gi.repository import Gdk, Gtk, GtkSource  # noqa: E402
 
 from notes_app.controllers.app_state import AppState
 from notes_app.controllers.note_controller import NoteController
+from notes_app.enums import AttachmentRejectionReason, MimeKind
 from notes_app.models.attachment import Attachment
 from notes_app.models.note import Note
+from notes_app.storage.protocols import AttachmentRejected
 from notes_app.ui.note_editor import (
     AUTOSAVE_DEBOUNCE_MS,
     LANGUAGE_FILE_NAME,
@@ -27,6 +29,7 @@ from notes_app.ui.note_editor import (
     NoteEditor,
     _PLACEHOLDER_SELECTION_TEXT,
     _bundled_language_dir,
+    _image_macro_for_filename,
     buffer_text,
     insert_block_line,
     load_asciidoc_language,
@@ -158,8 +161,42 @@ class _RaisingNoteRepository(  # pylint: disable=abstract-method
 
 
 class _FakeAttachmentStore:
-    def add_for_note(self, _note_id: str, _source_path: Path) -> Attachment:
-        raise NotImplementedError
+    """Configurable :class:`AttachmentStoreProtocol` fake.
+
+    Default behaviour: ``add_for_note`` returns a successful
+    :class:`Attachment` whose filename echoes the source path's name.
+    Tests that want a rejection assign a non-``None``
+    :attr:`reject_with`; the next call raises
+    :class:`AttachmentRejected` with that reason.
+
+    Other methods are implemented as ``raise NotImplementedError``
+    because the editor does not exercise them; a test that
+    accidentally invokes one fails loudly rather than silently
+    returning empty data.
+    """
+
+    add_calls: list[tuple[str, Path]]
+    reject_with: AttachmentRejectionReason | None
+    next_attachment_id: int
+
+    def __init__(self) -> None:
+        self.add_calls = []
+        self.reject_with = None
+        self.next_attachment_id = 1
+
+    def add_for_note(self, note_id: str, source_path: Path) -> Attachment:
+        self.add_calls.append((note_id, source_path))
+        if self.reject_with is not None:
+            raise AttachmentRejected(self.reject_with)
+        attachment = Attachment(
+            id=f"att-{self.next_attachment_id}",
+            note_id=note_id,
+            filename=source_path.name,
+            byte_size=42,
+            mime_type=MimeKind.PNG,
+        )
+        self.next_attachment_id += 1
+        return attachment
 
     def remove(self, _attachment_id: str) -> None:
         raise NotImplementedError
@@ -169,6 +206,47 @@ class _FakeAttachmentStore:
 
     def get_bytes(self, _attachment_id: str) -> bytes:
         raise NotImplementedError
+
+
+class _FakeFileDialogOpener:
+    """Synchronous stand-in for :data:`FileDialogOpener`.
+
+    The real opener is asynchronous (:class:`Gtk.FileDialog.open`
+    schedules a callback). The fake captures the most recent
+    callback and result-receiver so tests can drive the post-pick
+    code path explicitly.
+
+    To simulate a successful pick, call :meth:`deliver` with a
+    :class:`Path`. To simulate a cancellation, call
+    :meth:`deliver(None)`. Until :meth:`deliver` is called the
+    editor's image-button click is "in flight" — the buffer is
+    untouched, the controller has not been called, and the test
+    can assert on that intermediate state.
+    """
+
+    open_calls: list[Gtk.Widget]
+    pending_callback: Callable[[Path | None], None] | None
+
+    def __init__(self) -> None:
+        self.open_calls = []
+        self.pending_callback = None
+
+    def __call__(
+        self,
+        parent: Gtk.Widget,
+        on_result: Callable[[Path | None], None],
+    ) -> None:
+        self.open_calls.append(parent)
+        self.pending_callback = on_result
+
+    def deliver(self, path: Path | None) -> None:
+        callback = self.pending_callback
+        if callback is None:
+            raise AssertionError(
+                "FakeFileDialogOpener.deliver() called with no pending callback"
+            )
+        self.pending_callback = None
+        callback(path)
 
 
 class _FakeTimeoutBackend:
@@ -741,10 +819,12 @@ class NoteEditorToolbarTests(unittest.TestCase):
             child = child.get_next_sibling()
         return buttons
 
-    def test_toolbar_exposes_the_step_10_core_button_set(self) -> None:
+    def test_toolbar_exposes_the_step_11_core_button_set(self) -> None:
         # Tooltips drive the assertion because button labels are
         # short ("H", "B", "I", …) and could collide. Tooltips are
-        # the user-facing identification anyway.
+        # the user-facing identification anyway. The image button's
+        # tooltip changed from "Insert image macro" (step 10
+        # placeholder) to "Insert image" (step 11 file dialog).
         editor = self._make_editor()
         tooltips = {
             b.get_tooltip_text() for b in self._toolbar_buttons(editor)
@@ -760,7 +840,7 @@ class NoteEditorToolbarTests(unittest.TestCase):
                 "Bullet list",
                 "Numbered list",
                 "Code block",
-                "Insert image macro",
+                "Insert image",
             },
         )
 
@@ -788,6 +868,286 @@ class NoteEditorToolbarTests(unittest.TestCase):
         )
         heading_button.emit("clicked")
         self.assertEqual(buffer_text(editor._buffer), "== Heading\n")
+
+
+# ---------------------------------------------------------------------------
+# _image_macro_for_filename
+# ---------------------------------------------------------------------------
+
+
+class ImageMacroForFilenameTests(unittest.TestCase):
+    """Pure helper — no fixtures."""
+
+    def test_basic_filename(self) -> None:
+        self.assertEqual(
+            _image_macro_for_filename("photo.png"),
+            "image::photo.png[]",
+        )
+
+    def test_filename_with_spaces(self) -> None:
+        # AsciiDoc accepts spaces in image filenames; the macro syntax
+        # does not require quoting. The renderer's parser pins this
+        # behaviour.
+        self.assertEqual(
+            _image_macro_for_filename("my photo.jpg"),
+            "image::my photo.jpg[]",
+        )
+
+    def test_filename_with_unicode(self) -> None:
+        self.assertEqual(
+            _image_macro_for_filename("café.png"),
+            "image::café.png[]",
+        )
+
+
+# ---------------------------------------------------------------------------
+# Image button — file-dialog flow
+# ---------------------------------------------------------------------------
+
+
+@unittest.skipUnless(_display_available(), "no GDK display")
+class ImageButtonDialogFlowTests(unittest.TestCase):
+    """End-to-end exercise of the editor's image button.
+
+    Each test follows the same shape: build an editor wired to a
+    :class:`_FakeAttachmentStore` and a :class:`_FakeFileDialogOpener`,
+    click the Image button, then ``.deliver(...)`` a result and
+    assert on the resulting buffer / store state.
+    """
+
+    def _build_editor(
+        self,
+        *,
+        select_note: bool = True,
+    ) -> tuple[
+        NoteEditor,
+        _FakeNoteRepository,
+        _FakeAttachmentStore,
+        _FakeFileDialogOpener,
+        NoteController,
+    ]:
+        repo = _FakeNoteRepository()
+        repo.notes["n1"] = _make_note("n1", source="")
+        store = _FakeAttachmentStore()
+        state = AppState()
+        if select_note:
+            state.set_selected_note_id("n1")
+        controller = NoteController(
+            repository=repo,
+            attachments=store,
+            app_state=state,
+        )
+        backend = _FakeTimeoutBackend()
+        opener = _FakeFileDialogOpener()
+        editor = NoteEditor(
+            note_repository=repo,
+            note_controller=controller,
+            app_state=state,
+            schedule_timeout=backend.schedule,
+            cancel_timeout=backend.cancel,
+            file_dialog_opener=opener,
+        )
+        return editor, repo, store, opener, controller
+
+    def _image_button(self, editor: NoteEditor) -> Gtk.Button:
+        toolbar = editor.get_first_child()
+        assert isinstance(toolbar, Gtk.Box)
+        child = toolbar.get_first_child()
+        while child is not None:
+            if (
+                isinstance(child, Gtk.Button)
+                and child.get_tooltip_text() == "Insert image"
+            ):
+                return child
+            child = child.get_next_sibling()
+        raise AssertionError("no image button on the toolbar")
+
+    def test_clicking_image_button_opens_the_dialog(self) -> None:
+        editor, _repo, _store, opener, _controller = self._build_editor()
+        self._image_button(editor).emit("clicked")
+        self.assertEqual(len(opener.open_calls), 1)
+        # The parent passed to the opener is the editor itself —
+        # the default opener walks ``get_root()`` from there to find
+        # the window. At construction time before ``set_visible``
+        # the editor has no root window; that's fine, the dialog
+        # falls through to a None parent.
+        self.assertIs(opener.open_calls[0], editor)
+
+    def test_successful_pick_inserts_image_macro(self) -> None:
+        editor, _repo, store, opener, _controller = self._build_editor()
+        self._image_button(editor).emit("clicked")
+
+        opener.deliver(Path("/tmp/photo.png"))
+
+        # The store recorded the attempt, returned a fresh attachment.
+        self.assertEqual(store.add_calls, [("n1", Path("/tmp/photo.png"))])
+        # The buffer now contains the image macro for that filename.
+        self.assertEqual(
+            buffer_text(editor._buffer),
+            "image::photo.png[]\n",
+        )
+
+    def test_macro_uses_attachments_filename_not_full_path(self) -> None:
+        # The macro references the *filename*, not the full path —
+        # that's the only stable identifier for the in-DB attachment.
+        editor, _repo, _store, opener, _controller = self._build_editor()
+        self._image_button(editor).emit("clicked")
+
+        opener.deliver(Path("/some/nested/dir/holiday.jpg"))
+
+        self.assertIn("image::holiday.jpg[]", buffer_text(editor._buffer))
+        self.assertNotIn("/some/nested/dir", buffer_text(editor._buffer))
+
+    def test_cancelled_pick_inserts_nothing(self) -> None:
+        editor, _repo, store, opener, _controller = self._build_editor()
+        # Pre-load some content so we can verify it's untouched.
+        editor._buffer.set_text("existing content\n")
+        self._image_button(editor).emit("clicked")
+
+        opener.deliver(None)  # user cancelled
+
+        # Controller never invoked, buffer untouched.
+        self.assertEqual(store.add_calls, [])
+        self.assertEqual(buffer_text(editor._buffer), "existing content\n")
+
+    def test_rejected_attachment_inserts_nothing(self) -> None:
+        editor, _repo, store, opener, controller = self._build_editor()
+        # Capture the rejection signal so we can assert it fires.
+        rejection_calls: list[AttachmentRejectionReason] = []
+        controller.connect(
+            "attachment-rejected",
+            lambda _c, reason: rejection_calls.append(reason),
+        )
+        store.reject_with = AttachmentRejectionReason.EXCEEDS_SIZE_LIMIT
+
+        editor._buffer.set_text("")
+        self._image_button(editor).emit("clicked")
+        opener.deliver(Path("/tmp/huge.png"))
+
+        # Store was consulted, but no macro was inserted.
+        self.assertEqual(store.add_calls, [("n1", Path("/tmp/huge.png"))])
+        self.assertEqual(buffer_text(editor._buffer), "")
+        # The controller's typed-rejection signal fired with the
+        # right reason — toast layer would surface this.
+        self.assertEqual(
+            rejection_calls,
+            [AttachmentRejectionReason.EXCEEDS_SIZE_LIMIT],
+        )
+
+    def test_each_rejection_reason_inserts_nothing(self) -> None:
+        # Belt-and-braces: every reason in
+        # AttachmentRejectionReason maps to "no macro inserted".
+        for reason in AttachmentRejectionReason:
+            with self.subTest(reason=reason.name):
+                (
+                    editor, _repo, store, opener, _controller,
+                ) = self._build_editor()
+                store.reject_with = reason
+                editor._buffer.set_text("")
+                self._image_button(editor).emit("clicked")
+                opener.deliver(Path(f"/tmp/{reason.name}.png"))
+                self.assertEqual(buffer_text(editor._buffer), "")
+
+    def test_image_button_disabled_when_no_note_selected(self) -> None:
+        editor, _repo, _store, _opener, _controller = self._build_editor(
+            select_note=False,
+        )
+        # No selection at construction → button starts disabled.
+        self.assertFalse(self._image_button(editor).get_sensitive())
+
+    def test_image_button_enabled_after_selection(self) -> None:
+        editor, _repo, _store, _opener, _controller = self._build_editor(
+            select_note=False,
+        )
+        # Selecting a note enables the button.
+        editor._app_state.set_selected_note_id("n1")
+        self.assertTrue(self._image_button(editor).get_sensitive())
+
+    def test_image_button_redisabled_when_selection_clears(self) -> None:
+        editor, _repo, _store, _opener, _controller = self._build_editor()
+        # Sanity: starts enabled.
+        self.assertTrue(self._image_button(editor).get_sensitive())
+
+        editor._app_state.set_selected_note_id(None)
+        self.assertFalse(self._image_button(editor).get_sensitive())
+
+    def test_click_with_no_selection_does_not_open_dialog(self) -> None:
+        # Defensive: the button is disabled in normal use, but a
+        # programmatic ``emit("clicked")`` bypasses the sensitivity
+        # check. The handler must still bail rather than opening a
+        # dialog with no note id to attach to.
+        editor, _repo, _store, opener, _controller = self._build_editor(
+            select_note=False,
+        )
+        self._image_button(editor).emit("clicked")
+        self.assertEqual(opener.open_calls, [])
+
+    def test_selection_clearing_during_dialog_drops_the_pick(self) -> None:
+        # The dialog is asynchronous in production. Between opening
+        # and the user picking, the selection might change to None
+        # (e.g. the displayed note was deleted). The post-pick
+        # handler must bail rather than calling controller methods
+        # with a stale id.
+        editor, _repo, store, opener, _controller = self._build_editor()
+        self._image_button(editor).emit("clicked")
+        # User clears selection while dialog is open.
+        editor._app_state.set_selected_note_id(None)
+        # Now the pick comes back.
+        opener.deliver(Path("/tmp/photo.png"))
+
+        # Nothing was added to the store; nothing inserted.
+        self.assertEqual(store.add_calls, [])
+        self.assertEqual(buffer_text(editor._buffer), "")
+
+    def test_macro_insertion_triggers_autosave(self) -> None:
+        # After a successful pick, the buffer change must trigger
+        # the same auto-save flow as user typing — otherwise the
+        # macro would be lost on the next selection change.
+        repo = _FakeNoteRepository()
+        repo.notes["n1"] = _make_note("n1", source="")
+        store = _FakeAttachmentStore()
+        state = AppState()
+        state.set_selected_note_id("n1")
+        controller = NoteController(
+            repository=repo,
+            attachments=store,
+            app_state=state,
+        )
+        backend = _FakeTimeoutBackend()
+        opener = _FakeFileDialogOpener()
+        editor = NoteEditor(
+            note_repository=repo,
+            note_controller=controller,
+            app_state=state,
+            schedule_timeout=backend.schedule,
+            cancel_timeout=backend.cancel,
+            file_dialog_opener=opener,
+        )
+
+        # Emit click → deliver pick.
+        toolbar = editor.get_first_child()
+        assert isinstance(toolbar, Gtk.Box)
+        button: Gtk.Button | None = None
+        child = toolbar.get_first_child()
+        while child is not None:
+            if (
+                isinstance(child, Gtk.Button)
+                and child.get_tooltip_text() == "Insert image"
+            ):
+                button = child
+                break
+            child = child.get_next_sibling()
+        assert button is not None
+        button.emit("clicked")
+        opener.deliver(Path("/tmp/x.png"))
+
+        # An auto-save was scheduled by the buffer change.
+        self.assertEqual(backend.pending_count, 1)
+        backend.fire_pending()
+        # The fired save included the inserted macro.
+        self.assertEqual(len(repo.update_calls), 1)
+        _, saved_source, _ = repo.update_calls[0]
+        self.assertIn("image::x.png[]", saved_source)
 
 
 if __name__ == "__main__":

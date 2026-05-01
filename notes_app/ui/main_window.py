@@ -38,7 +38,12 @@ Principles & invariants
 * The construction signature is the long-term one: caller
   (:class:`NotesApplication`) passes ``application``,
   ``note_repository``, ``notebook_repository``, ``note_controller``,
-  and ``app_state``, all keyword-only. Future build steps that add
+  ``app_state``, and (from build step 11) ``attachment_store``, all
+  keyword-only. ``attachment_store`` is optional with a ``None``
+  default so the existing per-pane test suites that pre-date step
+  11 keep constructing :class:`MainWindow` without a fourth
+  injected dependency; in that mode :class:`NoteView` falls back
+  to its placeholder image resolver. Future build steps that add
   toolbar / status-bar children extend the window's child set, but
   leave its signal subscriptions confined to the same single
   view-mode dispatch.
@@ -70,6 +75,7 @@ from notes_app.controllers.app_state import AppState
 from notes_app.controllers.note_controller import NoteController
 from notes_app.enums import ViewMode
 from notes_app.storage.protocols import (
+    AttachmentStoreProtocol,
     NoteRepositoryProtocol,
     NotebookRepositoryProtocol,
 )
@@ -179,6 +185,7 @@ class MainWindow(  # pylint: disable=too-many-instance-attributes
     _notebook_repository: NotebookRepositoryProtocol
     _note_controller: NoteController
     _app_state: AppState
+    _attachment_store: AttachmentStoreProtocol | None
     _sidebar: Sidebar
     _note_list: NoteList
     _note_view: NoteView
@@ -193,12 +200,14 @@ class MainWindow(  # pylint: disable=too-many-instance-attributes
         notebook_repository: NotebookRepositoryProtocol,
         note_controller: NoteController,
         app_state: AppState,
+        attachment_store: AttachmentStoreProtocol | None = None,
     ) -> None:
         super().__init__(application=application)
         self._note_repository = note_repository
         self._notebook_repository = notebook_repository
         self._note_controller = note_controller
         self._app_state = app_state
+        self._attachment_store = attachment_store
 
         self.set_title(_WINDOW_TITLE)
         self.set_default_size(
@@ -218,9 +227,15 @@ class MainWindow(  # pylint: disable=too-many-instance-attributes
             notebook_repository=notebook_repository,
             app_state=app_state,
         )
+        # NoteView accepts the attachment store so its internal
+        # image-bytes resolver can fetch attachment BLOBs by
+        # filename. ``None`` is acceptable here — the resolver
+        # falls back to the placeholder bytes contract from build
+        # step 8 — and existing tests rely on that default.
         self._note_view = NoteView(
             note_repository=note_repository,
             app_state=app_state,
+            attachments=attachment_store,
         )
         self._note_editor = NoteEditor(
             note_repository=note_repository,
