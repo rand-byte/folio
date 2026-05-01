@@ -17,6 +17,13 @@ Principles & invariants
   exactly the design's behaviour. :meth:`Gtk.Paned.set_start_child`
   and :meth:`Gtk.Paned.set_end_child` are the GTK 4 way to populate
   a paned; the older ``pack1`` / ``pack2`` API was deprecated in 4.0.
+* As of build step 12 a :class:`Toolbar` is set as the window's
+  title bar via :meth:`Gtk.Window.set_titlebar`. The header bar
+  carries the New button, the global search entry, the breadcrumb
+  label, the View / Source segmented toggle, and the More menu —
+  matching the design's titlebar. ``set_titlebar`` is independent
+  of ``set_child``, so the existing outer-paned-as-child invariant
+  is preserved unchanged.
 * The window subscribes to a single :class:`AppState` signal —
   ``view-mode-changed`` — and uses it to swap the stack's visible
   child between the rendered view and the source editor. Every
@@ -83,6 +90,7 @@ from notes_app.ui.note_editor import NoteEditor
 from notes_app.ui.note_list import NoteList
 from notes_app.ui.note_view import NoteView
 from notes_app.ui.sidebar import Sidebar
+from notes_app.ui.toolbar import Toolbar
 
 
 # ---------------------------------------------------------------------------
@@ -186,6 +194,7 @@ class MainWindow(  # pylint: disable=too-many-instance-attributes
     _note_controller: NoteController
     _app_state: AppState
     _attachment_store: AttachmentStoreProtocol | None
+    _toolbar: Toolbar
     _sidebar: Sidebar
     _note_list: NoteList
     _note_view: NoteView
@@ -214,6 +223,19 @@ class MainWindow(  # pylint: disable=too-many-instance-attributes
             _DEFAULT_WINDOW_WIDTH_PX,
             _DEFAULT_WINDOW_HEIGHT_PX,
         )
+
+        # Build the top header bar (toolbar) and install it as the
+        # window's title bar. ``set_titlebar`` replaces the default
+        # window decorations with our custom widget while preserving
+        # the standard min/max/close buttons that the header bar
+        # automatically adds to its end.
+        self._toolbar = Toolbar(
+            note_repository=note_repository,
+            notebook_repository=notebook_repository,
+            note_controller=note_controller,
+            app_state=app_state,
+        )
+        self.set_titlebar(self._toolbar)
 
         # Build the three panes. Each subscribes to AppState itself;
         # the window does not arbitrate between them.
