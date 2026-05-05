@@ -2,21 +2,23 @@
 <!--
   Notes App AsciiDoc subset — GtkSourceView 5 language definition.
 
-  This grammar covers EXACTLY the constructs the parser at build step 4
-  understands (see notes_app/asciidoc/parser.py and section 7 of
-  plan.md): document title, sections (== through six equals signs),
-  unordered lists (asterisk item), ordered lists (dot item), code
-  blocks (four-hyphen fences, with optional [source,lang] directive),
-  image macros (image::file[]), and the four inline styles bold (*x*),
-  italic (_x_), strikethrough ([.line-through]#x#), and underline
-  ([.underline]#x#). Anything outside this subset is intentionally NOT
-  highlighted; it is a parse error at render time and the editor lets
-  the raw text show through.
+  This grammar covers the constructs the parser understands as of build
+  step 13 (see notes_app/asciidoc/parser.py and section 7 of plan.md):
+  document title, sections (== through six equals signs), unordered
+  lists (asterisk item), ordered lists (dot item), code blocks
+  (four-hyphen fences, with optional [source,lang] directive), image
+  macros (image::file[]), the four inline styles bold (*x*), italic
+  (_x_), strikethrough ([.line-through]#x#), and underline
+  ([.underline]#x#), inline monospace (`x`), and links in three forms:
+  bare URL (https://x), URL-with-text (https://x[label]), and the
+  link:URL[label] macro. Anything outside this subset is intentionally
+  NOT highlighted; it is a parse error at render time and the editor
+  lets the raw text show through.
 
-  Build steps 13 to 15 extend this file with monospace, links, tables,
-  admonitions, and blockquotes. Adding those constructs here ahead of
-  time would highlight text the parser still rejects, which is exactly
-  the dishonest UX feedback we are trying to avoid.
+  Build steps 14 and 15 extend this file with tables, admonitions, and
+  blockquotes. Adding those constructs here ahead of time would
+  highlight text the parser still rejects, which is exactly the
+  dishonest UX feedback we are trying to avoid.
 
   Style ids reference def.lang (shipped with GtkSourceView) so any
   installed style scheme renders sensible colours without bundling our
@@ -41,6 +43,9 @@
     <style id="italic"       name="Italic"         map-to="def:emphasis"/>
     <style id="strikethrough" name="Strikethrough" map-to="def:deletion"/>
     <style id="underline"    name="Underline"      map-to="def:underlined"/>
+    <style id="monospace"    name="Monospace"      map-to="def:inline-code"/>
+    <style id="link"         name="Link"           map-to="def:link-text"/>
+    <style id="link-destination" name="Link Destination" map-to="def:link-destination"/>
     <style id="list-marker"  name="List Marker"    map-to="def:list-marker"/>
     <style id="code-block"   name="Code Block"     map-to="def:preformatted-section"/>
     <style id="code-fence"   name="Code Fence"     map-to="def:preprocessor"/>
@@ -152,10 +157,74 @@
       <match>\[\.underline\]#[^#\n]+#</match>
     </context>
 
+    <!--
+      Inline monospace: a backtick pair on a single line. The body
+      is matched verbatim by the parser; in the editor we colour the
+      whole run including the backticks so the user sees the
+      delimiters.
+    -->
+    <context id="inline-monospace" style-ref="monospace" class="no-spell-check">
+      <match>`[^`\n]*`</match>
+    </context>
+
+    <!--
+      Bare URL: http://, https://, mailto: at a word boundary,
+      followed by URL characters until whitespace, '[', or one of
+      the inline marker characters '*', '_', '#', '`' that the
+      parser also uses as URL terminators. The (?: ... ) wrapper
+      keeps the alternatives in one group so the colouring covers
+      the whole URL run.
+
+      The trailing-text variant (https://x[label]) is matched by a
+      separate context below so the LABEL portion is coloured as
+      link text rather than link destination.
+    -->
+    <context id="bare-url" style-ref="link-destination">
+      <match>(?&lt;![A-Za-z0-9])(?:https?://|mailto:)[^\s\[*_`#]+</match>
+    </context>
+
+    <!--
+      URL-with-text: https://x[label] / http://x[label] /
+      mailto:x[label]. The whole run is coloured as a link, with
+      the URL portion in the destination colour and the label in
+      the link colour. Implemented as a region so the inner styles
+      can be split.
+    -->
+    <context id="url-with-text" style-ref="link">
+      <start>(?&lt;![A-Za-z0-9])(?:https?://|mailto:)[^\s\[*_`#]+\[</start>
+      <end>\]</end>
+      <include>
+        <context sub-pattern="0" where="start" style-ref="link-destination"/>
+        <context sub-pattern="0" where="end" style-ref="link-destination"/>
+      </include>
+    </context>
+
+    <!--
+      link: macro: link:URL[label]. The macro form accepts any
+      syntactically-valid URL scheme; the parser rejects schemes
+      outside the allow-list, but the editor cannot reproduce that
+      check without a lexer pass, so we colour the macro shape
+      regardless and let the rendered view's error panel catch
+      forbidden schemes.
+    -->
+    <context id="link-macro" style-ref="link">
+      <start>(?&lt;![A-Za-z0-9])link:[A-Za-z][A-Za-z0-9+.\-]*:[^\s\[*_`#]*\[</start>
+      <end>\]</end>
+      <include>
+        <context sub-pattern="0" where="start" style-ref="link-destination"/>
+        <context sub-pattern="0" where="end" style-ref="link-destination"/>
+      </include>
+    </context>
+
     <!-- Top-level dispatch: order matters for overlapping patterns.
          Block-level constructs are tried first so a line beginning
          with ``*`` is recognised as a list item before the inline
-         bold context can match the asterisk. -->
+         bold context can match the asterisk. The link contexts
+         appear before bare-url because url-with-text and the link:
+         macro both contain a bare URL at their start — without
+         the precedence, the bare-url match would consume the
+         scheme and prefix and prevent the bracketed-text region
+         from being recognised. -->
     <context id="notes-asciidoc">
       <include>
         <context ref="code-block"/>
@@ -164,6 +233,10 @@
         <context ref="image-macro"/>
         <context ref="unordered-list-bullet"/>
         <context ref="ordered-list-bullet"/>
+        <context ref="link-macro"/>
+        <context ref="url-with-text"/>
+        <context ref="bare-url"/>
+        <context ref="inline-monospace"/>
         <context ref="inline-strikethrough"/>
         <context ref="inline-underline"/>
         <context ref="inline-bold"/>

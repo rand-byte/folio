@@ -22,16 +22,19 @@ Principles & invariants
 * No node refers to filesystem state, GTK widgets, or storage. The AST
   is pure data: any node can be constructed in a unit test without
   spinning up the database, the renderer, or a display server.
-* This module is shared between every later build step. Step 4 produces
-  only the constructs declared here as "core"; later steps (13/14/15)
-  will extend the unions with ``Monospace``, ``Link``, ``Table`` /
-  ``TableRow`` / ``TableCell``, ``Admonition``, and ``Blockquote``. The
-  invariant is that adding a node never changes the existing nodes.
+* This module is shared between every later build step. Step 4 produced
+  the original "core" set; step 13 extends the inline union with
+  :class:`Monospace` and :class:`Link`; later steps (14/15) will add
+  ``Table`` / ``TableRow`` / ``TableCell``, ``Admonition``, and
+  ``Blockquote`` to the block union. The invariant is that adding a
+  node never changes the existing nodes.
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass
+
+from notes_app.enums import LinkScheme
 
 
 # ---------------------------------------------------------------------------
@@ -92,10 +95,63 @@ class Underline:
     source_line: int
 
 
-type InlineNode = Text | Bold | Italic | Strikethrough | Underline
-"""The closed union of inline node kinds the step-4 parser produces.
+@dataclass(frozen=True)
+class Monospace:
+    """An inline ```code``` span.
 
-Later build steps extend this with ``Monospace`` and ``Link``.
+    The content is held as a single literal :class:`str` rather than as
+    a list of further inline nodes: by spec the body of a monospace span
+    is **not re-parsed**, so any ``*``, ``_`` or ``[…]#…#`` characters
+    inside are preserved as plain literal text. This is what makes it
+    safe to wrap a snippet of source code that itself contains AsciiDoc
+    delimiters in backticks.
+
+    The inline parser is responsible for raising
+    :class:`ParseErrorKind.UNTERMINATED_MONOSPACE` when an opener has
+    no matching close on the same line.
+    """
+
+    content: str
+    source_line: int
+
+
+@dataclass(frozen=True)
+class Link:
+    """An inline link — bare URL, URL-with-text, or ``link:`` macro.
+
+    The three source shapes (bare URL ``https://x``, URL-with-text
+    ``https://x[t]``, and macro ``link:https://x[t]``) all parse to
+    this same node. The bare-URL shape carries display text equal to
+    a single :class:`Text` whose content is the URL itself, so that
+    every :class:`Link` node always has a non-empty ``text`` tuple
+    that the renderer can iterate without a special case.
+
+    ``scheme`` is the parsed-and-validated :class:`LinkScheme` member
+    — the parser rejects out-of-list schemes with
+    :class:`ParseErrorKind.UNSUPPORTED_LINK_SCHEME` so that the
+    renderer (and downstream :mod:`notes_app.ui.link_handler`) never
+    has to handle an invalid scheme at runtime.
+
+    Display text supports nested formatting (bold, italic, monospace
+    etc.) but **not** other links — the inline parser raises
+    :class:`ParseErrorKind.BAD_LINK_MACRO` if a nested link is found.
+    """
+
+    url: str
+    scheme: LinkScheme
+    text: tuple[InlineNode, ...]
+    source_line: int
+
+
+type InlineNode = (
+    Text | Bold | Italic | Strikethrough | Underline | Monospace | Link
+)
+"""The closed union of inline node kinds the parser produces.
+
+Step 4 produced :class:`Text`, :class:`Bold`, :class:`Italic`,
+:class:`Strikethrough`, and :class:`Underline`. Step 13 extends this
+union with :class:`Monospace` and :class:`Link`. Future build steps
+extend this further if new inline constructs are added.
 """
 
 

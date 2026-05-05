@@ -16,6 +16,8 @@ gi.require_version("GtkSource", "5")
 # pylint: disable=wrong-import-position
 from gi.repository import Gdk, Gtk, GtkSource  # noqa: E402
 
+from notes_app.asciidoc.ast import Link as _Link
+from notes_app.asciidoc.inline_parser import parse_inline as _parse_inline
 from notes_app.controllers.app_state import AppState
 from notes_app.controllers.note_controller import NoteController
 from notes_app.enums import AttachmentRejectionReason, MimeKind
@@ -27,11 +29,13 @@ from notes_app.ui.note_editor import (
     LANGUAGE_FILE_NAME,
     LANGUAGE_ID,
     NoteEditor,
+    _LINK_TEMPLATE,
     _PLACEHOLDER_SELECTION_TEXT,
     _bundled_language_dir,
     _image_macro_for_filename,
     buffer_text,
     insert_block_line,
+    insert_inline_text,
     load_asciidoc_language,
     wrap_selection,
 )
@@ -465,6 +469,106 @@ class BufferTextTests(unittest.TestCase):
 
 
 # ---------------------------------------------------------------------------
+# insert_inline_text — pure helper for inline-template inserts
+# ---------------------------------------------------------------------------
+
+
+class InsertInlineTextTests(unittest.TestCase):
+    """Pure helper for inline content (no leading newline behaviour).
+
+    Operates on a vanilla :class:`Gtk.TextBuffer` — no display required.
+    """
+
+    def _make_buffer(self, text: str) -> Gtk.TextBuffer:
+        buffer = Gtk.TextBuffer.new(None)
+        buffer.set_text(text)
+        return buffer
+
+    def test_inserts_at_cursor_with_no_newline(self) -> None:
+        buffer = self._make_buffer("Visit  today")
+        # Cursor between the two spaces in "Visit  today".
+        buffer.place_cursor(buffer.get_iter_at_offset(6))
+        insert_inline_text(buffer, text="link:https://x[here]")
+        self.assertEqual(
+            buffer_text(buffer),
+            "Visit link:https://x[here] today",
+        )
+
+    def test_no_select_within_leaves_cursor_at_end_of_insert(self) -> None:
+        buffer = self._make_buffer("")
+        insert_inline_text(buffer, text="link:https://x[t]")
+        cursor_iter = buffer.get_iter_at_mark(buffer.get_insert())
+        self.assertEqual(
+            cursor_iter.get_offset(),
+            len("link:https://x[t]"),
+        )
+
+    def test_select_within_highlights_substring_post_insert(self) -> None:
+        buffer = self._make_buffer("")
+        # Select "https://example.com" inside "link:https://example.com[t]"
+        # — offsets 5..24 of the inserted text.
+        insert_inline_text(
+            buffer,
+            text="link:https://example.com[t]",
+            select_within=(5, 24),
+        )
+        bounds = buffer.get_selection_bounds()
+        self.assertIsNotNone(bounds)
+        assert bounds is not None and len(bounds) == 2
+        start, end = bounds
+        self.assertEqual(
+            buffer.get_text(start, end, False),
+            "https://example.com",
+        )
+
+    def test_select_within_offsets_are_relative_to_insert(self) -> None:
+        # If the cursor is mid-buffer, ``select_within`` offsets must
+        # still be interpreted relative to the start of the inserted
+        # text, not the start of the buffer.
+        buffer = self._make_buffer("prefix ")
+        buffer.place_cursor(buffer.get_iter_at_offset(7))
+        insert_inline_text(
+            buffer,
+            text="ABCDE",
+            select_within=(1, 4),
+        )
+        bounds = buffer.get_selection_bounds()
+        assert bounds is not None and len(bounds) == 2
+        start, end = bounds
+        # Selection is "BCD" — i.e. offsets 1..4 of the inserted text,
+        # which is offsets 8..11 of the full buffer.
+        self.assertEqual(buffer.get_text(start, end, False), "BCD")
+        self.assertEqual(start.get_offset(), 8)
+        self.assertEqual(end.get_offset(), 11)
+
+    def test_inline_insert_does_not_split_existing_line(self) -> None:
+        # Mid-line insert keeps surrounding text on the same line —
+        # this is the whole reason ``insert_inline_text`` exists
+        # rather than reusing :func:`insert_block_line`.
+        buffer = self._make_buffer("see https://x today")
+        # Cursor at end ("today" is 5 chars).
+        buffer.place_cursor(buffer.get_end_iter())
+        insert_inline_text(buffer, text="!")
+        self.assertEqual(
+            buffer_text(buffer),
+            "see https://x today!",
+        )
+
+    def test_undo_grouping_is_one_step(self) -> None:
+        # The whole insert lives inside one ``begin_user_action`` /
+        # ``end_user_action`` envelope so a single Ctrl-Z undoes it
+        # all. Verify by checking ``get_can_undo`` is True after the
+        # insert, then triggering a single undo and confirming the
+        # buffer is empty again.
+        buffer = GtkSource.Buffer.new(None)
+        buffer.set_max_undo_levels(10)
+        insert_inline_text(buffer, text="link:https://x[t]")
+        self.assertTrue(buffer.get_can_undo())
+        buffer.undo()
+        self.assertEqual(buffer_text(buffer), "")
+
+
+# ---------------------------------------------------------------------------
 # Language file loading
 # ---------------------------------------------------------------------------
 
@@ -819,12 +923,13 @@ class NoteEditorToolbarTests(unittest.TestCase):
             child = child.get_next_sibling()
         return buttons
 
-    def test_toolbar_exposes_the_step_11_core_button_set(self) -> None:
+    def test_toolbar_exposes_the_step_13_core_button_set(self) -> None:
         # Tooltips drive the assertion because button labels are
         # short ("H", "B", "I", …) and could collide. Tooltips are
         # the user-facing identification anyway. The image button's
         # tooltip changed from "Insert image macro" (step 10
         # placeholder) to "Insert image" (step 11 file dialog).
+        # Step 13 added Monospace and Link to the inline group.
         editor = self._make_editor()
         tooltips = {
             b.get_tooltip_text() for b in self._toolbar_buttons(editor)
@@ -837,6 +942,8 @@ class NoteEditorToolbarTests(unittest.TestCase):
                 "Italic",
                 "Strikethrough",
                 "Underline",
+                "Monospace",
+                "Link",
                 "Bullet list",
                 "Numbered list",
                 "Code block",
@@ -868,6 +975,91 @@ class NoteEditorToolbarTests(unittest.TestCase):
         )
         heading_button.emit("clicked")
         self.assertEqual(buffer_text(editor._buffer), "== Heading\n")
+
+    def test_clicking_monospace_button_wraps_selection_in_backticks(self) -> None:
+        # Step 13: the monospace toolbar button is a wrap-button with
+        # ``\``` as both delimiters. With a selection, the wrap is
+        # symmetric just like Bold/Italic.
+        editor = self._make_editor()
+        editor._buffer.set_text("code")
+        editor._buffer.select_range(
+            editor._buffer.get_iter_at_offset(0),
+            editor._buffer.get_iter_at_offset(4),
+        )
+        monospace_button = next(
+            b for b in self._toolbar_buttons(editor)
+            if b.get_tooltip_text() == "Monospace"
+        )
+        monospace_button.emit("clicked")
+        self.assertEqual(buffer_text(editor._buffer), "`code`")
+
+    def test_clicking_monospace_button_with_no_selection_inserts_placeholder(
+        self,
+    ) -> None:
+        # The wrap-button placeholder behaviour applies to monospace
+        # too — clicking the button on an empty cursor yields
+        # ``\`text\``` with the placeholder selected for immediate
+        # overtype.
+        editor = self._make_editor()
+        editor._buffer.set_text("")
+        monospace_button = next(
+            b for b in self._toolbar_buttons(editor)
+            if b.get_tooltip_text() == "Monospace"
+        )
+        monospace_button.emit("clicked")
+        self.assertEqual(
+            buffer_text(editor._buffer),
+            f"`{_PLACEHOLDER_SELECTION_TEXT}`",
+        )
+
+    def test_clicking_link_button_inserts_macro_template_inline(self) -> None:
+        # Step 13: the link button drops a syntactically-valid
+        # ``link:URL[label]`` template at the cursor. The macro is
+        # inline — no leading newline added — so a click mid-paragraph
+        # leaves the user typing in the same paragraph they were in.
+        editor = self._make_editor()
+        editor._buffer.set_text("see  for more")
+        # Cursor between "see " and " for more".
+        editor._buffer.place_cursor(editor._buffer.get_iter_at_offset(4))
+        link_button = next(
+            b for b in self._toolbar_buttons(editor)
+            if b.get_tooltip_text() == "Link"
+        )
+        link_button.emit("clicked")
+        self.assertEqual(
+            buffer_text(editor._buffer),
+            "see link:https://example.com[link text] for more",
+        )
+
+    def test_clicking_link_button_preselects_url_placeholder(self) -> None:
+        # The URL portion of the inserted template is left selected
+        # so the user's first keystroke replaces it with a real URL.
+        editor = self._make_editor()
+        editor._buffer.set_text("")
+        link_button = next(
+            b for b in self._toolbar_buttons(editor)
+            if b.get_tooltip_text() == "Link"
+        )
+        link_button.emit("clicked")
+        bounds = editor._buffer.get_selection_bounds()
+        self.assertIsNotNone(bounds)
+        assert bounds is not None and len(bounds) == 2
+        start, end = bounds
+        self.assertEqual(
+            editor._buffer.get_text(start, end, False),
+            "https://example.com",
+        )
+
+    def test_link_template_parses_cleanly_through_inline_parser(self) -> None:
+        # Defence-in-depth: confirm the template the button inserts
+        # actually parses without raising. If a future tweak to the
+        # placeholder makes it malformed, this test fails immediately
+        # — much better than a user clicking the button and getting
+        # a parse error in the rendered view.
+        result = _parse_inline(_LINK_TEMPLATE, line=1)
+        # And it parses to exactly one Link node — not a Text fallback.
+        self.assertEqual(len(result), 1)
+        self.assertIsInstance(result[0], _Link)
 
 
 # ---------------------------------------------------------------------------

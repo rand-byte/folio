@@ -561,5 +561,265 @@ class EmptyDocumentTests(unittest.TestCase):
         self.assertEqual(_ranges_with_tag(buffer, TagName.HEADING_0.value), [])
 
 
+# ---------------------------------------------------------------------------
+# Monospace (step 13)
+# ---------------------------------------------------------------------------
+
+
+@unittest.skipUnless(_display_available(), "no GDK display")
+class MonospaceRenderingTests(unittest.TestCase):
+    """The MONOSPACE tag is applied to the literal content of `…`."""
+
+    def test_monospace_span_emits_content_with_tag(self) -> None:
+        renderer, buffer, _ = _build_renderer()
+        renderer.render_into("Use `f(x)` here.\n", buffer, note_id="n1")
+        text = _full_text(buffer)
+        # Content is the literal body — no backticks.
+        self.assertIn("Use f(x) here.", text)
+        body_start = text.index("f(x)")
+        self.assertEqual(
+            _ranges_with_tag(buffer, TagName.MONOSPACE.value),
+            [(body_start, body_start + len("f(x)"))],
+        )
+
+    def test_monospace_body_is_not_re_parsed(self) -> None:
+        # The body contains *bold* characters, but they are literal —
+        # no BOLD tag should appear on the monospace range.
+        renderer, buffer, _ = _build_renderer()
+        renderer.render_into(
+            "= D\n\nbefore `*not bold*` after\n",
+            buffer,
+            note_id="n1",
+        )
+        text = _full_text(buffer)
+        self.assertIn("*not bold*", text)
+        self.assertEqual(_ranges_with_tag(buffer, TagName.BOLD.value), [])
+        # MONOSPACE covers exactly the literal body (with the asterisks).
+        body_start = text.index("*not bold*")
+        self.assertEqual(
+            _ranges_with_tag(buffer, TagName.MONOSPACE.value),
+            [(body_start, body_start + len("*not bold*"))],
+        )
+
+    def test_monospace_inside_bold_carries_both_tags(self) -> None:
+        # ``*outer `inner` end*`` — the monospace span sits inside the
+        # bold span, so the inner range carries both tags.
+        renderer, buffer, _ = _build_renderer()
+        renderer.render_into(
+            "= D\n\n*outer `inner` end*\n",
+            buffer,
+            note_id="n1",
+        )
+        text = _full_text(buffer)
+        bold_ranges = _ranges_with_tag(buffer, TagName.BOLD.value)
+        mono_ranges = _ranges_with_tag(buffer, TagName.MONOSPACE.value)
+        # One bold range covering the whole "outer inner end".
+        self.assertEqual(len(bold_ranges), 1)
+        bold_start, bold_end = bold_ranges[0]
+        self.assertEqual(text[bold_start:bold_end], "outer inner end")
+        # One monospace range, fully inside the bold range.
+        self.assertEqual(len(mono_ranges), 1)
+        mono_start, mono_end = mono_ranges[0]
+        self.assertEqual(text[mono_start:mono_end], "inner")
+        self.assertGreaterEqual(mono_start, bold_start)
+        self.assertLessEqual(mono_end, bold_end)
+
+
+# ---------------------------------------------------------------------------
+# Links (step 13)
+# ---------------------------------------------------------------------------
+
+
+@unittest.skipUnless(_display_available(), "no GDK display")
+class LinkRenderingTests(unittest.TestCase):
+    """LINK shared tag + per-link anonymous URL tag are both applied."""
+
+    def test_bare_url_emits_link_tag_over_url_text(self) -> None:
+        renderer, buffer, _ = _build_renderer()
+        renderer.render_into(
+            "see https://example.com today\n",
+            buffer,
+            note_id="n1",
+        )
+        text = _full_text(buffer)
+        self.assertIn("https://example.com", text)
+        link_start = text.index("https://example.com")
+        link_end = link_start + len("https://example.com")
+        self.assertEqual(
+            _ranges_with_tag(buffer, TagName.LINK.value),
+            [(link_start, link_end)],
+        )
+
+    def test_url_with_text_link_uses_display_text(self) -> None:
+        renderer, buffer, _ = _build_renderer()
+        renderer.render_into(
+            "click https://x[here] now\n",
+            buffer,
+            note_id="n1",
+        )
+        text = _full_text(buffer)
+        # Visible text is the display text, not the URL.
+        self.assertIn("click here now", text)
+        self.assertNotIn("https://x", text)
+        # LINK tag covers exactly the display text "here".
+        link_start = text.index("here")
+        self.assertEqual(
+            _ranges_with_tag(buffer, TagName.LINK.value),
+            [(link_start, link_start + len("here"))],
+        )
+
+    def test_link_macro_uses_display_text(self) -> None:
+        renderer, buffer, _ = _build_renderer()
+        renderer.render_into(
+            "see link:https://x[the docs]\n",
+            buffer,
+            note_id="n1",
+        )
+        text = _full_text(buffer)
+        self.assertIn("see the docs", text)
+        link_start = text.index("the docs")
+        self.assertEqual(
+            _ranges_with_tag(buffer, TagName.LINK.value),
+            [(link_start, link_start + len("the docs"))],
+        )
+
+    def test_url_recoverable_via_url_for_tags(self) -> None:
+        # The renderer's ``url_for_tags`` should return the URL of
+        # whichever link the iter is inside. This is the contract
+        # the click handler in ui/link_handler relies on.
+        renderer, buffer, _ = _build_renderer()
+        renderer.render_into(
+            "go to https://example.com[here] please\n",
+            buffer,
+            note_id="n1",
+        )
+        text = _full_text(buffer)
+        # Pick an offset inside the display text "here".
+        offset = text.index("here") + 1
+        tags = buffer.get_iter_at_offset(offset).get_tags()
+        url = renderer.url_for_tags(list(tags))
+        self.assertEqual(url, "https://example.com")
+
+    def test_url_for_tags_returns_none_outside_link(self) -> None:
+        renderer, buffer, _ = _build_renderer()
+        renderer.render_into(
+            "no link here, just text\n",
+            buffer,
+            note_id="n1",
+        )
+        offset = 2  # somewhere inside "no link here..."
+        tags = buffer.get_iter_at_offset(offset).get_tags()
+        self.assertIsNone(renderer.url_for_tags(list(tags)))
+
+    def test_two_links_get_distinct_url_tags(self) -> None:
+        # Each link produces its own anonymous URL-marker tag —
+        # confirmed by recovering distinct URLs from the two
+        # display-text positions.
+        renderer, buffer, _ = _build_renderer()
+        renderer.render_into(
+            "first https://a.com[A] then https://b.com[B] done\n",
+            buffer,
+            note_id="n1",
+        )
+        text = _full_text(buffer)
+        a_offset = text.index("A")
+        b_offset = text.index("B")
+        a_tags = buffer.get_iter_at_offset(a_offset).get_tags()
+        b_tags = buffer.get_iter_at_offset(b_offset).get_tags()
+        self.assertEqual(renderer.url_for_tags(list(a_tags)), "https://a.com")
+        self.assertEqual(renderer.url_for_tags(list(b_tags)), "https://b.com")
+
+    def test_link_inside_bold_carries_both_tags(self) -> None:
+        # *Read https://x[here] now* — bold wraps a link; the link
+        # range carries BOLD, LINK, and the anon URL tag.
+        renderer, buffer, _ = _build_renderer()
+        renderer.render_into(
+            "= D\n\n*Read https://x[here] now*\n",
+            buffer,
+            note_id="n1",
+        )
+        text = _full_text(buffer)
+        link_start = text.index("here")
+        link_end = link_start + len("here")
+        # LINK and BOLD ranges both contain [link_start, link_end].
+        bold_ranges = _ranges_with_tag(buffer, TagName.BOLD.value)
+        link_ranges = _ranges_with_tag(buffer, TagName.LINK.value)
+        self.assertTrue(
+            any(s <= link_start and e >= link_end for s, e in bold_ranges),
+            f"bold range {bold_ranges} did not enclose link [{link_start},{link_end})",
+        )
+        self.assertEqual(link_ranges, [(link_start, link_end)])
+
+    def test_monospace_inside_link_display_carries_both_tags(self) -> None:
+        renderer, buffer, _ = _build_renderer()
+        renderer.render_into(
+            "= D\n\nthe https://x[`f()` function] runs\n",
+            buffer,
+            note_id="n1",
+        )
+        text = _full_text(buffer)
+        # Display text is "`f()` function" → as visible text, "f() function".
+        self.assertIn("f() function", text)
+        # LINK covers the whole display text.
+        link_start = text.index("f() function")
+        link_end = link_start + len("f() function")
+        self.assertEqual(
+            _ranges_with_tag(buffer, TagName.LINK.value),
+            [(link_start, link_end)],
+        )
+        # MONOSPACE covers just "f()".
+        mono_start = text.index("f()")
+        self.assertEqual(
+            _ranges_with_tag(buffer, TagName.MONOSPACE.value),
+            [(mono_start, mono_start + len("f()"))],
+        )
+
+    def test_re_render_clears_stale_link_tags(self) -> None:
+        # The renderer is responsible for cleaning up anonymous
+        # link-URL tags between renders. After two renders, the tag
+        # table must contain only the URL tags from the latest
+        # render — the old ones have been removed.
+        renderer, buffer, table = _build_renderer()
+        renderer.render_into(
+            "first https://a.com[A]\n",
+            buffer,
+            note_id="n1",
+        )
+        # Count anonymous tags in the table after first render.
+
+        def count_anonymous_tags(t: Gtk.TextTagTable) -> int:
+            collected: list[Gtk.TextTag] = []
+            t.foreach(lambda tag, _data: collected.append(tag), None)
+            return sum(
+                1
+                for tag in collected
+                if tag.get_property("name") is None
+            )
+
+        first = count_anonymous_tags(table)
+        self.assertEqual(first, 1)
+        # Second render: same number of links → same count, NOT 2.
+        renderer.render_into(
+            "second https://b.com[B]\n",
+            buffer,
+            note_id="n2",
+        )
+        second = count_anonymous_tags(table)
+        self.assertEqual(second, 1, "stale link tags accumulated")
+        # And the URL recoverable from the new display range is the
+        # new URL — confirming the old anon tag is gone, not aliased.
+        text = _full_text(buffer)
+        offset = text.index("B")
+        tags = buffer.get_iter_at_offset(offset).get_tags()
+        self.assertEqual(renderer.url_for_tags(list(tags)), "https://b.com")
+
+    def test_url_for_tags_with_unrelated_tag_returns_none(self) -> None:
+        # Sanity-check: passing a list that contains a non-link tag
+        # (e.g. just BOLD) returns None rather than raising.
+        renderer, _buffer, table = _build_renderer()
+        bold_tag = table.lookup(TagName.BOLD.value)
+        self.assertIsNone(renderer.url_for_tags([bold_tag]))
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -26,6 +26,8 @@ class TagNameTests(unittest.TestCase):
         self.assertEqual(TagName.ITALIC.value, "italic")
         self.assertEqual(TagName.STRIKETHROUGH.value, "strikethrough")
         self.assertEqual(TagName.UNDERLINE.value, "underline")
+        self.assertEqual(TagName.MONOSPACE.value, "monospace")
+        self.assertEqual(TagName.LINK.value, "link")
         self.assertEqual(TagName.HEADING_0.value, "heading_0")
         self.assertEqual(TagName.HEADING_6.value, "heading_6")
 
@@ -43,6 +45,8 @@ class TagNameTests(unittest.TestCase):
             "ITALIC",
             "STRIKETHROUGH",
             "UNDERLINE",
+            "MONOSPACE",
+            "LINK",
             "HEADING_0",
             "HEADING_2",
             "HEADING_3",
@@ -151,6 +155,39 @@ class InlineTagPropertyTests(unittest.TestCase):
     def test_underline_tag_uses_single_underline(self) -> None:
         tag = self.table.lookup(TagName.UNDERLINE.value)
         self.assertEqual(tag.get_property("underline"), Pango.Underline.SINGLE)
+
+    def test_monospace_tag_uses_monospace_family(self) -> None:
+        tag = self.table.lookup(TagName.MONOSPACE.value)
+        self.assertEqual(tag.get_property("family"), "monospace")
+        # Cross-check the property-set flag so that a future regression
+        # like ``family=None`` doesn't silently leave monospace looking
+        # like running text.
+        self.assertTrue(tag.get_property("family-set"))
+
+    def test_monospace_tag_does_not_set_color_or_underline(self) -> None:
+        # Monospace must not stamp a foreground colour or underline —
+        # those are reserved for the LINK tag, which composes with
+        # MONOSPACE on monospace-inside-link spans.
+        tag = self.table.lookup(TagName.MONOSPACE.value)
+        self.assertFalse(tag.get_property("foreground-set"))
+        self.assertFalse(tag.get_property("underline-set"))
+
+    def test_link_tag_has_underline(self) -> None:
+        tag = self.table.lookup(TagName.LINK.value)
+        self.assertEqual(tag.get_property("underline"), Pango.Underline.SINGLE)
+
+    def test_link_tag_has_foreground_color_set(self) -> None:
+        tag = self.table.lookup(TagName.LINK.value)
+        self.assertTrue(tag.get_property("foreground-set"))
+
+    def test_link_tag_does_not_change_weight_or_family(self) -> None:
+        # Link styling must compose: a link inside bold should look
+        # bold-and-blue, a link wrapping a monospace span should look
+        # monospace-and-blue. The shared LINK tag therefore must not
+        # set weight or family of its own.
+        tag = self.table.lookup(TagName.LINK.value)
+        self.assertFalse(tag.get_property("weight-set"))
+        self.assertFalse(tag.get_property("family-set"))
 
     def test_inline_tags_do_not_set_unrelated_properties(self) -> None:
         # An inline tag setting weight=BOLD must not also stamp a scale

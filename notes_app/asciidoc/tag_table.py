@@ -11,13 +11,14 @@ Principles & invariants
   and tests reference :data:`TagName.BOLD` rather than the string
   ``"bold"`` — the style rule against magic strings applies inside this
   package as much as anywhere else.
-* Tags are scoped to the **step-4 AsciiDoc subset**: bold, italic,
-  strikethrough, underline, plus one tag per heading level produced by
-  the parser. The parser produces a level-0 heading (``Document.title``)
-  and levels 2–6 (``Section.level``); level 1 is intentionally absent
-  because the parser rejects mid-document level-1 headings as
-  ``UNKNOWN_BLOCK``. Later build steps (13 — monospace and link) extend
-  the table by adding new ``TagName`` members and matching tags.
+* Tags are scoped to the **AsciiDoc subset implemented up to this
+  build step**: bold, italic, strikethrough, underline, monospace,
+  link, plus one tag per heading level produced by the parser. The
+  parser produces a level-0 heading (``Document.title``) and levels
+  2–6 (``Section.level``); level 1 is intentionally absent because
+  the parser rejects mid-document level-1 headings as
+  ``UNKNOWN_BLOCK``. Step 13 added ``MONOSPACE`` and ``LINK``;
+  later build steps may extend the table further.
 * All sizing for headings is expressed via ``scale`` (a multiplier on
   the inherited font size) rather than absolute point sizes. This keeps
   the user's font preferences and OS accessibility settings composable —
@@ -46,7 +47,7 @@ from gi.repository import Gtk, Pango  # noqa: E402
 
 
 class TagName(StrEnum):
-    """Names of every tag the step-6 tag table contains.
+    """Names of every shared tag the rendered-view tag table contains.
 
     Values are the strings the underlying :class:`Gtk.TextTag` carries
     as its ``name`` property — :meth:`Gtk.TextTagTable.lookup` accepts a
@@ -59,12 +60,20 @@ class TagName(StrEnum):
     parser does not produce level-1 headings outside of the document
     title — a mid-document ``=`` heading is rejected as an
     ``UNKNOWN_BLOCK``.
+
+    :data:`MONOSPACE` and :data:`LINK` provide the *visual* styling
+    for those constructs. The link's *URL identity* is carried by
+    a separate, anonymous (unnamed) :class:`Gtk.TextTag` per link,
+    managed by the renderer — only one shared :data:`LINK` tag
+    appears in this table because every link looks the same.
     """
 
     BOLD = "bold"
     ITALIC = "italic"
     STRIKETHROUGH = "strikethrough"
     UNDERLINE = "underline"
+    MONOSPACE = "monospace"
+    LINK = "link"
     HEADING_0 = "heading_0"
     HEADING_2 = "heading_2"
     HEADING_3 = "heading_3"
@@ -113,37 +122,82 @@ _LEVEL_TO_TAG_NAME: dict[int, TagName] = {
 }
 
 
+# ---------------------------------------------------------------------------
+# Visual constants for monospace and link styling
+# ---------------------------------------------------------------------------
+#
+# These are not exposed as enum values because they describe *visual*
+# settings rather than categorical concepts — there's no closed set of
+# legal monospace families or link colours, only one current choice
+# each. They live as module constants so a one-line edit changes the
+# look across every rendered note.
+
+_MONOSPACE_FAMILY: str = "monospace"
+
+# A blue close to the GTK Adwaita "accent" colour. Encoded as a CSS-style
+# RGB string because :class:`Gtk.TextTag`'s ``foreground`` property
+# accepts that form directly. If the renderer ever gains a dark-mode
+# variant we'll switch this to a callable that picks per-theme.
+_LINK_FOREGROUND: str = "#1a73e8"
+
+
 def build_tag_table() -> Gtk.TextTagTable:
-    """Construct the rendered-view tag table for the step-4 subset.
+    """Construct the rendered-view tag table for the current subset.
 
     The returned table contains exactly one tag per :class:`TagName`
     member. Tag names are unique within a table, so callers that need
     a tag by name use :meth:`Gtk.TextTagTable.lookup` with the
     corresponding :class:`TagName` value.
+
+    Note that link *identity* (which URL each link points at) is
+    carried by a separate, anonymous :class:`Gtk.TextTag` per link,
+    added to the table at render time and tracked by the renderer.
+    The shared :data:`TagName.LINK` tag in this table only contributes
+    the visual appearance — colour and underline — that every link
+    shares.
     """
     table = Gtk.TextTagTable.new()
     table.add(_make_inline_tag(TagName.BOLD, weight=Pango.Weight.BOLD))
     table.add(_make_inline_tag(TagName.ITALIC, style=Pango.Style.ITALIC))
     table.add(_make_inline_tag(TagName.STRIKETHROUGH, strikethrough=True))
     table.add(_make_inline_tag(TagName.UNDERLINE, underline=Pango.Underline.SINGLE))
+    table.add(_make_inline_tag(TagName.MONOSPACE, family=_MONOSPACE_FAMILY))
+    table.add(
+        _make_inline_tag(
+            TagName.LINK,
+            foreground=_LINK_FOREGROUND,
+            underline=Pango.Underline.SINGLE,
+        )
+    )
     for level, scale in _HEADING_SCALES.items():
         table.add(_make_heading_tag(_LEVEL_TO_TAG_NAME[level], scale=scale))
     return table
 
 
-def _make_inline_tag(
+def _make_inline_tag(  # pylint: disable=too-many-arguments
     name: TagName,
     *,
     weight: Pango.Weight | None = None,
     style: Pango.Style | None = None,
     strikethrough: bool | None = None,
     underline: Pango.Underline | None = None,
+    family: str | None = None,
+    foreground: str | None = None,
 ) -> Gtk.TextTag:
     """Build a single inline-style tag with the requested visual rule.
 
     Only the property the caller passes is set; the rest are left at
     their inherited defaults so multiple tags on the same range
-    compose without one tag erasing another's contribution.
+    compose without one tag erasing another's contribution. This is
+    why ``LINK`` (foreground + underline) and ``UNDERLINE`` (just
+    underline) coexist cleanly when both apply to the same range.
+
+    The argument list grows one element each time we add an inline
+    construct, which is unavoidable: each is a distinct
+    :class:`Gtk.TextTag` property. Refactoring to a single ``props``
+    mapping would lose the type-checked keyword surface — and there
+    are only six properties total in the closed AsciiDoc subset, so
+    the explicit list stays readable.
     """
     tag = Gtk.TextTag.new(name.value)
     if weight is not None:
@@ -154,6 +208,10 @@ def _make_inline_tag(
         tag.set_property("strikethrough", strikethrough)
     if underline is not None:
         tag.set_property("underline", underline)
+    if family is not None:
+        tag.set_property("family", family)
+    if foreground is not None:
+        tag.set_property("foreground", foreground)
     return tag
 
 

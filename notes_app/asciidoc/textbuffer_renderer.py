@@ -41,6 +41,21 @@ Principles & invariants
   also acts as the visual gap to the next block. A redundant trailing
   newline at the very end of the buffer is trimmed so the buffer does
   not finish with a blank line.
+* Links carry their *URL identity* on a per-link **anonymous** tag
+  (a :class:`Gtk.TextTag` constructed with ``name=None``) that is
+  added to the tag table at render time. The renderer keeps a
+  ``dict[Gtk.TextTag, str]`` mapping each anonymous tag to its URL,
+  exposed via :meth:`url_for_tags`. The shared
+  :data:`TagName.LINK` tag from :mod:`tag_table` provides the visual
+  styling — colour and underline — that every link shares. Anonymous
+  tags from a *previous* render are removed from the tag table at the
+  start of every :meth:`render_into` call so the table cannot
+  accumulate stale link tags as the user edits a note.
+* Monospace inline content is emitted as plain text with the
+  :data:`TagName.MONOSPACE` tag added to whatever tag stack is
+  currently active. Because :class:`Monospace` carries its content as
+  a single literal :class:`str` (not a list of further inline nodes),
+  it never recurses through :meth:`_emit_inline`.
 """
 
 from __future__ import annotations
@@ -62,6 +77,8 @@ from notes_app.asciidoc.ast import (
     Image,
     InlineNode,
     Italic,
+    Link,
+    Monospace,
     OrderedList,
     Paragraph,
     Section,
@@ -122,6 +139,7 @@ class TextBufferRenderer:
     _image_bytes_for: ImageBytesResolver
     _column_width_px: ColumnWidthResolver
     _tag_table: Gtk.TextTagTable
+    _link_url_tags: dict[Gtk.TextTag, str]
 
     def __init__(
         self,
@@ -133,6 +151,10 @@ class TextBufferRenderer:
         self._image_bytes_for = image_bytes_for
         self._column_width_px = column_width_px
         self._tag_table = tag_table
+        # Anonymous per-link tags currently registered on
+        # ``self._tag_table``. Cleared at the start of every render
+        # so stale link tags don't accumulate as the user edits.
+        self._link_url_tags = {}
 
     # ------------------------------------------------------------------
     # Public API
@@ -168,11 +190,63 @@ class TextBufferRenderer:
             raise ValueError(
                 "buffer's tag table is not the renderer's tag table",
             )
+        self._clear_link_url_tags()
         if document.title is not None:
             self._emit_heading(buffer, document.title, level=0)
         for block in document.blocks:
             self._emit_block(buffer, block, attacher)
         self._strip_trailing_blank(buffer)
+
+    def url_for_tags(self, tags: list[Gtk.TextTag]) -> str | None:
+        """Return the URL associated with the first link tag in ``tags``.
+
+        Used by :mod:`notes_app.ui.link_handler` to recover the URL
+        to launch when the user clicks somewhere inside a link
+        decoration. The argument is the list returned by
+        :meth:`Gtk.TextIter.get_tags` for the click position; if none
+        of those tags are link-URL markers, the method returns
+        :data:`None` and the caller does nothing.
+
+        The lookup is per-renderer because the URL→tag mapping is
+        per-render: a renderer instance is the smallest scope that
+        owns one consistent set of link tags.
+        """
+        for tag in tags:
+            url = self._link_url_tags.get(tag)
+            if url is not None:
+                return url
+        return None
+
+    # ------------------------------------------------------------------
+    # Link tag lifecycle
+    # ------------------------------------------------------------------
+
+    def _clear_link_url_tags(self) -> None:
+        """Remove every per-link anonymous tag from the tag table.
+
+        Called at the start of each :meth:`render_into` so the tag
+        table doesn't accumulate stale link tags as the user edits.
+        Any range still bearing one of these tags becomes "untagged
+        in that respect" — and the buffer is about to be cleared by
+        ``set_text("")`` anyway, so there are no application ranges
+        to worry about.
+        """
+        for tag in self._link_url_tags:
+            self._tag_table.remove(tag)
+        self._link_url_tags.clear()
+
+    def _make_link_url_tag(self, url: str) -> Gtk.TextTag:
+        """Build and register an anonymous tag carrying a link's URL.
+
+        The tag itself has no visual properties — visual styling
+        comes from the shared :data:`TagName.LINK` tag. This tag's
+        sole purpose is to associate a buffer range with a URL via
+        the ``self._link_url_tags`` mapping.
+        """
+        tag = Gtk.TextTag.new(None)
+        self._tag_table.add(tag)
+        self._link_url_tags[tag] = url
+        return tag
 
     # ------------------------------------------------------------------
     # Block emission
@@ -301,12 +375,17 @@ class TextBufferRenderer:
     # Inline emission
     # ------------------------------------------------------------------
 
-    def _emit_inline(
+    def _emit_inline(  # pylint: disable=too-many-return-statements
         self,
         buffer: Gtk.TextBuffer,
         inline: InlineNode,
         tag_stack: list[Gtk.TextTag],
     ) -> None:
+        # One return per inline AST kind. The closed-union dispatch
+        # is intentionally kept as an :func:`isinstance` cascade
+        # (rather than a class-keyed dispatch table) so adding a
+        # new inline node forces a static-typing visit here AND
+        # the final ``raise`` flags the omission at runtime.
         if isinstance(inline, Text):
             self._emit_text(buffer, inline, tag_stack)
             return
@@ -327,9 +406,59 @@ class TextBufferRenderer:
         if isinstance(inline, Underline):
             self._emit_styled(buffer, inline.children, tag_stack, TagName.UNDERLINE)
             return
-        # Closed union; new inline kinds (Monospace, Link in step 13)
-        # must extend this dispatch.
+        if isinstance(inline, Monospace):
+            self._emit_monospace(buffer, inline, tag_stack)
+            return
+        if isinstance(inline, Link):
+            self._emit_link(buffer, inline, tag_stack)
+            return
+        # Closed union; new inline kinds must extend this dispatch.
         raise TypeError(f"unknown inline node: {type(inline).__name__}")
+
+    def _emit_monospace(
+        self,
+        buffer: Gtk.TextBuffer,
+        monospace: Monospace,
+        tag_stack: list[Gtk.TextTag],
+    ) -> None:
+        """Insert verbatim monospace content with the MONOSPACE tag added.
+
+        :class:`Monospace`'s ``content`` is a literal :class:`str` —
+        no nested inline parsing happens here, by design. This is
+        what makes it safe to wrap a snippet that contains ``*`` or
+        ``_`` in backticks.
+        """
+        if not monospace.content:
+            return
+        start_offset = buffer.get_end_iter().get_offset()
+        buffer.insert(buffer.get_end_iter(), monospace.content)
+        end_offset = buffer.get_end_iter().get_offset()
+        start_iter = buffer.get_iter_at_offset(start_offset)
+        end_iter = buffer.get_iter_at_offset(end_offset)
+        for tag in tag_stack:
+            buffer.apply_tag(tag, start_iter, end_iter)
+        buffer.apply_tag(self._tag(TagName.MONOSPACE), start_iter, end_iter)
+
+    def _emit_link(
+        self,
+        buffer: Gtk.TextBuffer,
+        link: Link,
+        tag_stack: list[Gtk.TextTag],
+    ) -> None:
+        """Emit a link's display children with link tags added.
+
+        Two tags are stacked for the duration of the link's body:
+        the shared :data:`TagName.LINK` tag (visual styling) and a
+        fresh anonymous tag carrying the URL (consumed by
+        :meth:`url_for_tags` for click handling). The display text
+        is iterated through :meth:`_emit_inline` so any nested
+        formatting in the link's display text composes correctly.
+        """
+        link_tag = self._tag(TagName.LINK)
+        url_tag = self._make_link_url_tag(link.url)
+        new_stack = [*tag_stack, link_tag, url_tag]
+        for child in link.text:
+            self._emit_inline(buffer, child, new_stack)
 
     def _emit_text(
         self,

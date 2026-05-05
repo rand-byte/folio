@@ -62,14 +62,13 @@ Principles & invariants
   built from scratch — no display, no GtkSourceView — and so each
   callback is a one-line lambda binding a fixed delimiter or
   template to those helpers.
-* Toolbar surface is the **step-4 / step-10 core set**: Heading,
-  Bold, Italic, Strikethrough, Underline, Bullet list, Numbered
-  list, Code block, Image. Monospace and link buttons land at step
-  13; table at step 14; admonition and blockquote at step 15.
-  Adding all the buttons up-front would imply support the parser
-  does not yet have, which the strict-mode policy of the parser
-  would surface as a parse error the moment the user clicked the
-  premature button.
+* Toolbar surface as of step 13 covers Heading, Bold, Italic,
+  Strikethrough, Underline, Monospace, Link, Bullet list, Numbered
+  list, Code block, and Image. Table lands at step 14; admonition
+  and blockquote at step 15. Adding all the buttons up-front would
+  imply support the parser does not yet have, which the strict-mode
+  policy of the parser would surface as a parse error the moment
+  the user clicked the premature button.
 * The image button opens a :class:`Gtk.FileDialog` (the GTK 4.10
   current API; :class:`Gtk.FileChooserDialog` is deprecated). On a
   successful pick it routes the chosen path through
@@ -219,6 +218,30 @@ _STRIKETHROUGH_OPEN: Final[str] = "[.line-through]#"
 _STRIKETHROUGH_CLOSE: Final[str] = "#"
 _UNDERLINE_OPEN: Final[str] = "[.underline]#"
 _UNDERLINE_CLOSE: Final[str] = "#"
+_MONOSPACE_DELIMITER: Final[str] = "`"
+
+# The Link button inserts a syntactically-valid ``link:`` macro
+# template inline at the cursor. ``link:https://example.com[link text]``
+# parses cleanly, so the user gets a working link they can edit in
+# place rather than a half-formed shape that the rendered view
+# immediately rejects. The URL placeholder is left selected on insert
+# so the user's next keystroke overwrites it with a real URL — same
+# UX pattern as the wrap buttons' ``text`` placeholder.
+_LINK_PREFIX: Final[str] = "link:"
+_LINK_PLACEHOLDER_URL: Final[str] = "https://example.com"
+_LINK_PLACEHOLDER_LABEL: Final[str] = "link text"
+_LINK_TEMPLATE: Final[str] = (
+    f"{_LINK_PREFIX}{_LINK_PLACEHOLDER_URL}"
+    f"[{_LINK_PLACEHOLDER_LABEL}]"
+)
+# Selection range (relative to the start of the inserted template)
+# that highlights the URL portion. Computed at module-import time
+# from the constant template so a future tweak to the placeholder
+# text does not desynchronise the selection offsets.
+_LINK_TEMPLATE_URL_SELECTION: Final[tuple[int, int]] = (
+    len(_LINK_PREFIX),
+    len(_LINK_PREFIX) + len(_LINK_PLACEHOLDER_URL),
+)
 
 _PLACEHOLDER_SELECTION_TEXT: Final[str] = "text"
 """Placeholder string inserted by :func:`wrap_selection` when the user
@@ -388,6 +411,52 @@ def insert_block_line(buffer: Gtk.TextBuffer, *, text: str) -> None:
         cursor_target = cursor_offset + len(leading_newline) + len(text)
         new_cursor = buffer.get_iter_at_offset(cursor_target)
         buffer.place_cursor(new_cursor)
+    finally:
+        buffer.end_user_action()
+
+
+def insert_inline_text(
+    buffer: Gtk.TextBuffer,
+    *,
+    text: str,
+    select_within: tuple[int, int] | None = None,
+) -> None:
+    """Insert ``text`` at the cursor as inline content (no leading newline).
+
+    Used by toolbar buttons that produce inline templates — the link
+    button's ``link:URL[label]`` is the canonical example. Unlike
+    :func:`insert_block_line`, the cursor's current line context is
+    preserved: the inserted text becomes part of whatever paragraph
+    the cursor was sitting in.
+
+    ``select_within`` is an optional ``(start_offset, end_offset)``
+    pair, **relative to the start of the inserted text**, identifying
+    a substring to highlight after the insert. The link button uses
+    this to leave the URL portion (``https://example.com``) selected
+    so the user's first keystroke replaces the placeholder URL with
+    a real one. When :data:`None`, the cursor is left at the end of
+    the inserted text and nothing is selected.
+
+    A single ``begin_user_action`` / ``end_user_action`` envelope
+    groups the whole operation so one Ctrl-Z undoes the entire
+    insert. Pure with respect to the buffer; unit-testable against
+    a vanilla :class:`Gtk.TextBuffer`.
+    """
+    insert_mark = buffer.get_insert()
+    cursor_iter = buffer.get_iter_at_mark(insert_mark)
+    cursor_offset = cursor_iter.get_offset()
+
+    buffer.begin_user_action()
+    try:
+        buffer.insert(cursor_iter, text)
+        if select_within is None:
+            new_cursor = buffer.get_iter_at_offset(cursor_offset + len(text))
+            buffer.place_cursor(new_cursor)
+            return
+        start_rel, end_rel = select_within
+        sel_start = buffer.get_iter_at_offset(cursor_offset + start_rel)
+        sel_end = buffer.get_iter_at_offset(cursor_offset + end_rel)
+        buffer.select_range(sel_start, sel_end)
     finally:
         buffer.end_user_action()
 
@@ -687,13 +756,19 @@ class NoteEditor(Gtk.Box):  # pylint: disable=too-many-instance-attributes
     # ------------------------------------------------------------------
 
     def _build_toolbar(self) -> Gtk.Box:
-        """Construct the editor's toolbar — the step-10 core set.
+        """Construct the editor's toolbar — the step-13 core set.
 
         The toolbar is a horizontal :class:`Gtk.Box`. Each button is
         a :class:`Gtk.Button` whose clicked signal binds a closure
         over the appropriate pure helper. Separators between groups
         (inline / lists / blocks / image) match the design's
         ``<div class="div"/>`` spacers.
+
+        Step 13 added the Monospace and Link buttons at the end of
+        the inline group: monospace is a wrap-button with the
+        backtick delimiter, and link is an inline-insert that drops
+        a ``link:URL[label]`` template at the cursor with the URL
+        portion preselected for immediate replacement.
         """
         toolbar = Gtk.Box.new(Gtk.Orientation.HORIZONTAL, spacing=4)
         toolbar.set_margin_top(4)
@@ -701,7 +776,8 @@ class NoteEditor(Gtk.Box):  # pylint: disable=too-many-instance-attributes
         toolbar.set_margin_start(8)
         toolbar.set_margin_end(8)
 
-        # Inline-formatting group: heading, bold, italic, strike, underline.
+        # Inline-formatting group: heading, bold, italic, strike,
+        # underline, monospace, link.
         toolbar.append(
             self._make_insert_button(
                 label="H",
@@ -739,6 +815,22 @@ class NoteEditor(Gtk.Box):  # pylint: disable=too-many-instance-attributes
                 tooltip="Underline",
                 before=_UNDERLINE_OPEN,
                 after=_UNDERLINE_CLOSE,
+            )
+        )
+        toolbar.append(
+            self._make_wrap_button(
+                label="M",
+                tooltip="Monospace",
+                before=_MONOSPACE_DELIMITER,
+                after=_MONOSPACE_DELIMITER,
+            )
+        )
+        toolbar.append(
+            self._make_inline_insert_button(
+                label="🔗",
+                tooltip="Link",
+                text=_LINK_TEMPLATE,
+                select_within=_LINK_TEMPLATE_URL_SELECTION,
             )
         )
 
@@ -832,6 +924,34 @@ class NoteEditor(Gtk.Box):  # pylint: disable=too-many-instance-attributes
         button.connect(
             "clicked",
             lambda _b: insert_block_line(self._buffer, text=text),
+        )
+        return button
+
+    def _make_inline_insert_button(
+        self,
+        *,
+        label: str,
+        tooltip: str,
+        text: str,
+        select_within: tuple[int, int] | None,
+    ) -> Gtk.Button:
+        """Build a button that inserts inline content at the cursor.
+
+        Used by the Link button — the link macro is inline content,
+        not a block, so :func:`insert_block_line` (which forces a
+        new line) is the wrong primitive. ``select_within`` selects
+        a range of the inserted text post-insert so the user can
+        immediately overwrite a placeholder URL or label.
+        """
+        button = Gtk.Button.new_with_label(label)
+        button.set_tooltip_text(tooltip)
+        button.connect(
+            "clicked",
+            lambda _b: insert_inline_text(
+                self._buffer,
+                text=text,
+                select_within=select_within,
+            ),
         )
         return button
 
