@@ -16,8 +16,9 @@ gi.require_version("GtkSource", "5")
 # pylint: disable=wrong-import-position
 from gi.repository import Gdk, Gtk, GtkSource  # noqa: E402
 
-from notes_app.asciidoc.ast import Link as _Link
+from notes_app.asciidoc.ast import Link as _Link, Table as _Table
 from notes_app.asciidoc.inline_parser import parse_inline as _parse_inline
+from notes_app.asciidoc.parser import parse as _parse_asciidoc
 from notes_app.controllers.app_state import AppState
 from notes_app.controllers.note_controller import NoteController
 from notes_app.enums import AttachmentRejectionReason, MimeKind
@@ -31,6 +32,7 @@ from notes_app.ui.note_editor import (
     NoteEditor,
     _LINK_TEMPLATE,
     _PLACEHOLDER_SELECTION_TEXT,
+    _TABLE_TEMPLATE,
     _bundled_language_dir,
     _image_macro_for_filename,
     buffer_text,
@@ -923,13 +925,14 @@ class NoteEditorToolbarTests(unittest.TestCase):
             child = child.get_next_sibling()
         return buttons
 
-    def test_toolbar_exposes_the_step_13_core_button_set(self) -> None:
+    def test_toolbar_exposes_the_step_14_core_button_set(self) -> None:
         # Tooltips drive the assertion because button labels are
         # short ("H", "B", "I", …) and could collide. Tooltips are
         # the user-facing identification anyway. The image button's
         # tooltip changed from "Insert image macro" (step 10
         # placeholder) to "Insert image" (step 11 file dialog).
         # Step 13 added Monospace and Link to the inline group.
+        # Step 14 adds Table to the blocks group.
         editor = self._make_editor()
         tooltips = {
             b.get_tooltip_text() for b in self._toolbar_buttons(editor)
@@ -948,6 +951,7 @@ class NoteEditorToolbarTests(unittest.TestCase):
                 "Numbered list",
                 "Code block",
                 "Insert image",
+                "Table",
             },
         )
 
@@ -1060,6 +1064,42 @@ class NoteEditorToolbarTests(unittest.TestCase):
         # And it parses to exactly one Link node — not a Text fallback.
         self.assertEqual(len(result), 1)
         self.assertIsInstance(result[0], _Link)
+
+    # -- table button (step 14) -----------------------------------------
+
+    def test_clicking_table_button_inserts_template(self) -> None:
+        # Step 14: the table toolbar button drops a 2-column, 3-row
+        # template at the cursor. The template uses the block-line
+        # insertion helper, so a click on an empty buffer produces the
+        # template with a leading newline only when the cursor is not
+        # at the start of a line.
+        editor = self._make_editor()
+        editor._buffer.set_text("")
+        table_button = next(
+            b for b in self._toolbar_buttons(editor)
+            if b.get_tooltip_text() == "Table"
+        )
+        table_button.emit("clicked")
+        # The buffer ends with a trailing newline (block-line insertion
+        # invariant — every block line ends with one).
+        self.assertEqual(
+            buffer_text(editor._buffer),
+            _TABLE_TEMPLATE + "\n",
+        )
+
+    def test_table_template_parses_to_a_table(self) -> None:
+        # Defence-in-depth: the template the button inserts must parse
+        # cleanly into a :class:`Table` node so the rendered view
+        # doesn't immediately show an error panel after the click.
+        doc = _parse_asciidoc(_TABLE_TEMPLATE + "\n")
+        self.assertEqual(len(doc.blocks), 1)
+        self.assertIsInstance(doc.blocks[0], _Table)
+        # The template has exactly the shape we documented in the
+        # editor module — 2 columns, 3 rows total (header + 2 data).
+        table = doc.blocks[0]
+        assert isinstance(table, _Table)
+        self.assertEqual(len(table.rows), 3)
+        self.assertEqual(len(table.rows[0].cells), 2)
 
 
 # ---------------------------------------------------------------------------

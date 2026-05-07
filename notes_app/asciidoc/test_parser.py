@@ -25,6 +25,9 @@ from notes_app.asciidoc.ast import (
     OrderedList,
     Paragraph,
     Section,
+    Table,
+    TableCell,
+    TableRow,
     Text,
     UnorderedList,
 )
@@ -475,17 +478,19 @@ class UnknownBlockDetectionTests(unittest.TestCase):
 
     def test_table(self) -> None:
         cases: tuple[tuple[str, str], ...] = (
-            ("table fence", "|===\n|cell\n|===\n"),
             ("blockquote fence", "____\nquote\n____\n"),
             ("attribute entry", ":doctype: book\n"),
             ("compound attribute", ":source-highlighter: rouge\n"),
             ("line comment", "// a comment\n"),
             ("admonition opener", "[NOTE]\n====\nbody\n====\n"),
             ("quote directive", "[quote]\n----\nq\n----\n"),
-            ("cols directive", "[cols=\"1,1\"]\n|===\n|a|b\n|===\n"),
             (
                 "[source,] empty lang falls through then rejected",
                 "[source,]\n----\nx\n----\n",
+            ),
+            (
+                "[cols=\"\"] empty body falls through then rejected",
+                "[cols=\"\"]\n|===\n|a\n|===\n",
             ),
         )
         for desc, source in cases:
@@ -505,6 +510,287 @@ class UnknownBlockDetectionTests(unittest.TestCase):
         doc = parse("first line\n// looks like a comment but is prose\n")
         self.assertEqual(len(doc.blocks), 1)
         self.assertIsInstance(doc.blocks[0], Paragraph)
+
+
+# ---------------------------------------------------------------------------
+# Tables (step 14)
+# ---------------------------------------------------------------------------
+
+
+class TableTests(unittest.TestCase):
+    """Happy-path table parsing — fences, cells, headers, cols directive."""
+
+    def test_simple_two_column_table(self) -> None:
+        doc = parse("|===\n|a|b\n|c|d\n|===\n")
+        self.assertEqual(len(doc.blocks), 1)
+        table = doc.blocks[0]
+        assert isinstance(table, Table)
+        self.assertEqual(len(table.rows), 2)
+        # Header row.
+        header = table.rows[0]
+        assert isinstance(header, TableRow)
+        self.assertEqual(len(header.cells), 2)
+        for cell, expected_text in zip(header.cells, ("a", "b")):
+            assert isinstance(cell, TableCell)
+            self.assertEqual(cell.inlines, (_t(expected_text, 2),))
+        # Data row.
+        data = table.rows[1]
+        for cell, expected_text in zip(data.cells, ("c", "d")):
+            assert isinstance(cell, TableCell)
+            self.assertEqual(cell.inlines, (_t(expected_text, 3),))
+        self.assertIsNone(table.column_proportions)
+        self.assertEqual(table.source_line, 1)
+
+    def test_single_row_table(self) -> None:
+        # A header-only table is valid — the parser only requires
+        # at least one row between the fences.
+        doc = parse("|===\n|only header|here\n|===\n")
+        table = doc.blocks[0]
+        assert isinstance(table, Table)
+        self.assertEqual(len(table.rows), 1)
+        self.assertEqual(len(table.rows[0].cells), 2)
+
+    def test_three_column_table(self) -> None:
+        doc = parse("|===\n|A|B|C\n|1|2|3\n|===\n")
+        table = doc.blocks[0]
+        assert isinstance(table, Table)
+        self.assertEqual(len(table.rows[0].cells), 3)
+        self.assertEqual(len(table.rows[1].cells), 3)
+
+    def test_blank_lines_inside_fences_are_ignored(self) -> None:
+        # The plan tolerates blank lines inside table fences as
+        # visual whitespace — they don't add a row.
+        doc = parse("|===\n|a|b\n\n|c|d\n|===\n")
+        table = doc.blocks[0]
+        assert isinstance(table, Table)
+        self.assertEqual(len(table.rows), 2)
+
+    def test_cell_inline_markup(self) -> None:
+        doc = parse("|===\n|*bold*|_italic_\n|===\n")
+        table = doc.blocks[0]
+        assert isinstance(table, Table)
+        first, second = table.rows[0].cells
+        kinds_first = [type(n).__name__ for n in first.inlines]
+        kinds_second = [type(n).__name__ for n in second.inlines]
+        self.assertEqual(kinds_first, ["Bold"])
+        self.assertEqual(kinds_second, ["Italic"])
+
+    def test_cell_text_is_stripped_of_padding(self) -> None:
+        # Padding around cell content (``| cell |``) is presentational —
+        # the parsed inlines do not include the leading/trailing spaces.
+        doc = parse("|===\n| a | b |\n|===\n")
+        # Row split: ["| a ", " b ", ""]; trailing empty cell from
+        # the trailing | is also a cell — three cells total.
+        table = doc.blocks[0]
+        assert isinstance(table, Table)
+        self.assertEqual(len(table.rows[0].cells), 3)
+        self.assertEqual(table.rows[0].cells[0].inlines, (_t("a", 2),))
+        self.assertEqual(table.rows[0].cells[1].inlines, (_t("b", 2),))
+        self.assertEqual(table.rows[0].cells[2].inlines, ())
+
+    def test_cell_carries_source_line(self) -> None:
+        doc = parse("\n\n|===\n|x|y\n|z|w\n|===\n")
+        table = doc.blocks[0]
+        assert isinstance(table, Table)
+        self.assertEqual(table.rows[0].source_line, 4)
+        self.assertEqual(table.rows[1].source_line, 5)
+        # Every cell on a row shares that row's line number.
+        for cell in table.rows[0].cells:
+            self.assertEqual(cell.source_line, 4)
+
+
+class TableColsDirectiveTests(unittest.TestCase):
+    """The ``[cols="N,N,..."]`` directive parses to integer proportions."""
+
+    def test_cols_directive_two_columns(self) -> None:
+        doc = parse("[cols=\"1,2\"]\n|===\n|a|b\n|===\n")
+        table = doc.blocks[0]
+        assert isinstance(table, Table)
+        self.assertEqual(table.column_proportions, (1, 2))
+        # The block's source_line is the directive line, not the fence.
+        self.assertEqual(table.source_line, 1)
+
+    def test_cols_directive_three_columns(self) -> None:
+        doc = parse("[cols=\"1,2,3\"]\n|===\n|a|b|c\n|===\n")
+        table = doc.blocks[0]
+        assert isinstance(table, Table)
+        self.assertEqual(table.column_proportions, (1, 2, 3))
+
+    def test_cols_directive_with_whitespace(self) -> None:
+        # Whitespace around individual values is tolerated.
+        doc = parse("[cols=\"1, 2 , 3\"]\n|===\n|a|b|c\n|===\n")
+        table = doc.blocks[0]
+        assert isinstance(table, Table)
+        self.assertEqual(table.column_proportions, (1, 2, 3))
+
+
+class TableErrorTests(unittest.TestCase):
+    """Every error variant the table parser raises."""
+
+    def test_unterminated_table_raises(self) -> None:
+        with self.assertRaises(ParseError) as ctx:
+            parse("|===\n|a|b\n")
+        self.assertEqual(
+            ctx.exception.kind,
+            ParseErrorKind.UNTERMINATED_TABLE,
+        )
+        self.assertEqual(ctx.exception.line, 1)
+
+    def test_unterminated_table_with_directive_points_at_fence(self) -> None:
+        # The opening fence is on line 2; the error should point there
+        # so the user knows where to add the closing fence.
+        with self.assertRaises(ParseError) as ctx:
+            parse("[cols=\"1,1\"]\n|===\n|a|b\n")
+        self.assertEqual(
+            ctx.exception.kind,
+            ParseErrorKind.UNTERMINATED_TABLE,
+        )
+        self.assertEqual(ctx.exception.line, 2)
+
+    def test_empty_table_raises(self) -> None:
+        with self.assertRaises(ParseError) as ctx:
+            parse("|===\n|===\n")
+        self.assertEqual(ctx.exception.kind, ParseErrorKind.EMPTY_TABLE)
+        self.assertEqual(ctx.exception.line, 1)
+
+    def test_empty_table_with_only_blanks_between_raises(self) -> None:
+        # Blank lines don't count as rows.
+        with self.assertRaises(ParseError) as ctx:
+            parse("|===\n\n\n|===\n")
+        self.assertEqual(ctx.exception.kind, ParseErrorKind.EMPTY_TABLE)
+
+    def test_row_arity_mismatch_raises(self) -> None:
+        with self.assertRaises(ParseError) as ctx:
+            parse("|===\n|a|b\n|c\n|===\n")
+        self.assertEqual(
+            ctx.exception.kind,
+            ParseErrorKind.TABLE_ROW_ARITY_MISMATCH,
+        )
+        # The mismatched row is on line 3.
+        self.assertEqual(ctx.exception.line, 3)
+
+    def test_row_arity_mismatch_extra_cell_raises(self) -> None:
+        # Header has 2; data row has 3.
+        with self.assertRaises(ParseError) as ctx:
+            parse("|===\n|a|b\n|c|d|e\n|===\n")
+        self.assertEqual(
+            ctx.exception.kind,
+            ParseErrorKind.TABLE_ROW_ARITY_MISMATCH,
+        )
+
+    def test_block_inside_cell_raises(self) -> None:
+        # A heading inside the table fences is structurally invalid —
+        # cells are inline-only.
+        with self.assertRaises(ParseError) as ctx:
+            parse("|===\n== heading\n|a\n|===\n")
+        self.assertEqual(
+            ctx.exception.kind,
+            ParseErrorKind.BLOCK_INSIDE_INLINE_ONLY_CONTAINER,
+        )
+        self.assertEqual(ctx.exception.line, 2)
+
+    def test_code_fence_inside_cell_raises(self) -> None:
+        with self.assertRaises(ParseError) as ctx:
+            parse("|===\n----\n|a\n|===\n")
+        self.assertEqual(
+            ctx.exception.kind,
+            ParseErrorKind.BLOCK_INSIDE_INLINE_ONLY_CONTAINER,
+        )
+
+    def test_image_macro_inside_cell_raises(self) -> None:
+        with self.assertRaises(ParseError) as ctx:
+            parse("|===\nimage::cat.png[]\n|a\n|===\n")
+        self.assertEqual(
+            ctx.exception.kind,
+            ParseErrorKind.BLOCK_INSIDE_INLINE_ONLY_CONTAINER,
+        )
+
+    def test_list_bullet_inside_cell_raises(self) -> None:
+        with self.assertRaises(ParseError) as ctx:
+            parse("|===\n* a list item\n|a\n|===\n")
+        self.assertEqual(
+            ctx.exception.kind,
+            ParseErrorKind.BLOCK_INSIDE_INLINE_ONLY_CONTAINER,
+        )
+
+    def test_prose_inside_table_reports_unterminated(self) -> None:
+        # A prose line (no leading |) inside the fences indicates
+        # the user forgot to close the table — surface as
+        # UNTERMINATED_TABLE rather than smushing the prose into a
+        # cell.
+        with self.assertRaises(ParseError) as ctx:
+            parse("|===\nplain text\n|a|b\n|===\n")
+        self.assertEqual(
+            ctx.exception.kind,
+            ParseErrorKind.UNTERMINATED_TABLE,
+        )
+        # Points at the offending prose line.
+        self.assertEqual(ctx.exception.line, 2)
+
+    def test_cols_directive_not_followed_by_fence_raises(self) -> None:
+        with self.assertRaises(ParseError) as ctx:
+            parse("[cols=\"1,1\"]\nnot a fence\n")
+        self.assertEqual(ctx.exception.kind, ParseErrorKind.UNKNOWN_BLOCK)
+        self.assertEqual(ctx.exception.line, 1)
+
+    def test_cols_directive_at_end_of_file_raises_unknown_block(self) -> None:
+        with self.assertRaises(ParseError) as ctx:
+            parse("[cols=\"1,1\"]\n")
+        self.assertEqual(ctx.exception.kind, ParseErrorKind.UNKNOWN_BLOCK)
+
+    def test_bad_cols_directive_non_integer_raises(self) -> None:
+        with self.assertRaises(ParseError) as ctx:
+            parse("[cols=\"1,foo\"]\n|===\n|a|b\n|===\n")
+        self.assertEqual(
+            ctx.exception.kind,
+            ParseErrorKind.BAD_COLS_DIRECTIVE,
+        )
+        self.assertEqual(ctx.exception.line, 1)
+
+    def test_bad_cols_directive_zero_raises(self) -> None:
+        with self.assertRaises(ParseError) as ctx:
+            parse("[cols=\"0,1\"]\n|===\n|a|b\n|===\n")
+        self.assertEqual(
+            ctx.exception.kind,
+            ParseErrorKind.BAD_COLS_DIRECTIVE,
+        )
+
+    def test_bad_cols_directive_negative_raises(self) -> None:
+        with self.assertRaises(ParseError) as ctx:
+            parse("[cols=\"-1,1\"]\n|===\n|a|b\n|===\n")
+        self.assertEqual(
+            ctx.exception.kind,
+            ParseErrorKind.BAD_COLS_DIRECTIVE,
+        )
+
+    def test_bad_cols_directive_empty_value_raises(self) -> None:
+        # ``[cols="1,,2"]`` — the empty middle value is a hard error.
+        with self.assertRaises(ParseError) as ctx:
+            parse("[cols=\"1,,2\"]\n|===\n|a|b|c\n|===\n")
+        self.assertEqual(
+            ctx.exception.kind,
+            ParseErrorKind.BAD_COLS_DIRECTIVE,
+        )
+
+    def test_cols_directive_arity_mismatch_raises(self) -> None:
+        # Directive specifies 3 columns, table has 2.
+        with self.assertRaises(ParseError) as ctx:
+            parse("[cols=\"1,2,3\"]\n|===\n|a|b\n|===\n")
+        self.assertEqual(
+            ctx.exception.kind,
+            ParseErrorKind.BAD_COLS_DIRECTIVE,
+        )
+        # The directive line is what carries the mismatch info.
+        self.assertEqual(ctx.exception.line, 1)
+
+    def test_inline_error_inside_cell_propagates(self) -> None:
+        # Unterminated bold in a cell should raise BAD_INLINE_SPAN
+        # at the cell's line — same way paragraphs propagate inline
+        # errors.
+        with self.assertRaises(ParseError) as ctx:
+            parse("|===\n|*unclosed\n|===\n")
+        self.assertEqual(ctx.exception.kind, ParseErrorKind.BAD_INLINE_SPAN)
+        self.assertEqual(ctx.exception.line, 2)
 
 
 # ---------------------------------------------------------------------------

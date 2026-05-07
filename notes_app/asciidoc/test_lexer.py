@@ -14,11 +14,13 @@ from notes_app.asciidoc.lexer import (
     BlankToken,
     CodeDirectiveToken,
     CodeFenceToken,
+    ColsDirectiveToken,
     HeadingToken,
     ImageMacroToken,
     LineToken,
     ListBulletToken,
     ListNumberToken,
+    TableFenceToken,
     Token,
     source_lines,
     tokenize,
@@ -234,6 +236,100 @@ class ImageMacroTokenizationTests(unittest.TestCase):
                 self.assertEqual(token.raw, raw)
 
 
+class TableFenceTokenizationTests(unittest.TestCase):
+    """``|===`` on its own line is a :class:`TableFenceToken`.
+
+    The lexer emits the same token kind for opening and closing fences
+    — they are indistinguishable at the line level. The parser pairs
+    them by counting.
+    """
+
+    def test_table(self) -> None:
+        cases: tuple[tuple[str, str], ...] = (
+            ("plain fence", "|==="),
+            ("trailing whitespace stripped", "|===   "),
+        )
+        for desc, source in cases:
+            with self.subTest(desc):
+                tokens = tokenize(source)
+                self.assertEqual(len(tokens), 1)
+                token = tokens[0]
+                self.assertIsInstance(token, TableFenceToken)
+                assert isinstance(token, TableFenceToken)
+                self.assertEqual(token.kind, TokenKind.TABLE_FENCE)
+                self.assertEqual(token.line, 1)
+
+    def test_extra_equals_signs_are_not_a_fence(self) -> None:
+        # ``|====`` is not the AsciiDoc fence — the lexer doesn't
+        # recognise it. It falls through to a plain LineToken so the
+        # parser can reject it as UNKNOWN_BLOCK.
+        tokens = tokenize("|====")
+        self.assertEqual(len(tokens), 1)
+        self.assertIsInstance(tokens[0], LineToken)
+
+    def test_pair_of_fences_each_become_table_fence_tokens(self) -> None:
+        tokens = tokenize("|===\n|cell\n|===\n")
+        self.assertIsInstance(tokens[0], TableFenceToken)
+        self.assertIsInstance(tokens[1], LineToken)
+        self.assertIsInstance(tokens[2], TableFenceToken)
+
+
+class ColsDirectiveTokenizationTests(unittest.TestCase):
+    """``[cols="N,N,..."]`` produces a :class:`ColsDirectiveToken`.
+
+    The lexer only checks the structural shape — non-empty body
+    inside ``[cols="…"]``. The parser is responsible for validating
+    that each value is a positive integer.
+    """
+
+    def test_table(self) -> None:
+        cases: tuple[tuple[str, str, str], ...] = (
+            ("two columns", '[cols="1,2"]', "1,2"),
+            ("three columns", '[cols="1,2,3"]', "1,2,3"),
+            (
+                "internal whitespace preserved for parser",
+                '[cols="1, 2 , 3"]',
+                "1, 2 , 3",
+            ),
+            (
+                "non-integer body — still tokenised, parser rejects",
+                '[cols="1,foo"]',
+                "1,foo",
+            ),
+            (
+                "negative body — still tokenised, parser rejects",
+                '[cols="-1,2"]',
+                "-1,2",
+            ),
+        )
+        for desc, source, raw in cases:
+            with self.subTest(desc):
+                tokens = tokenize(source)
+                self.assertEqual(len(tokens), 1)
+                token = tokens[0]
+                self.assertIsInstance(token, ColsDirectiveToken)
+                assert isinstance(token, ColsDirectiveToken)
+                self.assertEqual(token.kind, TokenKind.COLS_DIRECTIVE)
+                self.assertEqual(token.raw, raw)
+
+    def test_empty_body_falls_through_to_line_token(self) -> None:
+        # ``[cols=""]`` — empty body. The lexer does not emit a
+        # ColsDirectiveToken with empty body; it falls through to a
+        # plain LineToken so the parser can reject the bracketed
+        # shape as UNKNOWN_BLOCK.
+        tokens = tokenize('[cols=""]')
+        self.assertEqual(len(tokens), 1)
+        self.assertIsInstance(tokens[0], LineToken)
+
+    def test_missing_close_quote_falls_through(self) -> None:
+        # ``[cols="1,2]`` — missing closing quote. Not the structural
+        # shape we recognise; falls through to LineToken.
+        tokens = tokenize('[cols="1,2]')
+        self.assertEqual(len(tokens), 1)
+        self.assertIsInstance(tokens[0], LineToken)
+
+
+
 class BlankTokenizationTests(unittest.TestCase):
     """Empty and whitespace-only lines produce :class:`BlankToken`."""
 
@@ -260,7 +356,6 @@ class LineTokenizationTests(unittest.TestCase):
             ("inline-marked prose", "Some *bold* text", "Some *bold* text"),
             ("attribute entry — parser rejects", ":author: me", ":author: me"),
             ("comment — parser rejects", "// a comment", "// a comment"),
-            ("table fence — parser rejects", "|===", "|==="),
             (
                 "blockquote fence — parser rejects",
                 "____",

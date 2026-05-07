@@ -24,10 +24,10 @@ Principles & invariants
   spinning up the database, the renderer, or a display server.
 * This module is shared between every later build step. Step 4 produced
   the original "core" set; step 13 extends the inline union with
-  :class:`Monospace` and :class:`Link`; later steps (14/15) will add
-  ``Table`` / ``TableRow`` / ``TableCell``, ``Admonition``, and
-  ``Blockquote`` to the block union. The invariant is that adding a
-  node never changes the existing nodes.
+  :class:`Monospace` and :class:`Link`; step 14 adds :class:`Table`,
+  :class:`TableRow`, and :class:`TableCell` to the block union; step 15
+  will add ``Admonition`` and ``Blockquote``. The invariant is that
+  adding a node never changes the existing nodes.
 """
 
 from __future__ import annotations
@@ -254,6 +254,72 @@ class Image:
     source_line: int
 
 
+@dataclass(frozen=True)
+class TableCell:
+    """A single ``|cell`` inside a table row.
+
+    A cell holds **inline-only** content — no nested lists, code blocks,
+    images, tables, admonitions, or blockquotes. The parser enforces
+    this by parsing each cell's text through :func:`parse_inline`
+    (which only produces inline nodes) rather than dispatching through
+    the block-level parser. The "no nested blocks" rule for tables is
+    therefore impossible to violate by construction in v1, where cells
+    are single-line text bounded by ``|`` separators.
+
+    ``source_line`` is the source line of the row that contains this
+    cell — every cell on a given row shares the same line number.
+    """
+
+    inlines: tuple[InlineNode, ...]
+    source_line: int
+
+
+@dataclass(frozen=True)
+class TableRow:
+    """One row of a :class:`Table`.
+
+    Every row has the same arity as the header row (``rows[0]`` of the
+    enclosing :class:`Table`); the parser raises
+    :class:`ParseErrorKind.TABLE_ROW_ARITY_MISMATCH` for any row whose
+    cell count differs from the header's.
+
+    The first row of a table is implicitly the header — there is no
+    separate ``header`` field on the table. The renderer styles
+    ``rows[0]`` differently (bold weight) to surface this convention.
+    """
+
+    cells: tuple[TableCell, ...]
+    source_line: int
+
+
+@dataclass(frozen=True)
+class Table:
+    """A fenced ``|===`` table.
+
+    ``rows`` is the parsed sequence of rows. ``rows[0]`` is always the
+    header — the parser raises :class:`ParseErrorKind.EMPTY_TABLE` if
+    there are no rows at all between the fences, so a :class:`Table`
+    instance always has at least one row.
+
+    ``column_proportions`` carries the integer values from a leading
+    ``[cols="N,N,..."]`` directive, when one was present, or
+    :data:`None` otherwise. Values are positive integers (zero or
+    negative values raise :class:`ParseErrorKind.BAD_COLS_DIRECTIVE`
+    at parse time). When present, the directive's count must match
+    the table's arity — the renderer relies on this to compute
+    ``max-width-chars`` for each column. When absent, the renderer
+    treats every column as equally proportioned.
+
+    ``source_line`` is the line of the opening ``|===`` fence — or, if
+    a ``[cols="..."]`` directive preceded it, the line of the
+    directive itself.
+    """
+
+    rows: tuple[TableRow, ...]
+    column_proportions: tuple[int, ...] | None
+    source_line: int
+
+
 type BlockNode = (
     Section
     | Paragraph
@@ -261,11 +327,14 @@ type BlockNode = (
     | UnorderedList
     | CodeBlock
     | Image
+    | Table
 )
-"""The closed union of block node kinds the step-4 parser produces.
+"""The closed union of block node kinds the parser produces.
 
-Later build steps extend this with ``Table``, ``Admonition``, and
-``Blockquote``.
+Step 4 produced :class:`Section`, :class:`Paragraph`, :class:`OrderedList`,
+:class:`UnorderedList`, :class:`CodeBlock`, and :class:`Image`. Step 14
+extends this union with :class:`Table`. Step 15 will further extend it
+with ``Admonition`` and ``Blockquote``.
 """
 
 

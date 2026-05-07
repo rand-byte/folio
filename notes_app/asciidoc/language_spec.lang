@@ -3,22 +3,23 @@
   Notes App AsciiDoc subset — GtkSourceView 5 language definition.
 
   This grammar covers the constructs the parser understands as of build
-  step 13 (see notes_app/asciidoc/parser.py and section 7 of plan.md):
+  step 14 (see notes_app/asciidoc/parser.py and section 7 of plan.md):
   document title, sections (== through six equals signs), unordered
   lists (asterisk item), ordered lists (dot item), code blocks
   (four-hyphen fences, with optional [source,lang] directive), image
   macros (image::file[]), the four inline styles bold (*x*), italic
   (_x_), strikethrough ([.line-through]#x#), and underline
-  ([.underline]#x#), inline monospace (`x`), and links in three forms:
+  ([.underline]#x#), inline monospace (`x`), links in three forms:
   bare URL (https://x), URL-with-text (https://x[label]), and the
-  link:URL[label] macro. Anything outside this subset is intentionally
-  NOT highlighted; it is a parse error at render time and the editor
-  lets the raw text show through.
+  link:URL[label] macro, and tables (|=== fences, with optional
+  [cols="N,N,..."] directive). Anything outside this subset is
+  intentionally NOT highlighted; it is a parse error at render time
+  and the editor lets the raw text show through.
 
-  Build steps 14 and 15 extend this file with tables, admonitions, and
-  blockquotes. Adding those constructs here ahead of time would
-  highlight text the parser still rejects, which is exactly the
-  dishonest UX feedback we are trying to avoid.
+  Build step 15 extends this file with admonitions and blockquotes.
+  Adding those constructs here ahead of time would highlight text the
+  parser still rejects, which is exactly the dishonest UX feedback we
+  are trying to avoid.
 
   Style ids reference def.lang (shipped with GtkSourceView) so any
   installed style scheme renders sensible colours without bundling our
@@ -50,6 +51,9 @@
     <style id="code-block"   name="Code Block"     map-to="def:preformatted-section"/>
     <style id="code-fence"   name="Code Fence"     map-to="def:preprocessor"/>
     <style id="image-macro"  name="Image Macro"    map-to="def:link-destination"/>
+    <style id="table-fence"  name="Table Fence"    map-to="def:preprocessor"/>
+    <style id="table-cell-separator" name="Table Cell Separator" map-to="def:list-marker"/>
+    <style id="cols-directive" name="Cols Directive" map-to="def:preprocessor"/>
   </styles>
 
   <definitions>
@@ -119,6 +123,42 @@
     -->
     <context id="image-macro" style-ref="image-macro">
       <match>^image::[^\[\]\s]+\[[^\]]*\]\s*$</match>
+    </context>
+
+    <!--
+      Cols directive: [cols="N,N,..."] on its own line, preceding a
+      table fence. Highlighted whether or not the next line is a
+      fence — the parser performs the pairing and validates the
+      contents; the highlighter only colours the directive shape.
+    -->
+    <context id="cols-directive" style-ref="cols-directive">
+      <match>^\[cols=&quot;[^&quot;]*&quot;\][ \t]*$</match>
+    </context>
+
+    <!--
+      Table fence: a line that is exactly |=== . Used at both ends of
+      a table. Highlighted as a preprocessor-style marker so the user
+      sees the table boundaries at a glance. The cells between the
+      fences are not styled by a region context — instead, the
+      table-cell-separator context below picks up the leading | of
+      each row, and inline contexts (bold, italic, link, …) keep
+      highlighting cell content like any other prose line.
+    -->
+    <context id="table-fence" style-ref="table-fence">
+      <match>^\|===\s*$</match>
+    </context>
+
+    <!--
+      Table cell separator: a leading | at the start of a row line,
+      followed by any subsequent | within that row. The match is
+      anchored to the start of a line so paragraph prose containing
+      a literal | outside a table is unaffected. This is a heuristic
+      — the highlighter doesn't track table-fence pairing — but the
+      "row line starts with |" rule covers every supported case in
+      the v1 subset and gives table cells a clear visible delimiter.
+    -->
+    <context id="table-cell-separator" style-ref="table-cell-separator">
+      <match>^\||(?&lt;=[^|])\|(?=.*$)</match>
     </context>
 
     <!--
@@ -229,10 +269,13 @@
       <include>
         <context ref="code-block"/>
         <context ref="source-directive"/>
+        <context ref="cols-directive"/>
+        <context ref="table-fence"/>
         <context ref="heading"/>
         <context ref="image-macro"/>
         <context ref="unordered-list-bullet"/>
         <context ref="ordered-list-bullet"/>
+        <context ref="table-cell-separator"/>
         <context ref="link-macro"/>
         <context ref="url-with-text"/>
         <context ref="bare-url"/>

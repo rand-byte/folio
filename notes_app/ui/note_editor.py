@@ -62,11 +62,11 @@ Principles & invariants
   built from scratch — no display, no GtkSourceView — and so each
   callback is a one-line lambda binding a fixed delimiter or
   template to those helpers.
-* Toolbar surface as of step 13 covers Heading, Bold, Italic,
+* Toolbar surface as of step 14 covers Heading, Bold, Italic,
   Strikethrough, Underline, Monospace, Link, Bullet list, Numbered
-  list, Code block, and Image. Table lands at step 14; admonition
-  and blockquote at step 15. Adding all the buttons up-front would
-  imply support the parser does not yet have, which the strict-mode
+  list, Code block, Image, and Table. Admonition and blockquote
+  land at step 15. Adding all the buttons up-front would imply
+  support the parser does not yet have, which the strict-mode
   policy of the parser would surface as a parse error the moment
   the user clicked the premature button.
 * The image button opens a :class:`Gtk.FileDialog` (the GTK 4.10
@@ -200,6 +200,21 @@ _HEADING_TEXT: Final[str] = "== Heading"
 _BULLET_LIST_TEXT: Final[str] = "* item"
 _NUMBERED_LIST_TEXT: Final[str] = ". item"
 _CODE_BLOCK_TEMPLATE: Final[str] = "----\ncode\n----"
+_TABLE_TEMPLATE: Final[str] = (
+    "|===\n"
+    "|Column A|Column B\n"
+    "|cell 1|cell 2\n"
+    "|cell 3|cell 4\n"
+    "|==="
+)
+"""AsciiDoc snippet inserted by the Table toolbar button.
+
+A 2-column, 1-header-plus-2-row table — the smallest example that
+shows the user the syntax of header / body rows and cell separators
+without dropping a degenerate single-row table that hides the
+arity-mismatch behaviour. The user adds, removes, or renames cells
+from there.
+"""
 
 
 def _image_macro_for_filename(filename: str) -> str:
@@ -756,7 +771,7 @@ class NoteEditor(Gtk.Box):  # pylint: disable=too-many-instance-attributes
     # ------------------------------------------------------------------
 
     def _build_toolbar(self) -> Gtk.Box:
-        """Construct the editor's toolbar — the step-13 core set.
+        """Construct the editor's toolbar — the step-14 core set.
 
         The toolbar is a horizontal :class:`Gtk.Box`. Each button is
         a :class:`Gtk.Button` whose clicked signal binds a closure
@@ -769,6 +784,10 @@ class NoteEditor(Gtk.Box):  # pylint: disable=too-many-instance-attributes
         backtick delimiter, and link is an inline-insert that drops
         a ``link:URL[label]`` template at the cursor with the URL
         portion preselected for immediate replacement.
+
+        Step 14 adds the Table button at the end of the blocks
+        group: it inserts a small 2-column table template that the
+        user can fill in.
         """
         toolbar = Gtk.Box.new(Gtk.Orientation.HORIZONTAL, spacing=4)
         toolbar.set_margin_top(4)
@@ -854,7 +873,7 @@ class NoteEditor(Gtk.Box):  # pylint: disable=too-many-instance-attributes
 
         toolbar.append(Gtk.Separator.new(Gtk.Orientation.VERTICAL))
 
-        # Blocks group: code block + image (file dialog).
+        # Blocks group: code block + image + table.
         toolbar.append(
             self._make_insert_button(
                 label="</>",
@@ -870,6 +889,13 @@ class NoteEditor(Gtk.Box):  # pylint: disable=too-many-instance-attributes
         # its sensitivity (no selection → image button disabled).
         self._image_button = self._make_image_button()
         toolbar.append(self._image_button)
+        toolbar.append(
+            self._make_insert_button(
+                label="⊞",
+                tooltip="Table",
+                text=_TABLE_TEMPLATE,
+            )
+        )
 
         # A horizontal-expanding spacer pushes the trailing AsciiDoc
         # label to the right edge.

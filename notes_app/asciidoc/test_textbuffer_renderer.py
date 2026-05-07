@@ -16,8 +16,14 @@ gi.require_version("Pango", "1.0")
 # pylint: disable=wrong-import-position
 from gi.repository import Gdk, Gtk  # noqa: E402
 
+from notes_app.asciidoc.ast import Bold, Italic, Monospace, Text
 from notes_app.asciidoc.tag_table import TagName, build_tag_table
-from notes_app.asciidoc.textbuffer_renderer import TextBufferRenderer
+from notes_app.asciidoc.textbuffer_renderer import (
+    TextBufferRenderer,
+    _inlines_to_pango_markup,
+    _max_chars_per_column,
+)
+from notes_app.config.defaults import TARGET_CHARS_PER_LINE
 from notes_app.models.parse_error import ParseError
 
 
@@ -819,6 +825,352 @@ class LinkRenderingTests(unittest.TestCase):
         renderer, _buffer, table = _build_renderer()
         bold_tag = table.lookup(TagName.BOLD.value)
         self.assertIsNone(renderer.url_for_tags([bold_tag]))
+
+
+# ---------------------------------------------------------------------------
+# Tables (step 14) — pure helper tests
+# ---------------------------------------------------------------------------
+
+
+class MaxCharsPerColumnTests(unittest.TestCase):
+    """``_max_chars_per_column`` distributes the character budget."""
+
+    def test_equal_proportions_split_budget_evenly(self) -> None:
+        # Two columns at proportion (1, 1) each get half the budget.
+        # The column_width_px factor cancels, so the result is
+        # independent of the absolute pixel width.
+        result = _max_chars_per_column((1, 1), 800)
+        expected_each = round(TARGET_CHARS_PER_LINE / 2)
+        self.assertEqual(result, (expected_each, expected_each))
+
+    def test_unequal_proportions(self) -> None:
+        # ``[cols="1,2"]`` over a 66-char budget → 22, 44.
+        result = _max_chars_per_column((1, 2), 800)
+        self.assertEqual(
+            result,
+            (
+                round(TARGET_CHARS_PER_LINE * 1 / 3),
+                round(TARGET_CHARS_PER_LINE * 2 / 3),
+            ),
+        )
+
+    def test_three_equal_columns(self) -> None:
+        result = _max_chars_per_column((1, 1, 1), 800)
+        per_col = round(TARGET_CHARS_PER_LINE / 3)
+        self.assertEqual(result, (per_col, per_col, per_col))
+
+    def test_result_is_invariant_under_column_width_px(self) -> None:
+        # The derivation cancels ``column_width_px`` algebraically;
+        # this test pins that contract so a future, font-aware
+        # derivation that breaks invariance does it intentionally.
+        for width in (200, 800, 1600, 4000):
+            with self.subTest(column_width_px=width):
+                self.assertEqual(
+                    _max_chars_per_column((1, 2), width),
+                    _max_chars_per_column((1, 2), 800),
+                )
+
+    def test_zero_or_negative_column_width_yields_minimum_widths(self) -> None:
+        # Before the article container has been allocated the resolver
+        # can return 0 — the function should not divide by zero.
+        for width in (0, -1, -800):
+            with self.subTest(column_width_px=width):
+                result = _max_chars_per_column((1, 2, 3), width)
+                self.assertEqual(result, (1, 1, 1))
+
+    def test_zero_clamped_to_at_least_one(self) -> None:
+        # Pathological case: a column whose proportion is negligible
+        # against a huge total. The function clamps to a minimum of 1.
+        # (The parser rejects zero/negative values, but the helper
+        # itself stays defensive — defence in depth.)
+        result = _max_chars_per_column((1,) + (10000,) * 100, 800)
+        self.assertGreaterEqual(result[0], 1)
+
+
+class InlinesToPangoMarkupTests(unittest.TestCase):
+    """The inline-to-Pango converter handles every inline kind."""
+
+    def test_plain_text_is_escaped(self) -> None:
+        markup = _inlines_to_pango_markup((Text(content="a & b", source_line=1),))
+        # ``&`` becomes ``&amp;`` — Pango requires escaped entities.
+        self.assertEqual(markup, "a &amp; b")
+
+    def test_text_with_angle_brackets_is_escaped(self) -> None:
+        markup = _inlines_to_pango_markup(
+            (Text(content="<x>", source_line=1),)
+        )
+        self.assertEqual(markup, "&lt;x&gt;")
+
+    def test_bold_wraps_content(self) -> None:
+        markup = _inlines_to_pango_markup(
+            (Bold(children=(Text(content="x", source_line=1),), source_line=1),)
+        )
+        self.assertEqual(markup, "<b>x</b>")
+
+    def test_italic_wraps_content(self) -> None:
+        markup = _inlines_to_pango_markup(
+            (Italic(children=(Text(content="x", source_line=1),), source_line=1),)
+        )
+        self.assertEqual(markup, "<i>x</i>")
+
+    def test_monospace_wraps_with_tt_and_escapes_body(self) -> None:
+        # Monospace body is a literal :class:`str` — the converter
+        # must escape it (no HTML interpretation) and wrap in <tt>.
+        markup = _inlines_to_pango_markup(
+            (Monospace(content="a&b<c>", source_line=1),)
+        )
+        self.assertEqual(markup, "<tt>a&amp;b&lt;c&gt;</tt>")
+
+    def test_bold_flag_wraps_whole_result(self) -> None:
+        # ``bold=True`` adds an outer <b> so header cells render bold.
+        markup = _inlines_to_pango_markup(
+            (Text(content="header", source_line=1),),
+            bold=True,
+        )
+        self.assertEqual(markup, "<b>header</b>")
+
+    def test_bold_flag_preserves_nested_inlines(self) -> None:
+        markup = _inlines_to_pango_markup(
+            (
+                Text(content="x ", source_line=1),
+                Italic(
+                    children=(Text(content="y", source_line=1),),
+                    source_line=1,
+                ),
+            ),
+            bold=True,
+        )
+        self.assertEqual(markup, "<b>x <i>y</i></b>")
+
+    def test_empty_inlines_produce_empty_string(self) -> None:
+        # An empty cell (e.g. trailing ``|`` in a row) has no inlines.
+        self.assertEqual(_inlines_to_pango_markup(()), "")
+        # With bold flag, still wraps in <b> — Pango renders <b></b>
+        # as nothing, which is the right visual outcome.
+        self.assertEqual(_inlines_to_pango_markup((), bold=True), "<b></b>")
+
+
+# ---------------------------------------------------------------------------
+# Tables (step 14) — widget rendering
+# ---------------------------------------------------------------------------
+
+
+@unittest.skipUnless(_display_available(), "no GDK display")
+class TableRenderingTests(unittest.TestCase):
+    """Tables produce a :class:`Gtk.Frame` containing a :class:`Gtk.Grid`."""
+
+    def test_table_attaches_a_frame_widget(self) -> None:
+        src = "= D\n\n|===\n|a|b\n|c|d\n|===\n"
+        renderer, buffer, _ = _build_renderer()
+        attached: list[tuple[Gtk.TextChildAnchor, Gtk.Widget]] = []
+        renderer.render_into(
+            src, buffer, note_id="n1", attach_widget=_collect(attached)
+        )
+        self.assertEqual(len(attached), 1)
+        anchor, widget = attached[0]
+        self.assertIsInstance(anchor, Gtk.TextChildAnchor)
+        self.assertIsInstance(widget, Gtk.Frame)
+
+    def test_frame_contains_a_grid_with_one_label_per_cell(self) -> None:
+        src = "|===\n|a|b\n|c|d\n|===\n"
+        renderer, buffer, _ = _build_renderer()
+        attached: list[tuple[Gtk.TextChildAnchor, Gtk.Widget]] = []
+        renderer.render_into(
+            src, buffer, note_id="n1", attach_widget=_collect(attached)
+        )
+        frame = cast(Gtk.Frame, attached[0][1])
+        grid = frame.get_child()
+        self.assertIsInstance(grid, Gtk.Grid)
+        assert isinstance(grid, Gtk.Grid)
+        # Each cell occupies a 1x1 grid slot.
+        for row in range(2):
+            for col in range(2):
+                child = grid.get_child_at(col, row)
+                self.assertIsInstance(child, Gtk.Label)
+
+    def test_cells_carry_pango_markup_with_inline_formatting(self) -> None:
+        src = "|===\n|*A*|_B_\n|`c`|d\n|===\n"
+        renderer, buffer, _ = _build_renderer()
+        attached: list[tuple[Gtk.TextChildAnchor, Gtk.Widget]] = []
+        renderer.render_into(
+            src, buffer, note_id="n1", attach_widget=_collect(attached)
+        )
+        frame = cast(Gtk.Frame, attached[0][1])
+        grid = cast(Gtk.Grid, frame.get_child())
+        # Header cells get an outer <b> from the bold flag.
+        header_a = cast(Gtk.Label, grid.get_child_at(0, 0))
+        header_b = cast(Gtk.Label, grid.get_child_at(1, 0))
+        self.assertEqual(header_a.get_label(), "<b><b>A</b></b>")
+        self.assertEqual(header_b.get_label(), "<b><i>B</i></b>")
+        # Data cells: monospace and plain text.
+        data_c = cast(Gtk.Label, grid.get_child_at(0, 1))
+        data_d = cast(Gtk.Label, grid.get_child_at(1, 1))
+        self.assertEqual(data_c.get_label(), "<tt>c</tt>")
+        self.assertEqual(data_d.get_label(), "d")
+
+    def test_cell_labels_have_wrap_true(self) -> None:
+        # ``wrap = TRUE`` is the core layout invariant for table cells —
+        # the renderer relies on wrapping (not horizontal scroll) to
+        # fit content within the article column.
+        src = "|===\n|a|b\n|===\n"
+        renderer, buffer, _ = _build_renderer()
+        attached: list[tuple[Gtk.TextChildAnchor, Gtk.Widget]] = []
+        renderer.render_into(
+            src, buffer, note_id="n1", attach_widget=_collect(attached)
+        )
+        grid = cast(Gtk.Grid, cast(Gtk.Frame, attached[0][1]).get_child())
+        for col in range(2):
+            label = cast(Gtk.Label, grid.get_child_at(col, 0))
+            self.assertTrue(
+                label.get_wrap(),
+                f"cell at column {col} must have wrap=TRUE",
+            )
+
+    def test_cell_max_width_chars_reflects_equal_split_when_no_directive(self) -> None:
+        # No ``[cols=…]`` directive → each of two columns gets
+        # TARGET_CHARS_PER_LINE / 2.
+        src = "|===\n|a|b\n|===\n"
+        renderer, buffer, _ = _build_renderer()
+        attached: list[tuple[Gtk.TextChildAnchor, Gtk.Widget]] = []
+        renderer.render_into(
+            src, buffer, note_id="n1", attach_widget=_collect(attached)
+        )
+        grid = cast(Gtk.Grid, cast(Gtk.Frame, attached[0][1]).get_child())
+        expected = round(TARGET_CHARS_PER_LINE / 2)
+        for col in range(2):
+            label = cast(Gtk.Label, grid.get_child_at(col, 0))
+            self.assertEqual(label.get_max_width_chars(), expected)
+
+    def test_cell_max_width_chars_respects_cols_directive(self) -> None:
+        # ``[cols="1,2"]`` → column 0 gets 1/3 of budget, column 1
+        # gets 2/3.
+        src = "[cols=\"1,2\"]\n|===\n|a|b\n|===\n"
+        renderer, buffer, _ = _build_renderer()
+        attached: list[tuple[Gtk.TextChildAnchor, Gtk.Widget]] = []
+        renderer.render_into(
+            src, buffer, note_id="n1", attach_widget=_collect(attached)
+        )
+        grid = cast(Gtk.Grid, cast(Gtk.Frame, attached[0][1]).get_child())
+        col_0 = cast(Gtk.Label, grid.get_child_at(0, 0))
+        col_1 = cast(Gtk.Label, grid.get_child_at(1, 0))
+        self.assertEqual(
+            col_0.get_max_width_chars(),
+            round(TARGET_CHARS_PER_LINE / 3),
+        )
+        self.assertEqual(
+            col_1.get_max_width_chars(),
+            round(TARGET_CHARS_PER_LINE * 2 / 3),
+        )
+
+    def test_table_anchor_is_placed_in_outer_buffer(self) -> None:
+        # Same invariant as code blocks — the anchor lives at a real
+        # offset and is recoverable from the buffer.
+        renderer, buffer, _ = _build_renderer()
+        attached: list[tuple[Gtk.TextChildAnchor, Gtk.Widget]] = []
+        renderer.render_into(
+            "|===\n|a\n|===\n",
+            buffer,
+            note_id="n1",
+            attach_widget=_collect(attached),
+        )
+        anchor = attached[0][0]
+        anchor_offsets = _anchor_offsets(buffer)
+        self.assertEqual(len(anchor_offsets), 1)
+        located = buffer.get_iter_at_offset(anchor_offsets[0]).get_child_anchor()
+        self.assertIs(located, anchor)
+
+    def test_three_column_table_with_directive(self) -> None:
+        src = "[cols=\"1,2,3\"]\n|===\n|A|B|C\n|x|y|z\n|===\n"
+        renderer, buffer, _ = _build_renderer()
+        attached: list[tuple[Gtk.TextChildAnchor, Gtk.Widget]] = []
+        renderer.render_into(
+            src, buffer, note_id="n1", attach_widget=_collect(attached)
+        )
+        grid = cast(Gtk.Grid, cast(Gtk.Frame, attached[0][1]).get_child())
+        # Six labels: 3 cols × 2 rows.
+        for row in range(2):
+            for col in range(3):
+                self.assertIsInstance(
+                    grid.get_child_at(col, row),
+                    Gtk.Label,
+                )
+        # Proportions sum to 6 — each column gets p/6 of the budget.
+        for col, proportion in enumerate((1, 2, 3)):
+            label = cast(Gtk.Label, grid.get_child_at(col, 0))
+            self.assertEqual(
+                label.get_max_width_chars(),
+                round(TARGET_CHARS_PER_LINE * proportion / 6),
+            )
+
+    def test_only_first_row_is_styled_as_header(self) -> None:
+        # Header cell markup is wrapped in <b>…</b>; data cells are not.
+        src = "|===\n|H1|H2\n|d1|d2\n|x1|x2\n|===\n"
+        renderer, buffer, _ = _build_renderer()
+        attached: list[tuple[Gtk.TextChildAnchor, Gtk.Widget]] = []
+        renderer.render_into(
+            src, buffer, note_id="n1", attach_widget=_collect(attached)
+        )
+        grid = cast(Gtk.Grid, cast(Gtk.Frame, attached[0][1]).get_child())
+        # Row 0: header — markup begins with "<b>".
+        for col in range(2):
+            label = cast(Gtk.Label, grid.get_child_at(col, 0))
+            self.assertTrue(label.get_label().startswith("<b>"))
+            self.assertTrue(label.get_label().endswith("</b>"))
+        # Rows 1, 2: data — markup is bare text, no <b>.
+        for row in (1, 2):
+            for col in range(2):
+                label = cast(Gtk.Label, grid.get_child_at(col, row))
+                self.assertFalse(label.get_label().startswith("<b>"))
+
+    def test_column_width_resolver_called_at_render_time(self) -> None:
+        # The renderer reads ``column_width_px`` once per render so a
+        # subsequent allocation change (next render) picks up the new
+        # value. This test asserts the resolver is invoked; the
+        # specific pixel value isn't part of the cell-label width
+        # derivation in this implementation (we use the static
+        # TARGET_CHARS_PER_LINE budget), but the resolver must still
+        # be called so future implementations that scale by pixels
+        # have a stable contract to extend.
+        calls: list[int] = []
+
+        def resolver() -> int:
+            calls.append(1)
+            return 800
+
+        renderer, buffer, _ = _build_renderer(column_width_px=resolver)
+        renderer.render_into(
+            "|===\n|a|b\n|===\n",
+            buffer,
+            note_id="n1",
+        )
+        self.assertGreaterEqual(len(calls), 1)
+
+    def test_cell_with_link_emits_anchor_markup(self) -> None:
+        # A link in a cell becomes <a href="..."> markup.
+        src = "|===\n|https://example.com[label]\n|===\n"
+        renderer, buffer, _ = _build_renderer()
+        attached: list[tuple[Gtk.TextChildAnchor, Gtk.Widget]] = []
+        renderer.render_into(
+            src, buffer, note_id="n1", attach_widget=_collect(attached)
+        )
+        grid = cast(Gtk.Grid, cast(Gtk.Frame, attached[0][1]).get_child())
+        label = cast(Gtk.Label, grid.get_child_at(0, 0))
+        # Header row, so wrapped in <b>. Link href present.
+        self.assertIn('<a href="https://example.com">', label.get_label())
+        self.assertIn("label</a>", label.get_label())
+
+    def test_cell_label_alignment_is_top_left(self) -> None:
+        # xalign=0.0, yalign=0.0 — left-aligned, top-aligned.
+        src = "|===\n|a\n|===\n"
+        renderer, buffer, _ = _build_renderer()
+        attached: list[tuple[Gtk.TextChildAnchor, Gtk.Widget]] = []
+        renderer.render_into(
+            src, buffer, note_id="n1", attach_widget=_collect(attached)
+        )
+        grid = cast(Gtk.Grid, cast(Gtk.Frame, attached[0][1]).get_child())
+        label = cast(Gtk.Label, grid.get_child_at(0, 0))
+        self.assertEqual(label.get_xalign(), 0.0)
+        self.assertEqual(label.get_yalign(), 0.0)
 
 
 if __name__ == "__main__":

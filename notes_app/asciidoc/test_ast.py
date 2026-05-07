@@ -23,6 +23,9 @@ from notes_app.asciidoc.ast import (
     Paragraph,
     Section,
     Strikethrough,
+    Table,
+    TableCell,
+    TableRow,
     Text,
     Underline,
     UnorderedList,
@@ -60,6 +63,9 @@ class AstNodeShapeTests(unittest.TestCase):
             UnorderedList,
             CodeBlock,
             Image,
+            TableCell,
+            TableRow,
+            Table,
             Document,
         )
         for cls in classes:
@@ -83,6 +89,9 @@ class AstNodeShapeTests(unittest.TestCase):
             (UnorderedList, {"items", "source_line"}),
             (CodeBlock, {"language", "content", "source_line"}),
             (Image, {"filename", "attrs", "source_line"}),
+            (TableCell, {"inlines", "source_line"}),
+            (TableRow, {"cells", "source_line"}),
+            (Table, {"rows", "column_proportions", "source_line"}),
             (Document, {"title", "blocks", "source_line"}),
         )
         for cls, expected in cases:
@@ -113,6 +122,13 @@ class AstFrozenTests(unittest.TestCase):
         document = Document(title=None, blocks=(), source_line=1)
         with self.assertRaises(FrozenInstanceError):
             document.blocks = ()  # type: ignore[misc]
+
+    def test_table_is_frozen(self) -> None:
+        cell = TableCell(inlines=(_make_text("a"),), source_line=2)
+        row = TableRow(cells=(cell,), source_line=2)
+        table = Table(rows=(row,), column_proportions=None, source_line=1)
+        with self.assertRaises(FrozenInstanceError):
+            table.rows = ()  # type: ignore[misc]
 
 
 class AstConstructionTests(unittest.TestCase):
@@ -179,6 +195,36 @@ class AstConstructionTests(unittest.TestCase):
         unordered = UnorderedList(items=(item,), source_line=2)
         self.assertEqual(ordered.items, (item,))
         self.assertEqual(unordered.items, (item,))
+
+    def test_table_cell_holds_inline_tuple(self) -> None:
+        cell = TableCell(inlines=(_make_text("x"),), source_line=3)
+        self.assertEqual(cell.inlines, (_make_text("x"),))
+        self.assertEqual(cell.source_line, 3)
+
+    def test_table_row_holds_cells(self) -> None:
+        cell_a = TableCell(inlines=(_make_text("a"),), source_line=4)
+        cell_b = TableCell(inlines=(_make_text("b"),), source_line=4)
+        row = TableRow(cells=(cell_a, cell_b), source_line=4)
+        self.assertEqual(len(row.cells), 2)
+        self.assertEqual(row.source_line, 4)
+
+    def test_table_records_rows_and_optional_proportions(self) -> None:
+        cell = TableCell(inlines=(_make_text("a"),), source_line=2)
+        row = TableRow(cells=(cell,), source_line=2)
+        # Without a [cols=…] directive, column_proportions is None.
+        without_directive = Table(
+            rows=(row,),
+            column_proportions=None,
+            source_line=1,
+        )
+        self.assertIsNone(without_directive.column_proportions)
+        # With a directive, the proportions are recorded as a tuple.
+        with_directive = Table(
+            rows=(row,),
+            column_proportions=(1, 2, 3),
+            source_line=1,
+        )
+        self.assertEqual(with_directive.column_proportions, (1, 2, 3))
 
 
 class AstEqualityTests(unittest.TestCase):

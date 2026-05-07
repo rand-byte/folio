@@ -22,11 +22,13 @@ Principles & invariants
   un-stripped source line is *not* carried on the token: when the
   parser needs verbatim text (e.g. the body of a code block), it reads
   it directly from the source — see :func:`source_lines`.
-* Step 4's lexer recognises only the constructs that step 4's parser
-  understands. Tokens for tables, admonitions, blockquotes, and quote
-  / cols directives are listed in :class:`TokenKind` for forward
-  compatibility but are not produced here. They will be added when the
-  matching parser support lands (steps 14 / 15).
+* Step 4's lexer recognised only the constructs that step 4's parser
+  understood. Step 14 extends the produced set with
+  :class:`TableFenceToken` and :class:`ColsDirectiveToken` for table
+  support. Tokens for admonitions, blockquotes, and quote directives
+  remain listed in :class:`TokenKind` for forward compatibility but
+  are not produced here. They will be added when the matching parser
+  support lands (step 15).
 * The :data:`Token` union is closed: every concrete token class belongs
   to it. This lets the parser pattern-match exhaustively.
 """
@@ -137,6 +139,43 @@ class ImageMacroToken:
 
 
 @dataclass(frozen=True)
+class TableFenceToken:
+    """A table fence: a line that is exactly ``|===``.
+
+    The same token kind is emitted for both the opening and the closing
+    fence — they are indistinguishable at the line level. The parser
+    pairs them by counting, the same way it does for ``----`` code
+    fences.
+    """
+
+    kind: ClassVar[TokenKind] = TokenKind.TABLE_FENCE
+
+    line: int
+
+
+@dataclass(frozen=True)
+class ColsDirectiveToken:
+    """A ``[cols="N,N,..."]`` directive that precedes a table fence.
+
+    ``raw`` is the substring inside the quotes, exactly as it appeared
+    in the source (modulo whitespace stripping). The parser splits it
+    into integers and validates that each is positive — the lexer does
+    not, because rejection of zero / negative / non-numeric values is
+    one of the strict-mode error contracts the parser owns
+    (:class:`ParseErrorKind.BAD_COLS_DIRECTIVE`).
+
+    The parser requires this token to be immediately followed by a
+    :class:`TableFenceToken` — anything else is rejected as
+    :class:`ParseErrorKind.UNKNOWN_BLOCK`.
+    """
+
+    kind: ClassVar[TokenKind] = TokenKind.COLS_DIRECTIVE
+
+    line: int
+    raw: str
+
+
+@dataclass(frozen=True)
 class BlankToken:
     """A blank or whitespace-only line.
 
@@ -177,10 +216,16 @@ type Token = (
     | CodeFenceToken
     | CodeDirectiveToken
     | ImageMacroToken
+    | TableFenceToken
+    | ColsDirectiveToken
     | BlankToken
     | LineToken
 )
-"""Closed union of every token the step-4 lexer produces."""
+"""Closed union of every token the lexer produces.
+
+Step 4 produced the original eight token classes; step 14 extends the
+union with :class:`TableFenceToken` and :class:`ColsDirectiveToken`.
+"""
 
 
 # ---------------------------------------------------------------------------
@@ -191,10 +236,14 @@ _LIST_BULLET_PREFIX: str = "* "
 _LIST_NUMBER_PREFIX: str = ". "
 _CODE_FENCE_LITERAL: str = "----"
 _IMAGE_MACRO_PREFIX: str = "image::"
+_TABLE_FENCE_LITERAL: str = "|==="
 
 _CODE_DIRECTIVE_BARE: str = "[source]"
 _CODE_DIRECTIVE_WITH_LANG_PREFIX: str = "[source,"
 _CODE_DIRECTIVE_SUFFIX: str = "]"
+
+_COLS_DIRECTIVE_PREFIX: str = '[cols="'
+_COLS_DIRECTIVE_SUFFIX: str = '"]'
 
 _HEADING_MARKER_CHAR: str = "="
 
@@ -264,9 +313,16 @@ def _classify_line(raw_line: str, line_number: int) -> Token:
     if line == _CODE_FENCE_LITERAL:
         return CodeFenceToken(line=line_number)
 
+    if line == _TABLE_FENCE_LITERAL:
+        return TableFenceToken(line=line_number)
+
     code_directive = _try_code_directive(line, line_number)
     if code_directive is not None:
         return code_directive
+
+    cols_directive = _try_cols_directive(line, line_number)
+    if cols_directive is not None:
+        return cols_directive
 
     if line.startswith(_IMAGE_MACRO_PREFIX):
         return ImageMacroToken(
@@ -319,3 +375,30 @@ def _try_code_directive(line: str, line_number: int) -> CodeDirectiveToken | Non
         # raise UNKNOWN_BLOCK against the bracketed shape.
         return None
     return CodeDirectiveToken(line=line_number, language=language)
+
+
+def _try_cols_directive(line: str, line_number: int) -> ColsDirectiveToken | None:
+    """If ``line`` is ``[cols="N,N,..."]``, return the token.
+
+    The lexer only checks the structural shape: a ``[cols="`` prefix, a
+    closing ``"]`` suffix, and a non-empty body in between. Whether the
+    body is well-formed (positive integers separated by commas) is the
+    parser's job — :class:`ParseErrorKind.BAD_COLS_DIRECTIVE` carries
+    that contract. Returning ``None`` here for a malformed-looking shape
+    falls through to a plain :class:`LineToken`, which the parser then
+    rejects as ``UNKNOWN_BLOCK`` (matching how the same path handles
+    ``[source,]`` and other near-miss directive shapes).
+    """
+    if not (
+        line.startswith(_COLS_DIRECTIVE_PREFIX)
+        and line.endswith(_COLS_DIRECTIVE_SUFFIX)
+    ):
+        return None
+    raw = line[
+        len(_COLS_DIRECTIVE_PREFIX): -len(_COLS_DIRECTIVE_SUFFIX)
+    ].strip()
+    if not raw:
+        # ``[cols=""]`` — no proportions at all. Fall through so the
+        # parser can raise UNKNOWN_BLOCK against the bracketed shape.
+        return None
+    return ColsDirectiveToken(line=line_number, raw=raw)

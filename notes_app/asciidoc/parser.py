@@ -18,13 +18,17 @@ Principles & invariants
   added to the lexer must be accepted here or rejected as
   :class:`ParseErrorKind.UNKNOWN_BLOCK` — there is no fallthrough that
   silently treats a structural token as paragraph text.
-* Step 4 only produces the constructs the matching :data:`BlockNode`
-  union admits: sections, paragraphs, ordered/unordered lists, code
-  blocks, and images. Tokens that look like AsciiDoc but belong to
-  later steps (table fences, admonition directives, attribute entries,
-  comments, blockquote fences) are detected at block-start and
-  rejected as :class:`ParseErrorKind.UNKNOWN_BLOCK`. They never become
-  paragraphs.
+* Step 4 produced the constructs the original :data:`BlockNode`
+  union admitted: sections, paragraphs, ordered/unordered lists, code
+  blocks, and images. Step 14 extends this with :class:`Table`, parsed
+  via the shared ``parse_inline_only_until``-style helper
+  :func:`_parse_inline_only` so that step 15's admonitions and
+  blockquotes (which also accept inline-only content) reuse the same
+  enforcement of "no nested blocks". Tokens that look like AsciiDoc
+  but belong to later steps (admonition directives, attribute
+  entries, comments, blockquote fences) are detected at block-start
+  and rejected as :class:`ParseErrorKind.UNKNOWN_BLOCK`. They never
+  become paragraphs.
 * Sections are parsed recursively on level. A level-N heading opens a
   section that contains every following block until the next heading of
   level ``<= N`` (or end of input). Levels 2..6 are valid section
@@ -58,6 +62,9 @@ from notes_app.asciidoc.ast import (
     OrderedList,
     Paragraph,
     Section,
+    Table,
+    TableCell,
+    TableRow,
     Text,
     UnorderedList,
 )
@@ -66,11 +73,13 @@ from notes_app.asciidoc.lexer import (
     BlankToken,
     CodeDirectiveToken,
     CodeFenceToken,
+    ColsDirectiveToken,
     HeadingToken,
     ImageMacroToken,
     LineToken,
     ListBulletToken,
     ListNumberToken,
+    TableFenceToken,
     Token,
     source_lines,
     tokenize,
@@ -88,9 +97,12 @@ _MIN_SECTION_LEVEL: int = 2
 _MAX_SECTION_LEVEL: int = 6
 _DOCUMENT_SOURCE_LINE: int = 1
 
-_TABLE_FENCE_LITERAL: str = "|==="
 _BLOCKQUOTE_FENCE_LITERAL: str = "____"
 _COMMENT_PREFIX: str = "//"
+
+# Cell separator inside table rows. A row line begins with this
+# character; subsequent ``|`` characters split the line into cells.
+_TABLE_CELL_SEPARATOR: str = "|"
 
 # An attribute entry such as ``:doctype: book`` or ``:source-highlighter:``.
 # Step 4 does not support attribute entries, so any line matching this
@@ -269,6 +281,12 @@ class _Parser:
             source_line=token.line,
         )
 
+    # The dispatch is intentionally an isinstance ladder rather than a
+    # type-keyed table because Token is a typing.Union and runtime
+    # dispatch over union members is the idiomatic shape. The "too
+    # many returns" warning is the exception-shaped cost of writing
+    # this clearly.
+    # pylint: disable-next=too-many-return-statements
     def _parse_non_heading_block(self, token: Token) -> BlockNode:
         """Dispatch every non-heading block-start token to its parser."""
         if isinstance(token, ListBulletToken):
@@ -281,6 +299,10 @@ class _Parser:
             return self._parse_code_block_no_directive(token)
         if isinstance(token, ImageMacroToken):
             return self._parse_image(token)
+        if isinstance(token, ColsDirectiveToken):
+            return self._parse_table_with_directive(token)
+        if isinstance(token, TableFenceToken):
+            return self._parse_table_no_directive(token)
         if isinstance(token, LineToken):
             self._reject_unknown_block(token)
             return self._parse_paragraph()
@@ -301,21 +323,20 @@ class _Parser:
         """Raise if the line begins a known-but-unsupported block.
 
         Lines that look like AsciiDoc structural directives we do not
-        yet implement (table fences, admonition directives, attribute
-        entries, line comments, blockquote fences, ``[…]`` directives)
-        must produce a parse error rather than be silently swept into a
-        paragraph. The parser detects these at block-start only — once
-        we are mid-paragraph, a ``//`` line is part of the prose.
+        yet implement (admonition directives, attribute entries, line
+        comments, blockquote fences, ``[…]`` directives) must produce
+        a parse error rather than be silently swept into a paragraph.
+        The parser detects these at block-start only — once we are
+        mid-paragraph, a ``//`` line is part of the prose.
+
+        Step 14 dropped the ``|===`` table-fence rejection from this
+        check because tables are now supported — a ``|===`` line
+        becomes a :class:`TableFenceToken` at the lexer level and is
+        consumed by :meth:`_parse_table_no_directive`, never reaching
+        this method as a :class:`LineToken`.
         """
         text = token.text
 
-        if text == _TABLE_FENCE_LITERAL:
-            raise ParseError(
-                line=token.line,
-                column=0,
-                message="table fences are not supported in this build step",
-                kind=ParseErrorKind.UNKNOWN_BLOCK,
-            )
         if text == _BLOCKQUOTE_FENCE_LITERAL:
             raise ParseError(
                 line=token.line,
@@ -340,8 +361,8 @@ class _Parser:
                 kind=ParseErrorKind.UNKNOWN_BLOCK,
             )
         # Lines wrapped in ``[…]`` — admonition openers (``[NOTE]``),
-        # ``[quote]``, ``[cols=…]``, even malformed ``[source,]`` — all
-        # land here. They are paragraph-shaped only by accident.
+        # ``[quote]``, even malformed ``[source,]`` and ``[cols=""]``
+        # — all land here. They are paragraph-shaped only by accident.
         if text.startswith("[") and text.endswith("]") and len(text) >= 2:
             raise ParseError(
                 line=token.line,
@@ -574,6 +595,223 @@ class _Parser:
             source_line=token.line,
         )
 
+    # -- tables -------------------------------------------------------------
+
+    def _parse_table_with_directive(
+        self,
+        directive: ColsDirectiveToken,
+    ) -> Table:
+        """Parse ``[cols="N,N,..."]`` immediately followed by a table fence.
+
+        Mirrors the pattern of :meth:`_parse_code_block_with_directive`
+        — the directive must be followed *immediately* by the opening
+        ``|===`` fence. Any other token (including a blank line) breaks
+        the binding and we raise ``UNKNOWN_BLOCK`` against the
+        directive line: a blank between ``[cols=…]`` and ``|===`` is
+        almost always a typo, and silently accepting it would drop the
+        column-proportions hint the renderer relies on.
+
+        The directive's body (e.g. ``"1,2,3"``) is parsed into a tuple
+        of positive integers here. The lexer guarantees the body is
+        non-empty; this method is what enforces "every value is a
+        positive integer" with
+        :class:`ParseErrorKind.BAD_COLS_DIRECTIVE` on any failure.
+        """
+        next_index = self.pos + 1
+        if (
+            next_index >= len(self.tokens)
+            or not isinstance(self.tokens[next_index], TableFenceToken)
+        ):
+            raise ParseError(
+                line=directive.line,
+                column=0,
+                message=(
+                    "[cols=\"…\"] directive must be immediately followed by "
+                    "a `|===` fence"
+                ),
+                kind=ParseErrorKind.UNKNOWN_BLOCK,
+            )
+        proportions = _parse_cols_proportions(directive.raw, directive.line)
+        # Consume the directive; the fence is consumed by the body
+        # reader below.
+        self.pos += 1
+        fence = self.tokens[self.pos]
+        assert isinstance(fence, TableFenceToken)
+        return self._read_table_body(
+            opening_fence=fence,
+            column_proportions=proportions,
+            block_source_line=directive.line,
+        )
+
+    def _parse_table_no_directive(
+        self,
+        fence: TableFenceToken,
+    ) -> Table:
+        """Parse a bare ``|===`` table with no ``[cols=…]`` directive."""
+        return self._read_table_body(
+            opening_fence=fence,
+            column_proportions=None,
+            block_source_line=fence.line,
+        )
+
+    def _read_table_body(
+        self,
+        opening_fence: TableFenceToken,
+        column_proportions: tuple[int, ...] | None,
+        block_source_line: int,
+    ) -> Table:
+        """Consume rows from after the opening fence to the closing fence.
+
+        Each row is one source line beginning with ``|``. Cells are
+        produced by splitting the line on ``|`` and parsing each piece
+        through :func:`_parse_inline_only`. Rows whose cell count
+        differs from the header (the first row) raise
+        :class:`ParseErrorKind.TABLE_ROW_ARITY_MISMATCH`. Blank lines
+        inside the fences are tolerated as visual whitespace and
+        ignored. An empty table (no rows between the fences) raises
+        :class:`ParseErrorKind.EMPTY_TABLE`. An unterminated fence
+        raises :class:`ParseErrorKind.UNTERMINATED_TABLE`.
+        """
+        # Advance past the opening fence.
+        self.pos += 1
+        rows: list[TableRow] = []
+        while self.pos < len(self.tokens):
+            current = self.tokens[self.pos]
+            if isinstance(current, TableFenceToken):
+                # Closing fence found. Validate and return.
+                self.pos += 1
+                if not rows:
+                    raise ParseError(
+                        line=opening_fence.line,
+                        column=0,
+                        message="table has no rows between the `|===` fences",
+                        kind=ParseErrorKind.EMPTY_TABLE,
+                    )
+                self._validate_cols_directive_arity(
+                    column_proportions=column_proportions,
+                    header=rows[0],
+                    directive_line=block_source_line,
+                )
+                return Table(
+                    rows=tuple(rows),
+                    column_proportions=column_proportions,
+                    source_line=block_source_line,
+                )
+            if isinstance(current, BlankToken):
+                # Blank lines inside a table are visual whitespace — they
+                # neither add a row nor terminate the table. Skip.
+                self.pos += 1
+                continue
+            if isinstance(current, LineToken):
+                rows.append(self._parse_table_row(current, header=rows[0] if rows else None))
+                self.pos += 1
+                continue
+            # Any other token kind inside a table body — heading, code
+            # fence, image macro, list bullet — is structurally invalid
+            # because table cells are inline-only. The grammar of the
+            # subset has the row "shape" as ``('|' inline)+``: a line
+            # that does not start with ``|`` simply isn't a row, and
+            # block-level tokens explicitly aren't either.
+            raise ParseError(
+                line=getattr(current, "line", opening_fence.line),
+                column=0,
+                message=(
+                    "table cells must be inline-only; "
+                    f"{type(current).__name__} is not allowed inside a table"
+                ),
+                kind=ParseErrorKind.BLOCK_INSIDE_INLINE_ONLY_CONTAINER,
+            )
+
+        # End of input without a closing fence.
+        raise ParseError(
+            line=opening_fence.line,
+            column=0,
+            message="table has no closing `|===` fence",
+            kind=ParseErrorKind.UNTERMINATED_TABLE,
+        )
+
+    def _parse_table_row(
+        self,
+        token: LineToken,
+        *,
+        header: TableRow | None,
+    ) -> TableRow:
+        """Parse one row of a table from a line that starts with ``|``.
+
+        Raises :class:`ParseErrorKind.UNTERMINATED_TABLE` if the line
+        does not start with the cell separator — that means the row
+        token is not actually a row, so the table never closed and the
+        scanner walked past prose inside the fences. (The lexer emits
+        ``LineToken`` for both.) Raises
+        :class:`ParseErrorKind.TABLE_ROW_ARITY_MISMATCH` when the cell
+        count differs from the header's.
+        """
+        text = token.text
+        if not text.startswith(_TABLE_CELL_SEPARATOR):
+            # A non-``|`` line inside a table is paragraph-shaped
+            # content that the user probably meant to end the table
+            # before. Report it as an unterminated table — pointing at
+            # the current line gives the user the closest reasonable
+            # spot to add a closing fence.
+            raise ParseError(
+                line=token.line,
+                column=0,
+                message=(
+                    "expected a `|cell` row inside the table, got "
+                    f"prose: {text!r}"
+                ),
+                kind=ParseErrorKind.UNTERMINATED_TABLE,
+            )
+        # ``|a|b|c`` → ["", "a", "b", "c"] — drop the empty leading
+        # element produced by the row-leading ``|``.
+        cells_text = text.split(_TABLE_CELL_SEPARATOR)[1:]
+        cells = tuple(
+            TableCell(
+                inlines=_parse_inline_only(piece, token.line),
+                source_line=token.line,
+            )
+            for piece in cells_text
+        )
+        if header is not None and len(cells) != len(header.cells):
+            raise ParseError(
+                line=token.line,
+                column=0,
+                message=(
+                    f"table row has {len(cells)} cell(s); "
+                    f"header has {len(header.cells)}"
+                ),
+                kind=ParseErrorKind.TABLE_ROW_ARITY_MISMATCH,
+            )
+        return TableRow(cells=cells, source_line=token.line)
+
+    @staticmethod
+    def _validate_cols_directive_arity(
+        *,
+        column_proportions: tuple[int, ...] | None,
+        header: TableRow,
+        directive_line: int,
+    ) -> None:
+        """Reject a ``[cols=…]`` whose count differs from the header arity.
+
+        The renderer uses the directive's tuple, indexed by column, to
+        compute ``max-width-chars`` for each cell. A mismatch would
+        index past the end and the wrong column would receive the
+        wrong proportion — both are silent visual bugs the parser is
+        responsible for catching.
+        """
+        if column_proportions is None:
+            return
+        if len(column_proportions) != len(header.cells):
+            raise ParseError(
+                line=directive_line,
+                column=0,
+                message=(
+                    f"[cols=\"…\"] specifies {len(column_proportions)} "
+                    f"column(s) but the table has {len(header.cells)}"
+                ),
+                kind=ParseErrorKind.BAD_COLS_DIRECTIVE,
+            )
+
     # -- helpers ------------------------------------------------------------
 
     def _skip_blanks(self) -> None:
@@ -583,3 +821,84 @@ class _Parser:
             and isinstance(self.tokens[self.pos], BlankToken)
         ):
             self.pos += 1
+
+
+# ---------------------------------------------------------------------------
+# Inline-only container helper
+# ---------------------------------------------------------------------------
+
+
+def _parse_inline_only(text: str, line: int) -> tuple[InlineNode, ...]:
+    """Parse ``text`` as inline content for an inline-only container.
+
+    Step 14 introduces this helper for table cells; step 15 will reuse
+    it for admonition bodies and blockquote bodies. Centralising the
+    "inline content only — no nested blocks" rule in one place keeps
+    the strict-mode enforcement consistent across every container that
+    needs it.
+
+    For v1 the rule is enforced *by construction*: the function
+    delegates to :func:`parse_inline`, which never produces block
+    nodes. The only block-shaped content that could appear inside an
+    inline-only container is something the *containing* parser
+    consumes before this helper sees it — for tables, that's a
+    block-level token (heading, code fence, image macro, …) inside
+    the fence, which :meth:`_Parser._read_table_body` rejects with
+    :class:`ParseErrorKind.BLOCK_INSIDE_INLINE_ONLY_CONTAINER`.
+
+    Strips leading and trailing whitespace from the cell text before
+    parsing so that ``| cell | other |`` produces tidy inline
+    content. Inline syntax itself does not depend on outer padding,
+    so this is a presentational normalisation, not a semantic one.
+    """
+    return parse_inline(text.strip(), line)
+
+
+def _parse_cols_proportions(raw: str, line: int) -> tuple[int, ...]:
+    """Parse a ``[cols=…]`` directive body into integer proportions.
+
+    The body shape is ``"N,N,..."`` (without the surrounding quotes;
+    the lexer already strips them). Each ``N`` must be a positive
+    integer. Whitespace around individual values is tolerated.
+
+    Raises :class:`ParseErrorKind.BAD_COLS_DIRECTIVE` for any other
+    shape: empty values (``"1,,2"``), non-numeric (``"1,foo"``),
+    zero (``"0,1"``), or negative (``"-1"``).
+    """
+    parts = raw.split(",")
+    proportions: list[int] = []
+    for part in parts:
+        stripped = part.strip()
+        if not stripped:
+            raise ParseError(
+                line=line,
+                column=0,
+                message=(
+                    "[cols=\"…\"] directive contains an empty value"
+                ),
+                kind=ParseErrorKind.BAD_COLS_DIRECTIVE,
+            )
+        try:
+            value = int(stripped)
+        except ValueError as exc:
+            raise ParseError(
+                line=line,
+                column=0,
+                message=(
+                    f"[cols=\"…\"] directive value is not an integer: "
+                    f"{stripped!r}"
+                ),
+                kind=ParseErrorKind.BAD_COLS_DIRECTIVE,
+            ) from exc
+        if value <= 0:
+            raise ParseError(
+                line=line,
+                column=0,
+                message=(
+                    f"[cols=\"…\"] directive value must be positive: "
+                    f"{value}"
+                ),
+                kind=ParseErrorKind.BAD_COLS_DIRECTIVE,
+            )
+        proportions.append(value)
+    return tuple(proportions)
