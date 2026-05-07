@@ -24,10 +24,17 @@ Principles & invariants
   via the shared ``parse_inline_only_until``-style helper
   :func:`_parse_inline_only` so that step 15's admonitions and
   blockquotes (which also accept inline-only content) reuse the same
-  enforcement of "no nested blocks". Tokens that look like AsciiDoc
-  but belong to later steps (admonition directives, attribute
-  entries, comments, blockquote fences) are detected at block-start
-  and rejected as :class:`ParseErrorKind.UNKNOWN_BLOCK`. They never
+  enforcement of "no nested blocks". Step 15 adds :class:`Admonition`
+  (in both single-line ``NOTE: text`` and block
+  ``[NOTE]`` + ``====``-fenced forms) and :class:`Blockquote`
+  (``____``-fenced, optionally preceded by a ``[quote, …]``
+  directive). Both reuse :meth:`_Parser._read_paragraphs_until_fence`
+  for the body — the shared helper that walks tokens between two
+  fences, accepting only paragraphs and rejecting any other block
+  shape with :class:`ParseErrorKind.BLOCK_INSIDE_INLINE_ONLY_CONTAINER`.
+  Tokens that look like AsciiDoc but belong to other constructs
+  (attribute entries, comments) are detected at block-start and
+  rejected as :class:`ParseErrorKind.UNKNOWN_BLOCK`. They never
   become paragraphs.
 * Sections are parsed recursively on level. A level-N heading opens a
   section that contains every following block until the next heading of
@@ -47,13 +54,23 @@ Principles & invariants
   the welcome note exercises only the supported shape.
 """
 
+# The module's size reflects the asciidoc subset's full surface area —
+# every block kind, every error variant, the inline-only-container
+# helper, and the attribution helper all live here together because
+# they share private helpers (_at_block_start, _read_paragraphs_until_fence,
+# the regexes). Splitting purely to satisfy the line counter would
+# obscure that cohesion.
+# pylint: disable=too-many-lines
+
 from __future__ import annotations
 
 import re
 from dataclasses import dataclass
 
 from notes_app.asciidoc.ast import (
+    Admonition,
     BlockNode,
+    Blockquote,
     CodeBlock,
     Document,
     Image,
@@ -70,6 +87,8 @@ from notes_app.asciidoc.ast import (
 )
 from notes_app.asciidoc.inline_parser import parse_inline
 from notes_app.asciidoc.lexer import (
+    AdmonitionDirectiveToken,
+    AdmonitionFenceToken,
     BlankToken,
     CodeDirectiveToken,
     CodeFenceToken,
@@ -79,12 +98,15 @@ from notes_app.asciidoc.lexer import (
     LineToken,
     ListBulletToken,
     ListNumberToken,
+    QuoteDirectiveToken,
+    QuoteFenceToken,
+    SingleAdmonitionToken,
     TableFenceToken,
     Token,
     source_lines,
     tokenize,
 )
-from notes_app.enums import ParseErrorKind
+from notes_app.enums import AdmonitionKind, ParseErrorKind
 from notes_app.models.parse_error import ParseError
 
 
@@ -97,7 +119,6 @@ _MIN_SECTION_LEVEL: int = 2
 _MAX_SECTION_LEVEL: int = 6
 _DOCUMENT_SOURCE_LINE: int = 1
 
-_BLOCKQUOTE_FENCE_LITERAL: str = "____"
 _COMMENT_PREFIX: str = "//"
 
 # Cell separator inside table rows. A row line begins with this
@@ -286,7 +307,7 @@ class _Parser:
     # dispatch over union members is the idiomatic shape. The "too
     # many returns" warning is the exception-shaped cost of writing
     # this clearly.
-    # pylint: disable-next=too-many-return-statements
+    # pylint: disable-next=too-many-return-statements,too-many-branches
     def _parse_non_heading_block(self, token: Token) -> BlockNode:
         """Dispatch every non-heading block-start token to its parser."""
         if isinstance(token, ListBulletToken):
@@ -303,6 +324,31 @@ class _Parser:
             return self._parse_table_with_directive(token)
         if isinstance(token, TableFenceToken):
             return self._parse_table_no_directive(token)
+        if isinstance(token, AdmonitionDirectiveToken):
+            return self._parse_block_admonition(token)
+        if isinstance(token, SingleAdmonitionToken):
+            return self._parse_single_admonition(token)
+        if isinstance(token, AdmonitionFenceToken):
+            # A bare ``====`` with no preceding ``[NOTE]`` directive is
+            # a stray fence — there is no admonition kind to associate
+            # the body with. Reject as ``UNKNOWN_BLOCK``: there is no
+            # specialised "stray admonition fence" error variant
+            # because the user's most likely fix is to add a
+            # ``[NOTE]`` directive above, which is the same family of
+            # mistake as any other unrecognised directive shape.
+            raise ParseError(
+                line=token.line,
+                column=0,
+                message=(
+                    "stray `====` fence — admonition blocks must be "
+                    "preceded by a `[NOTE]`/`[TIP]`/… directive"
+                ),
+                kind=ParseErrorKind.UNKNOWN_BLOCK,
+            )
+        if isinstance(token, QuoteDirectiveToken):
+            return self._parse_blockquote_with_directive(token)
+        if isinstance(token, QuoteFenceToken):
+            return self._parse_blockquote_no_directive(token)
         if isinstance(token, LineToken):
             self._reject_unknown_block(token)
             return self._parse_paragraph()
@@ -323,29 +369,26 @@ class _Parser:
         """Raise if the line begins a known-but-unsupported block.
 
         Lines that look like AsciiDoc structural directives we do not
-        yet implement (admonition directives, attribute entries, line
-        comments, blockquote fences, ``[…]`` directives) must produce
-        a parse error rather than be silently swept into a paragraph.
-        The parser detects these at block-start only — once we are
-        mid-paragraph, a ``//`` line is part of the prose.
+        yet implement (attribute entries, line comments, ``[…]``
+        directives that fell through every specialised matcher) must
+        produce a parse error rather than be silently swept into a
+        paragraph. The parser detects these at block-start only —
+        once we are mid-paragraph, a ``//`` line is part of the prose.
 
         Step 14 dropped the ``|===`` table-fence rejection from this
         check because tables are now supported — a ``|===`` line
         becomes a :class:`TableFenceToken` at the lexer level and is
         consumed by :meth:`_parse_table_no_directive`, never reaching
-        this method as a :class:`LineToken`.
+        this method as a :class:`LineToken`. Step 15 dropped the
+        ``____`` blockquote-fence rejection for the same reason —
+        ``____`` is now a :class:`QuoteFenceToken`. The bracketed
+        ``[…]`` rejection still catches arbitrary directives the
+        specialised matchers did not recognise (e.g. malformed
+        ``[source,]`` and ``[cols=""]`` shapes that the lexer falls
+        through).
         """
         text = token.text
 
-        if text == _BLOCKQUOTE_FENCE_LITERAL:
-            raise ParseError(
-                line=token.line,
-                column=0,
-                message=(
-                    "blockquote fences are not supported in this build step"
-                ),
-                kind=ParseErrorKind.UNKNOWN_BLOCK,
-            )
         if text.startswith(_COMMENT_PREFIX):
             raise ParseError(
                 line=token.line,
@@ -360,9 +403,9 @@ class _Parser:
                 message="attribute entries are not supported",
                 kind=ParseErrorKind.UNKNOWN_BLOCK,
             )
-        # Lines wrapped in ``[…]`` — admonition openers (``[NOTE]``),
-        # ``[quote]``, even malformed ``[source,]`` and ``[cols=""]``
-        # — all land here. They are paragraph-shaped only by accident.
+        # Lines wrapped in ``[…]`` — even malformed ``[source,]`` and
+        # ``[cols=""]`` — all land here. They are paragraph-shaped
+        # only by accident.
         if text.startswith("[") and text.endswith("]") and len(text) >= 2:
             raise ParseError(
                 line=token.line,
@@ -812,6 +855,235 @@ class _Parser:
                 kind=ParseErrorKind.BAD_COLS_DIRECTIVE,
             )
 
+    # -- admonitions --------------------------------------------------------
+
+    def _parse_single_admonition(
+        self,
+        token: SingleAdmonitionToken,
+    ) -> Admonition:
+        """Wrap a ``NOTE: text`` line in an :class:`Admonition` node.
+
+        The kind has already been validated by the lexer (the regex
+        only matches the five known labels). The text is run through
+        :func:`parse_inline` so inline formatting like ``*bold*`` or
+        ``_italic_`` inside the admonition body is preserved. The
+        result is exactly one :class:`Paragraph` in the
+        :class:`Admonition`'s ``blocks`` field, so the renderer's
+        single-form / block-form code paths fully converge.
+        """
+        self.pos += 1
+        inlines = parse_inline(token.text, token.line)
+        paragraph = Paragraph(inlines=inlines, source_line=token.line)
+        return Admonition(
+            kind=token.admonition_kind,
+            blocks=(paragraph,),
+            source_line=token.line,
+        )
+
+    def _parse_block_admonition(
+        self,
+        directive: AdmonitionDirectiveToken,
+    ) -> Admonition:
+        """Parse ``[NOTE]`` immediately followed by a ``====`` fence.
+
+        Mirrors the ``[source]`` / ``[cols=…]`` patterns: the directive
+        must be followed *immediately* by the opening fence — any
+        other token (including a blank line) breaks the binding and
+        we raise ``UNKNOWN_BLOCK`` against the directive line. The
+        kind is validated against :class:`AdmonitionKind` here; an
+        unknown label (e.g. ``[INFO]``) raises
+        :class:`ParseErrorKind.UNKNOWN_ADMONITION_TYPE`.
+        """
+        try:
+            kind = AdmonitionKind(directive.kind_str)
+        except ValueError as exc:
+            raise ParseError(
+                line=directive.line,
+                column=0,
+                message=(
+                    f"unknown admonition kind {directive.kind_str!r} "
+                    "(expected NOTE, TIP, IMPORTANT, WARNING, or CAUTION)"
+                ),
+                kind=ParseErrorKind.UNKNOWN_ADMONITION_TYPE,
+            ) from exc
+
+        next_index = self.pos + 1
+        if (
+            next_index >= len(self.tokens)
+            or not isinstance(self.tokens[next_index], AdmonitionFenceToken)
+        ):
+            raise ParseError(
+                line=directive.line,
+                column=0,
+                message=(
+                    f"[{directive.kind_str}] directive must be immediately "
+                    "followed by a `====` fence"
+                ),
+                kind=ParseErrorKind.UNKNOWN_BLOCK,
+            )
+        # Consume the directive; the fence is consumed by the body
+        # reader below.
+        self.pos += 1
+        fence = self.tokens[self.pos]
+        assert isinstance(fence, AdmonitionFenceToken)
+        body = self._read_paragraphs_until_fence(
+            opening_fence_line=fence.line,
+            fence_type=AdmonitionFenceToken,
+            unterminated_kind=ParseErrorKind.UNTERMINATED_ADMONITION,
+            unterminated_message=(
+                "admonition block has no closing `====` fence"
+            ),
+        )
+        return Admonition(
+            kind=kind,
+            blocks=body,
+            source_line=directive.line,
+        )
+
+    # -- blockquotes --------------------------------------------------------
+
+    def _parse_blockquote_with_directive(
+        self,
+        directive: QuoteDirectiveToken,
+    ) -> Blockquote:
+        """Parse ``[quote, …]`` immediately followed by a ``____`` fence.
+
+        Same shape as :meth:`_parse_block_admonition` and the
+        ``[source]`` / ``[cols=…]`` patterns: the directive must be
+        followed *immediately* by the opening fence. The directive's
+        attribution is validated here — empty or whitespace-only
+        author/source raises :class:`ParseErrorKind.BAD_BLOCKQUOTE_DIRECTIVE`.
+        """
+        author, source = _parse_blockquote_attribution(
+            directive.raw_arguments,
+            directive.line,
+        )
+
+        next_index = self.pos + 1
+        if (
+            next_index >= len(self.tokens)
+            or not isinstance(self.tokens[next_index], QuoteFenceToken)
+        ):
+            raise ParseError(
+                line=directive.line,
+                column=0,
+                message=(
+                    "[quote] directive must be immediately followed by "
+                    "a `____` fence"
+                ),
+                kind=ParseErrorKind.BAD_BLOCKQUOTE_DIRECTIVE,
+            )
+        # Consume the directive; the fence is consumed by the body
+        # reader below.
+        self.pos += 1
+        fence = self.tokens[self.pos]
+        assert isinstance(fence, QuoteFenceToken)
+        body = self._read_paragraphs_until_fence(
+            opening_fence_line=fence.line,
+            fence_type=QuoteFenceToken,
+            unterminated_kind=ParseErrorKind.UNTERMINATED_BLOCKQUOTE,
+            unterminated_message=(
+                "blockquote has no closing `____` fence"
+            ),
+        )
+        return Blockquote(
+            author=author,
+            source=source,
+            blocks=body,
+            source_line=directive.line,
+        )
+
+    def _parse_blockquote_no_directive(
+        self,
+        fence: QuoteFenceToken,
+    ) -> Blockquote:
+        """Parse a bare ``____`` blockquote with no ``[quote, …]`` directive."""
+        body = self._read_paragraphs_until_fence(
+            opening_fence_line=fence.line,
+            fence_type=QuoteFenceToken,
+            unterminated_kind=ParseErrorKind.UNTERMINATED_BLOCKQUOTE,
+            unterminated_message=(
+                "blockquote has no closing `____` fence"
+            ),
+        )
+        return Blockquote(
+            author=None,
+            source=None,
+            blocks=body,
+            source_line=fence.line,
+        )
+
+    # -- shared helper for inline-only block bodies -------------------------
+
+    def _read_paragraphs_until_fence(
+        self,
+        *,
+        opening_fence_line: int,
+        fence_type: type[AdmonitionFenceToken] | type[QuoteFenceToken],
+        unterminated_kind: ParseErrorKind,
+        unterminated_message: str,
+    ) -> tuple[Paragraph, ...]:
+        """Consume paragraphs from after the opening fence to the closing fence.
+
+        This is the **single shared helper** for inline-only block
+        bodies: admonitions and blockquotes both delegate here. The
+        rule is "paragraphs only — no nested blocks of any kind". A
+        line that starts a non-paragraph block (heading, list bullet,
+        code fence, image macro, table fence, nested admonition or
+        blockquote, etc.) is rejected with
+        :class:`ParseErrorKind.BLOCK_INSIDE_INLINE_ONLY_CONTAINER`.
+        Blank lines are tolerated as paragraph separators. A closing
+        fence of the same ``fence_type`` ends the body; EOF before
+        the closing fence raises ``unterminated_kind`` with
+        ``unterminated_message``.
+
+        Empty bodies (closing fence immediately after opening) are
+        permitted and produce an empty paragraph tuple — the
+        renderer handles this by emitting just the framing chrome.
+        """
+        # Advance past the opening fence (the caller positions us on
+        # it; we own consuming both fences).
+        self.pos += 1
+        paragraphs: list[Paragraph] = []
+        while self.pos < len(self.tokens):
+            current = self.tokens[self.pos]
+            if isinstance(current, fence_type):
+                # Closing fence found — consume it and return.
+                self.pos += 1
+                return tuple(paragraphs)
+            if isinstance(current, BlankToken):
+                # Blank lines separate paragraphs; advance past.
+                self.pos += 1
+                continue
+            if isinstance(current, LineToken):
+                # A run of one-or-more LineTokens forms one paragraph.
+                # The existing _parse_paragraph helper does exactly
+                # that — and respects per-line inline parsing for
+                # exact error line numbers.
+                paragraphs.append(self._parse_paragraph())
+                continue
+            # Anything else is a block-shaped token — heading, list
+            # bullet, code fence, image macro, table fence, the OTHER
+            # fence type, an admonition directive, a quote directive,
+            # etc. Reject as the inline-only-container error.
+            raise ParseError(
+                line=getattr(current, "line", opening_fence_line),
+                column=0,
+                message=(
+                    "this body accepts paragraphs only — "
+                    f"{type(current).__name__} is not allowed"
+                ),
+                kind=ParseErrorKind.BLOCK_INSIDE_INLINE_ONLY_CONTAINER,
+            )
+
+        # End of input without a closing fence.
+        raise ParseError(
+            line=opening_fence_line,
+            column=0,
+            message=unterminated_message,
+            kind=unterminated_kind,
+        )
+
     # -- helpers ------------------------------------------------------------
 
     def _skip_blanks(self) -> None:
@@ -902,3 +1174,77 @@ def _parse_cols_proportions(raw: str, line: int) -> tuple[int, ...]:
             )
         proportions.append(value)
     return tuple(proportions)
+
+
+def _parse_blockquote_attribution(
+    raw_arguments: str | None,
+    line: int,
+) -> tuple[str | None, str | None]:
+    """Parse a ``[quote, …]`` directive's argument body into ``(author, source)``.
+
+    ``raw_arguments`` is the substring captured by the lexer's
+    :data:`_QUOTE_DIRECTIVE_RE` — :data:`None` for the bare
+    ``[quote]`` form, or a string starting with ``,`` and continuing
+    through the rest of the bracket body.
+
+    The first comma-separated argument is the author; the second is
+    the source. A trailing comma without content, an empty author
+    field, an empty source field, or a third comma-separated field
+    are all rejected with
+    :class:`ParseErrorKind.BAD_BLOCKQUOTE_DIRECTIVE`. Whitespace
+    around individual values is tolerated and stripped.
+
+    Both returned fields are :data:`None` when the directive carries
+    no arguments (``[quote]``); each is a non-empty string when set.
+    """
+    if raw_arguments is None:
+        # ``[quote]`` — no attribution.
+        return None, None
+
+    # ``raw_arguments`` always starts with ``,`` because the lexer's
+    # capture group includes the leading comma. Drop it before
+    # splitting. ``maxsplit=2`` lets us detect a third (forbidden)
+    # comma-separated field — split into at most three parts.
+    arguments = raw_arguments[1:]
+    parts = arguments.split(",", maxsplit=2)
+
+    # parts has 1, 2, or 3 elements. We only allow 1 (author only)
+    # or 2 (author + source); 3 is malformed.
+    if len(parts) > 2:
+        raise ParseError(
+            line=line,
+            column=0,
+            message=(
+                "[quote, …] directive accepts at most two attribution "
+                "arguments (author, source); got more"
+            ),
+            kind=ParseErrorKind.BAD_BLOCKQUOTE_DIRECTIVE,
+        )
+
+    author_raw = parts[0]
+    author = author_raw.strip()
+    if not author:
+        raise ParseError(
+            line=line,
+            column=0,
+            message=(
+                "[quote, …] directive author argument is empty"
+            ),
+            kind=ParseErrorKind.BAD_BLOCKQUOTE_DIRECTIVE,
+        )
+
+    if len(parts) == 1:
+        return author, None
+
+    source_raw = parts[1]
+    source = source_raw.strip()
+    if not source:
+        raise ParseError(
+            line=line,
+            column=0,
+            message=(
+                "[quote, …] directive source argument is empty"
+            ),
+            kind=ParseErrorKind.BAD_BLOCKQUOTE_DIRECTIVE,
+        )
+    return author, source

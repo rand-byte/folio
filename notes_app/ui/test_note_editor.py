@@ -16,12 +16,17 @@ gi.require_version("GtkSource", "5")
 # pylint: disable=wrong-import-position
 from gi.repository import Gdk, Gtk, GtkSource  # noqa: E402
 
-from notes_app.asciidoc.ast import Link as _Link, Table as _Table
+from notes_app.asciidoc.ast import (
+    Admonition as _Admonition,
+    Blockquote as _Blockquote,
+    Link as _Link,
+    Table as _Table,
+)
 from notes_app.asciidoc.inline_parser import parse_inline as _parse_inline
 from notes_app.asciidoc.parser import parse as _parse_asciidoc
 from notes_app.controllers.app_state import AppState
 from notes_app.controllers.note_controller import NoteController
-from notes_app.enums import AttachmentRejectionReason, MimeKind
+from notes_app.enums import AdmonitionKind, AttachmentRejectionReason, MimeKind
 from notes_app.models.attachment import Attachment
 from notes_app.models.note import Note
 from notes_app.storage.protocols import AttachmentRejected
@@ -30,6 +35,8 @@ from notes_app.ui.note_editor import (
     LANGUAGE_FILE_NAME,
     LANGUAGE_ID,
     NoteEditor,
+    _ADMONITION_TEMPLATE,
+    _BLOCKQUOTE_TEMPLATE,
     _LINK_TEMPLATE,
     _PLACEHOLDER_SELECTION_TEXT,
     _TABLE_TEMPLATE,
@@ -925,14 +932,16 @@ class NoteEditorToolbarTests(unittest.TestCase):
             child = child.get_next_sibling()
         return buttons
 
-    def test_toolbar_exposes_the_step_14_core_button_set(self) -> None:
+    def test_toolbar_exposes_the_step_15_core_button_set(self) -> None:
         # Tooltips drive the assertion because button labels are
         # short ("H", "B", "I", …) and could collide. Tooltips are
         # the user-facing identification anyway. The image button's
         # tooltip changed from "Insert image macro" (step 10
         # placeholder) to "Insert image" (step 11 file dialog).
         # Step 13 added Monospace and Link to the inline group.
-        # Step 14 adds Table to the blocks group.
+        # Step 14 added Table to the blocks group.
+        # Step 15 adds Admonition and Blockquote at the end of
+        # the blocks group.
         editor = self._make_editor()
         tooltips = {
             b.get_tooltip_text() for b in self._toolbar_buttons(editor)
@@ -952,6 +961,8 @@ class NoteEditorToolbarTests(unittest.TestCase):
                 "Code block",
                 "Insert image",
                 "Table",
+                "Admonition",
+                "Blockquote",
             },
         )
 
@@ -1100,6 +1111,64 @@ class NoteEditorToolbarTests(unittest.TestCase):
         assert isinstance(table, _Table)
         self.assertEqual(len(table.rows), 3)
         self.assertEqual(len(table.rows[0].cells), 2)
+
+    # -- admonition button (step 15) ------------------------------------
+
+    def test_clicking_admonition_button_inserts_template(self) -> None:
+        # Step 15: the admonition toolbar button drops a [NOTE] block
+        # template at the cursor.
+        editor = self._make_editor()
+        editor._buffer.set_text("")
+        admonition_button = next(
+            b for b in self._toolbar_buttons(editor)
+            if b.get_tooltip_text() == "Admonition"
+        )
+        admonition_button.emit("clicked")
+        self.assertEqual(
+            buffer_text(editor._buffer),
+            _ADMONITION_TEMPLATE + "\n",
+        )
+
+    def test_admonition_template_parses_to_an_admonition(self) -> None:
+        # Defence-in-depth: the template must parse cleanly so the
+        # rendered view doesn't immediately show an error panel.
+        doc = _parse_asciidoc(_ADMONITION_TEMPLATE + "\n")
+        self.assertEqual(len(doc.blocks), 1)
+        self.assertIsInstance(doc.blocks[0], _Admonition)
+        admonition = doc.blocks[0]
+        assert isinstance(admonition, _Admonition)
+        # The template uses NOTE — the safest default kind.
+        self.assertEqual(admonition.kind, AdmonitionKind.NOTE)
+        # Exactly one body paragraph.
+        self.assertEqual(len(admonition.blocks), 1)
+
+    # -- blockquote button (step 15) ------------------------------------
+
+    def test_clicking_blockquote_button_inserts_template(self) -> None:
+        editor = self._make_editor()
+        editor._buffer.set_text("")
+        blockquote_button = next(
+            b for b in self._toolbar_buttons(editor)
+            if b.get_tooltip_text() == "Blockquote"
+        )
+        blockquote_button.emit("clicked")
+        self.assertEqual(
+            buffer_text(editor._buffer),
+            _BLOCKQUOTE_TEMPLATE + "\n",
+        )
+
+    def test_blockquote_template_parses_to_a_blockquote(self) -> None:
+        # Defence-in-depth: the template must parse cleanly. The
+        # placeholder Author/Source values are non-empty, so the
+        # parser's BAD_BLOCKQUOTE_DIRECTIVE check passes.
+        doc = _parse_asciidoc(_BLOCKQUOTE_TEMPLATE + "\n")
+        self.assertEqual(len(doc.blocks), 1)
+        self.assertIsInstance(doc.blocks[0], _Blockquote)
+        quote = doc.blocks[0]
+        assert isinstance(quote, _Blockquote)
+        self.assertEqual(quote.author, "Author")
+        self.assertEqual(quote.source, "Source")
+        self.assertEqual(len(quote.blocks), 1)
 
 
 # ---------------------------------------------------------------------------

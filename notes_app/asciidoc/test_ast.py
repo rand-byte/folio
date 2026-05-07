@@ -13,6 +13,8 @@ import unittest
 from dataclasses import FrozenInstanceError, fields, is_dataclass
 
 from notes_app.asciidoc.ast import (
+    Admonition,
+    Blockquote,
     Bold,
     CodeBlock,
     Document,
@@ -30,6 +32,7 @@ from notes_app.asciidoc.ast import (
     Underline,
     UnorderedList,
 )
+from notes_app.enums import AdmonitionKind
 
 
 # ---------------------------------------------------------------------------
@@ -66,6 +69,8 @@ class AstNodeShapeTests(unittest.TestCase):
             TableCell,
             TableRow,
             Table,
+            Admonition,
+            Blockquote,
             Document,
         )
         for cls in classes:
@@ -92,6 +97,11 @@ class AstNodeShapeTests(unittest.TestCase):
             (TableCell, {"inlines", "source_line"}),
             (TableRow, {"cells", "source_line"}),
             (Table, {"rows", "column_proportions", "source_line"}),
+            (Admonition, {"kind", "blocks", "source_line"}),
+            (
+                Blockquote,
+                {"author", "source", "blocks", "source_line"},
+            ),
             (Document, {"title", "blocks", "source_line"}),
         )
         for cls, expected in cases:
@@ -129,6 +139,25 @@ class AstFrozenTests(unittest.TestCase):
         table = Table(rows=(row,), column_proportions=None, source_line=1)
         with self.assertRaises(FrozenInstanceError):
             table.rows = ()  # type: ignore[misc]
+
+    def test_admonition_is_frozen(self) -> None:
+        admonition = Admonition(
+            kind=AdmonitionKind.NOTE,
+            blocks=(),
+            source_line=1,
+        )
+        with self.assertRaises(FrozenInstanceError):
+            admonition.kind = AdmonitionKind.TIP  # type: ignore[misc]
+
+    def test_blockquote_is_frozen(self) -> None:
+        blockquote = Blockquote(
+            author=None,
+            source=None,
+            blocks=(),
+            source_line=1,
+        )
+        with self.assertRaises(FrozenInstanceError):
+            blockquote.author = "Anon"  # type: ignore[misc]
 
 
 class AstConstructionTests(unittest.TestCase):
@@ -225,6 +254,66 @@ class AstConstructionTests(unittest.TestCase):
             source_line=1,
         )
         self.assertEqual(with_directive.column_proportions, (1, 2, 3))
+
+    def test_admonition_records_kind_and_blocks(self) -> None:
+        para = Paragraph(inlines=(_make_text("body"),), source_line=2)
+        for kind in AdmonitionKind:
+            with self.subTest(kind=kind):
+                admonition = Admonition(
+                    kind=kind,
+                    blocks=(para,),
+                    source_line=1,
+                )
+                self.assertEqual(admonition.kind, kind)
+                self.assertEqual(admonition.blocks, (para,))
+                self.assertEqual(admonition.source_line, 1)
+
+    def test_admonition_accepts_empty_body(self) -> None:
+        # An empty body (no paragraphs) is permitted: the parser
+        # produces this when ``[NOTE]\n====\n====`` is seen.
+        admonition = Admonition(
+            kind=AdmonitionKind.NOTE,
+            blocks=(),
+            source_line=1,
+        )
+        self.assertEqual(admonition.blocks, ())
+
+    def test_admonition_holds_multiple_paragraphs(self) -> None:
+        p1 = Paragraph(inlines=(_make_text("first"),), source_line=2)
+        p2 = Paragraph(inlines=(_make_text("second"),), source_line=4)
+        admonition = Admonition(
+            kind=AdmonitionKind.TIP,
+            blocks=(p1, p2),
+            source_line=1,
+        )
+        self.assertEqual(len(admonition.blocks), 2)
+
+    def test_blockquote_optional_author_and_source(self) -> None:
+        # All four combinations of author/source are valid.
+        for author, source in (
+            (None, None),
+            ("Author", None),
+            ("Author", "Source"),
+        ):
+            with self.subTest(author=author, source=source):
+                quote = Blockquote(
+                    author=author,
+                    source=source,
+                    blocks=(),
+                    source_line=1,
+                )
+                self.assertEqual(quote.author, author)
+                self.assertEqual(quote.source, source)
+
+    def test_blockquote_records_blocks(self) -> None:
+        para = Paragraph(inlines=(_make_text("quoted"),), source_line=2)
+        quote = Blockquote(
+            author="Mark Twain",
+            source="A Book",
+            blocks=(para,),
+            source_line=1,
+        )
+        self.assertEqual(quote.blocks, (para,))
 
 
 class AstEqualityTests(unittest.TestCase):

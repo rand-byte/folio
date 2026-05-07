@@ -34,7 +34,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from notes_app.enums import LinkScheme
+from notes_app.enums import AdmonitionKind, LinkScheme
 
 
 # ---------------------------------------------------------------------------
@@ -320,6 +320,76 @@ class Table:
     source_line: int
 
 
+@dataclass(frozen=True)
+class Admonition:
+    """A ``NOTE``/``TIP``/``IMPORTANT``/``WARNING``/``CAUTION`` callout.
+
+    Both source forms — single-line ``NOTE: text`` and block
+    ``[NOTE]`` followed by ``====``-fenced body — produce this same
+    AST node. The renderer therefore needs only one branch to handle
+    admonitions, and tests that round-trip valid admonitions of either
+    form share assertions.
+
+    ``kind`` is one of the five members of :class:`AdmonitionKind`.
+    The parser raises :class:`ParseErrorKind.UNKNOWN_ADMONITION_TYPE`
+    for any other label, so by the time a node reaches the renderer
+    the kind is guaranteed to be valid — no runtime fallback needed.
+
+    ``blocks`` is a tuple of :class:`Paragraph`. The body of an
+    admonition accepts inline content only — no nested lists, code
+    blocks, images, tables, admonitions, or blockquotes — so the only
+    block kind that can appear here is :class:`Paragraph`. The parser
+    enforces this with
+    :class:`ParseErrorKind.BLOCK_INSIDE_INLINE_ONLY_CONTAINER`.
+    The single-line shape (``NOTE: text``) produces exactly one
+    :class:`Paragraph` containing the inline-parsed text; the block
+    shape produces however many paragraphs the user wrote between
+    the fences (separated by blank lines), which may be zero (an
+    empty body) — that is permitted as a degenerate but well-formed
+    case.
+
+    ``source_line`` is the line of the construct's *opening* token —
+    the ``NOTE: …`` line for the single-line form, the ``[NOTE]``
+    directive line for the block form (not the ``====`` fence line).
+    """
+
+    kind: AdmonitionKind
+    blocks: tuple[Paragraph, ...]
+    source_line: int
+
+
+@dataclass(frozen=True)
+class Blockquote:
+    """A ``____``-fenced block quotation, optionally attributed.
+
+    A blockquote may carry a ``[quote, Author, Source]`` directive on
+    the line immediately above the opening fence; both attribution
+    fields are optional. The plan and AsciiDoc spec name the third
+    positional argument *Source* — a citation source such as a book
+    title or article URL — so this dataclass uses :attr:`source` to
+    match. Note that this is unrelated to :attr:`source_line`, which
+    is the line number of the opening directive (or fence, when no
+    directive is present).
+
+    ``author`` is :data:`None` when the directive is absent or is the
+    bare ``[quote]``, and a non-empty string otherwise (the parser
+    rejects empty author strings with
+    :class:`ParseErrorKind.BAD_BLOCKQUOTE_DIRECTIVE`). ``source`` is
+    :data:`None` unless the directive carried a third comma-separated
+    argument (and likewise non-empty when set).
+
+    ``blocks`` follows the same rule as :class:`Admonition`: a tuple
+    of :class:`Paragraph`, no other block kinds, enforced by
+    :class:`ParseErrorKind.BLOCK_INSIDE_INLINE_ONLY_CONTAINER`. An
+    empty body (no paragraphs between fences) is permitted.
+    """
+
+    author: str | None
+    source: str | None
+    blocks: tuple[Paragraph, ...]
+    source_line: int
+
+
 type BlockNode = (
     Section
     | Paragraph
@@ -328,13 +398,15 @@ type BlockNode = (
     | CodeBlock
     | Image
     | Table
+    | Admonition
+    | Blockquote
 )
 """The closed union of block node kinds the parser produces.
 
 Step 4 produced :class:`Section`, :class:`Paragraph`, :class:`OrderedList`,
 :class:`UnorderedList`, :class:`CodeBlock`, and :class:`Image`. Step 14
-extends this union with :class:`Table`. Step 15 will further extend it
-with ``Admonition`` and ``Blockquote``.
+extends this union with :class:`Table`. Step 15 extends it further with
+:class:`Admonition` and :class:`Blockquote`.
 """
 
 

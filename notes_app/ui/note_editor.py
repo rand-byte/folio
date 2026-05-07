@@ -62,13 +62,13 @@ Principles & invariants
   built from scratch — no display, no GtkSourceView — and so each
   callback is a one-line lambda binding a fixed delimiter or
   template to those helpers.
-* Toolbar surface as of step 14 covers Heading, Bold, Italic,
+* Toolbar surface as of step 15 covers Heading, Bold, Italic,
   Strikethrough, Underline, Monospace, Link, Bullet list, Numbered
-  list, Code block, Image, and Table. Admonition and blockquote
-  land at step 15. Adding all the buttons up-front would imply
-  support the parser does not yet have, which the strict-mode
-  policy of the parser would surface as a parse error the moment
-  the user clicked the premature button.
+  list, Code block, Image, Table, Admonition, and Blockquote.
+  Adding all the buttons up-front would imply support the parser
+  does not yet have, which the strict-mode policy of the parser
+  would surface as a parse error the moment the user clicked the
+  premature button.
 * The image button opens a :class:`Gtk.FileDialog` (the GTK 4.10
   current API; :class:`Gtk.FileChooserDialog` is deprecated). On a
   successful pick it routes the chosen path through
@@ -214,6 +214,39 @@ shows the user the syntax of header / body rows and cell separators
 without dropping a degenerate single-row table that hides the
 arity-mismatch behaviour. The user adds, removes, or renames cells
 from there.
+"""
+
+_ADMONITION_TEMPLATE: Final[str] = (
+    "[NOTE]\n"
+    "====\n"
+    "Note text.\n"
+    "===="
+)
+"""AsciiDoc snippet inserted by the Admonition toolbar button.
+
+A block ``[NOTE]`` admonition rather than the single-line
+``NOTE: text`` shape — the block form is the more general one and
+shows the user the fence syntax. ``NOTE`` is the safest default
+kind: it has no negative connotation (unlike ``WARNING`` /
+``CAUTION``) and matches the design's reference admonition. The
+user changes the kind by editing ``[NOTE]`` to ``[TIP]`` /
+``[IMPORTANT]`` / ``[WARNING]`` / ``[CAUTION]`` directly.
+"""
+
+_BLOCKQUOTE_TEMPLATE: Final[str] = (
+    "[quote, Author, Source]\n"
+    "____\n"
+    "Quoted text.\n"
+    "____"
+)
+"""AsciiDoc snippet inserted by the Blockquote toolbar button.
+
+A blockquote with the full ``[quote, Author, Source]`` directive so
+the user sees the attribution shape. They delete the directive line
+to drop attribution entirely, or remove the ``, Source`` portion to
+keep just the author. Empty author / source fields raise a parse
+error at render time, so the placeholders are non-empty literals
+the user can edit in place.
 """
 
 
@@ -771,7 +804,7 @@ class NoteEditor(Gtk.Box):  # pylint: disable=too-many-instance-attributes
     # ------------------------------------------------------------------
 
     def _build_toolbar(self) -> Gtk.Box:
-        """Construct the editor's toolbar — the step-14 core set.
+        """Construct the editor's toolbar — the step-15 core set.
 
         The toolbar is a horizontal :class:`Gtk.Box`. Each button is
         a :class:`Gtk.Button` whose clicked signal binds a closure
@@ -785,9 +818,16 @@ class NoteEditor(Gtk.Box):  # pylint: disable=too-many-instance-attributes
         a ``link:URL[label]`` template at the cursor with the URL
         portion preselected for immediate replacement.
 
-        Step 14 adds the Table button at the end of the blocks
+        Step 14 added the Table button at the end of the blocks
         group: it inserts a small 2-column table template that the
         user can fill in.
+
+        Step 15 adds the Admonition and Blockquote buttons at the
+        end of the blocks group. The admonition button drops a
+        ``[NOTE]``-fenced block; the blockquote button drops a
+        ``[quote, Author, Source]``-attributed quote block. Both
+        templates parse cleanly through the parser so the rendered
+        view does not flash a parse error after the click.
         """
         toolbar = Gtk.Box.new(Gtk.Orientation.HORIZONTAL, spacing=4)
         toolbar.set_margin_top(4)
@@ -894,6 +934,20 @@ class NoteEditor(Gtk.Box):  # pylint: disable=too-many-instance-attributes
                 label="⊞",
                 tooltip="Table",
                 text=_TABLE_TEMPLATE,
+            )
+        )
+        toolbar.append(
+            self._make_insert_button(
+                label="ⓘ",
+                tooltip="Admonition",
+                text=_ADMONITION_TEMPLATE,
+            )
+        )
+        toolbar.append(
+            self._make_insert_button(
+                label="❝",
+                tooltip="Blockquote",
+                text=_BLOCKQUOTE_TEMPLATE,
             )
         )
 

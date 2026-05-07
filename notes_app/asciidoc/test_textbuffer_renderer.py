@@ -1173,5 +1173,416 @@ class TableRenderingTests(unittest.TestCase):
         self.assertEqual(label.get_yalign(), 0.0)
 
 
+# ---------------------------------------------------------------------------
+# Admonitions (step 15)
+# ---------------------------------------------------------------------------
+
+
+@unittest.skipUnless(_display_available(), "no GDK display")
+class AdmonitionRenderingTests(unittest.TestCase):
+    """Admonitions produce a :class:`Gtk.Frame` with header + body labels.
+
+    Single-line and block forms converge in the AST, so the renderer
+    has one code path — these tests cover both source forms but the
+    structural assertions are identical.
+    """
+
+    def test_single_line_admonition_attaches_a_frame_widget(self) -> None:
+        renderer, buffer, _ = _build_renderer()
+        attached: list[tuple[Gtk.TextChildAnchor, Gtk.Widget]] = []
+        renderer.render_into(
+            "NOTE: hello\n",
+            buffer,
+            note_id="n1",
+            attach_widget=_collect(attached),
+        )
+        self.assertEqual(len(attached), 1)
+        anchor, widget = attached[0]
+        self.assertIsInstance(anchor, Gtk.TextChildAnchor)
+        self.assertIsInstance(widget, Gtk.Frame)
+
+    def test_block_admonition_attaches_a_frame_widget(self) -> None:
+        src = "[NOTE]\n====\nbody\n====\n"
+        renderer, buffer, _ = _build_renderer()
+        attached: list[tuple[Gtk.TextChildAnchor, Gtk.Widget]] = []
+        renderer.render_into(
+            src,
+            buffer,
+            note_id="n1",
+            attach_widget=_collect(attached),
+        )
+        self.assertEqual(len(attached), 1)
+        widget = attached[0][1]
+        self.assertIsInstance(widget, Gtk.Frame)
+
+    def test_frame_carries_admonition_css_classes(self) -> None:
+        renderer, buffer, _ = _build_renderer()
+        attached: list[tuple[Gtk.TextChildAnchor, Gtk.Widget]] = []
+        renderer.render_into(
+            "NOTE: x\n",
+            buffer,
+            note_id="n1",
+            attach_widget=_collect(attached),
+        )
+        frame = cast(Gtk.Frame, attached[0][1])
+        classes = frame.get_css_classes()
+        self.assertIn("admonition", classes)
+        self.assertIn("admonition-note", classes)
+
+    def test_per_kind_css_class_distinguishes_kinds(self) -> None:
+        cases: tuple[tuple[str, str], ...] = (
+            ("NOTE: x\n", "admonition-note"),
+            ("TIP: x\n", "admonition-tip"),
+            ("IMPORTANT: x\n", "admonition-important"),
+            ("WARNING: x\n", "admonition-warning"),
+            ("CAUTION: x\n", "admonition-caution"),
+        )
+        for source, expected_class in cases:
+            with self.subTest(source=source):
+                renderer, buffer, _ = _build_renderer()
+                attached: list[
+                    tuple[Gtk.TextChildAnchor, Gtk.Widget]
+                ] = []
+                renderer.render_into(
+                    source,
+                    buffer,
+                    note_id="n1",
+                    attach_widget=_collect(attached),
+                )
+                frame = cast(Gtk.Frame, attached[0][1])
+                self.assertIn(expected_class, frame.get_css_classes())
+
+    def test_frame_contains_a_box_with_header_and_body_labels(self) -> None:
+        renderer, buffer, _ = _build_renderer()
+        attached: list[tuple[Gtk.TextChildAnchor, Gtk.Widget]] = []
+        renderer.render_into(
+            "NOTE: hello\n",
+            buffer,
+            note_id="n1",
+            attach_widget=_collect(attached),
+        )
+        frame = cast(Gtk.Frame, attached[0][1])
+        box = frame.get_child()
+        self.assertIsInstance(box, Gtk.Box)
+        # Walk the box's children — first one is the header label,
+        # subsequent ones are the body paragraph labels.
+        children: list[Gtk.Widget] = []
+        child = cast(Gtk.Box, box).get_first_child()
+        while child is not None:
+            children.append(child)
+            child = child.get_next_sibling()
+        self.assertGreaterEqual(len(children), 2)
+        self.assertIsInstance(children[0], Gtk.Label)
+        self.assertIsInstance(children[1], Gtk.Label)
+
+    def test_header_label_carries_the_kind_text(self) -> None:
+        renderer, buffer, _ = _build_renderer()
+        attached: list[tuple[Gtk.TextChildAnchor, Gtk.Widget]] = []
+        renderer.render_into(
+            "TIP: x\n",
+            buffer,
+            note_id="n1",
+            attach_widget=_collect(attached),
+        )
+        frame = cast(Gtk.Frame, attached[0][1])
+        box = cast(Gtk.Box, frame.get_child())
+        header = cast(Gtk.Label, box.get_first_child())
+        self.assertEqual(header.get_text(), "TIP")
+        self.assertIn("admonition-header", header.get_css_classes())
+
+    def test_body_label_wraps_at_column_width(self) -> None:
+        # Body labels respect the article column — the column width
+        # is read once via the injected resolver.
+        renderer, buffer, _ = _build_renderer(
+            column_width_px=lambda: 800,
+        )
+        attached: list[tuple[Gtk.TextChildAnchor, Gtk.Widget]] = []
+        renderer.render_into(
+            "NOTE: a body line\n",
+            buffer,
+            note_id="n1",
+            attach_widget=_collect(attached),
+        )
+        frame = cast(Gtk.Frame, attached[0][1])
+        box = cast(Gtk.Box, frame.get_child())
+        # Header is the first child; the body label follows.
+        header = box.get_first_child()
+        assert header is not None
+        body_label = cast(Gtk.Label, header.get_next_sibling())
+        self.assertTrue(body_label.get_wrap())
+        self.assertEqual(
+            body_label.get_max_width_chars(),
+            TARGET_CHARS_PER_LINE,
+        )
+        self.assertIn("admonition-body", body_label.get_css_classes())
+
+    def test_body_label_uses_pango_markup_for_inline(self) -> None:
+        # Bold inside the body is preserved via Pango markup.
+        renderer, buffer, _ = _build_renderer()
+        attached: list[tuple[Gtk.TextChildAnchor, Gtk.Widget]] = []
+        renderer.render_into(
+            "NOTE: see *bold* text\n",
+            buffer,
+            note_id="n1",
+            attach_widget=_collect(attached),
+        )
+        frame = cast(Gtk.Frame, attached[0][1])
+        box = cast(Gtk.Box, frame.get_child())
+        body_label = cast(Gtk.Label, box.get_first_child().get_next_sibling())
+        # Pango markup leaves the visible text unstyled by markup tags;
+        # the displayed text is the prose.
+        self.assertEqual(body_label.get_text(), "see bold text")
+
+    def test_block_admonition_with_two_paragraphs_makes_two_body_labels(
+        self,
+    ) -> None:
+        src = "[NOTE]\n====\nfirst\n\nsecond\n====\n"
+        renderer, buffer, _ = _build_renderer()
+        attached: list[tuple[Gtk.TextChildAnchor, Gtk.Widget]] = []
+        renderer.render_into(
+            src,
+            buffer,
+            note_id="n1",
+            attach_widget=_collect(attached),
+        )
+        frame = cast(Gtk.Frame, attached[0][1])
+        box = cast(Gtk.Box, frame.get_child())
+        children: list[Gtk.Widget] = []
+        child = box.get_first_child()
+        while child is not None:
+            children.append(child)
+            child = child.get_next_sibling()
+        # Header + two body paragraphs = three children.
+        self.assertEqual(len(children), 3)
+
+    def test_empty_admonition_body_produces_only_header(self) -> None:
+        # ``[NOTE]\n====\n====\n`` — empty body, just the header.
+        src = "[NOTE]\n====\n====\n"
+        renderer, buffer, _ = _build_renderer()
+        attached: list[tuple[Gtk.TextChildAnchor, Gtk.Widget]] = []
+        renderer.render_into(
+            src,
+            buffer,
+            note_id="n1",
+            attach_widget=_collect(attached),
+        )
+        frame = cast(Gtk.Frame, attached[0][1])
+        box = cast(Gtk.Box, frame.get_child())
+        first = box.get_first_child()
+        assert first is not None
+        # No second child — body is empty.
+        self.assertIsNone(first.get_next_sibling())
+
+    def test_admonition_anchor_is_inserted_in_buffer(self) -> None:
+        renderer, buffer, _ = _build_renderer()
+        attached: list[tuple[Gtk.TextChildAnchor, Gtk.Widget]] = []
+        renderer.render_into(
+            "NOTE: hello\n",
+            buffer,
+            note_id="n1",
+            attach_widget=_collect(attached),
+        )
+        anchors = _anchor_offsets(buffer)
+        self.assertEqual(len(anchors), 1)
+
+
+# ---------------------------------------------------------------------------
+# Blockquotes (step 15)
+# ---------------------------------------------------------------------------
+
+
+@unittest.skipUnless(_display_available(), "no GDK display")
+class BlockquoteRenderingTests(unittest.TestCase):
+    """Blockquotes produce a :class:`Gtk.Frame` with body + optional attribution."""
+
+    def test_unattributed_blockquote_attaches_a_frame_widget(self) -> None:
+        src = "____\nA quote.\n____\n"
+        renderer, buffer, _ = _build_renderer()
+        attached: list[tuple[Gtk.TextChildAnchor, Gtk.Widget]] = []
+        renderer.render_into(
+            src,
+            buffer,
+            note_id="n1",
+            attach_widget=_collect(attached),
+        )
+        self.assertEqual(len(attached), 1)
+        anchor, widget = attached[0]
+        self.assertIsInstance(anchor, Gtk.TextChildAnchor)
+        self.assertIsInstance(widget, Gtk.Frame)
+
+    def test_blockquote_frame_carries_blockquote_css_class(self) -> None:
+        renderer, buffer, _ = _build_renderer()
+        attached: list[tuple[Gtk.TextChildAnchor, Gtk.Widget]] = []
+        renderer.render_into(
+            "____\nq\n____\n",
+            buffer,
+            note_id="n1",
+            attach_widget=_collect(attached),
+        )
+        frame = cast(Gtk.Frame, attached[0][1])
+        self.assertIn("blockquote", frame.get_css_classes())
+
+    def test_blockquote_body_has_blockquote_body_css_class(self) -> None:
+        renderer, buffer, _ = _build_renderer()
+        attached: list[tuple[Gtk.TextChildAnchor, Gtk.Widget]] = []
+        renderer.render_into(
+            "____\nthe quote\n____\n",
+            buffer,
+            note_id="n1",
+            attach_widget=_collect(attached),
+        )
+        frame = cast(Gtk.Frame, attached[0][1])
+        box = cast(Gtk.Box, frame.get_child())
+        body_label = cast(Gtk.Label, box.get_first_child())
+        self.assertIn("blockquote-body", body_label.get_css_classes())
+
+    def test_no_attribution_when_directive_absent(self) -> None:
+        renderer, buffer, _ = _build_renderer()
+        attached: list[tuple[Gtk.TextChildAnchor, Gtk.Widget]] = []
+        renderer.render_into(
+            "____\nthe quote\n____\n",
+            buffer,
+            note_id="n1",
+            attach_widget=_collect(attached),
+        )
+        frame = cast(Gtk.Frame, attached[0][1])
+        box = cast(Gtk.Box, frame.get_child())
+        # Walk children: should be exactly one body label, no
+        # attribution.
+        children: list[Gtk.Widget] = []
+        child = box.get_first_child()
+        while child is not None:
+            children.append(child)
+            child = child.get_next_sibling()
+        self.assertEqual(len(children), 1)
+        # The single child is the body label, and carries the
+        # blockquote-body css class (not the attribution one).
+        only = children[0]
+        self.assertIn("blockquote-body", only.get_css_classes())
+        self.assertNotIn(
+            "blockquote-attribution", only.get_css_classes()
+        )
+
+    def test_attribution_label_when_author_only(self) -> None:
+        src = "[quote, Mark Twain]\n____\nq\n____\n"
+        renderer, buffer, _ = _build_renderer()
+        attached: list[tuple[Gtk.TextChildAnchor, Gtk.Widget]] = []
+        renderer.render_into(
+            src,
+            buffer,
+            note_id="n1",
+            attach_widget=_collect(attached),
+        )
+        frame = cast(Gtk.Frame, attached[0][1])
+        box = cast(Gtk.Box, frame.get_child())
+        # Last child is the attribution label.
+        last_child: Gtk.Widget | None = None
+        child = box.get_first_child()
+        while child is not None:
+            last_child = child
+            child = child.get_next_sibling()
+        assert last_child is not None
+        attribution = cast(Gtk.Label, last_child)
+        self.assertIn("blockquote-attribution", attribution.get_css_classes())
+        self.assertEqual(attribution.get_text(), "— Mark Twain")
+
+    def test_attribution_label_when_author_and_source(self) -> None:
+        src = "[quote, Mark Twain, Notebook]\n____\nq\n____\n"
+        renderer, buffer, _ = _build_renderer()
+        attached: list[tuple[Gtk.TextChildAnchor, Gtk.Widget]] = []
+        renderer.render_into(
+            src,
+            buffer,
+            note_id="n1",
+            attach_widget=_collect(attached),
+        )
+        frame = cast(Gtk.Frame, attached[0][1])
+        box = cast(Gtk.Box, frame.get_child())
+        last_child: Gtk.Widget | None = None
+        child = box.get_first_child()
+        while child is not None:
+            last_child = child
+            child = child.get_next_sibling()
+        assert last_child is not None
+        attribution = cast(Gtk.Label, last_child)
+        self.assertEqual(attribution.get_text(), "— Mark Twain, Notebook")
+
+    def test_bare_quote_directive_yields_no_attribution(self) -> None:
+        # ``[quote]`` (no attribution) — same as no directive.
+        src = "[quote]\n____\nq\n____\n"
+        renderer, buffer, _ = _build_renderer()
+        attached: list[tuple[Gtk.TextChildAnchor, Gtk.Widget]] = []
+        renderer.render_into(
+            src,
+            buffer,
+            note_id="n1",
+            attach_widget=_collect(attached),
+        )
+        frame = cast(Gtk.Frame, attached[0][1])
+        box = cast(Gtk.Box, frame.get_child())
+        children: list[Gtk.Widget] = []
+        child = box.get_first_child()
+        while child is not None:
+            children.append(child)
+            child = child.get_next_sibling()
+        # Only the body label, no attribution row.
+        self.assertEqual(len(children), 1)
+
+    def test_body_label_wraps_at_column_width(self) -> None:
+        renderer, buffer, _ = _build_renderer(
+            column_width_px=lambda: 800,
+        )
+        attached: list[tuple[Gtk.TextChildAnchor, Gtk.Widget]] = []
+        renderer.render_into(
+            "____\na quoted line\n____\n",
+            buffer,
+            note_id="n1",
+            attach_widget=_collect(attached),
+        )
+        frame = cast(Gtk.Frame, attached[0][1])
+        box = cast(Gtk.Box, frame.get_child())
+        body_label = cast(Gtk.Label, box.get_first_child())
+        self.assertTrue(body_label.get_wrap())
+        self.assertEqual(
+            body_label.get_max_width_chars(),
+            TARGET_CHARS_PER_LINE,
+        )
+
+    def test_blockquote_with_two_paragraphs_makes_two_body_labels(
+        self,
+    ) -> None:
+        src = "____\nfirst\n\nsecond\n____\n"
+        renderer, buffer, _ = _build_renderer()
+        attached: list[tuple[Gtk.TextChildAnchor, Gtk.Widget]] = []
+        renderer.render_into(
+            src,
+            buffer,
+            note_id="n1",
+            attach_widget=_collect(attached),
+        )
+        frame = cast(Gtk.Frame, attached[0][1])
+        box = cast(Gtk.Box, frame.get_child())
+        children: list[Gtk.Widget] = []
+        child = box.get_first_child()
+        while child is not None:
+            children.append(child)
+            child = child.get_next_sibling()
+        self.assertEqual(len(children), 2)
+
+    def test_blockquote_body_pango_markup_preserves_inline(self) -> None:
+        renderer, buffer, _ = _build_renderer()
+        attached: list[tuple[Gtk.TextChildAnchor, Gtk.Widget]] = []
+        renderer.render_into(
+            "____\nuse *bold* text\n____\n",
+            buffer,
+            note_id="n1",
+            attach_widget=_collect(attached),
+        )
+        frame = cast(Gtk.Frame, attached[0][1])
+        box = cast(Gtk.Box, frame.get_child())
+        body_label = cast(Gtk.Label, box.get_first_child())
+        self.assertEqual(body_label.get_text(), "use bold text")
+
+
 if __name__ == "__main__":
     unittest.main()

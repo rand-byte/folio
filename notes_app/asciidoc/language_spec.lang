@@ -3,7 +3,7 @@
   Notes App AsciiDoc subset — GtkSourceView 5 language definition.
 
   This grammar covers the constructs the parser understands as of build
-  step 14 (see notes_app/asciidoc/parser.py and section 7 of plan.md):
+  step 15 (see notes_app/asciidoc/parser.py and section 7 of plan.md):
   document title, sections (== through six equals signs), unordered
   lists (asterisk item), ordered lists (dot item), code blocks
   (four-hyphen fences, with optional [source,lang] directive), image
@@ -11,15 +11,14 @@
   (_x_), strikethrough ([.line-through]#x#), and underline
   ([.underline]#x#), inline monospace (`x`), links in three forms:
   bare URL (https://x), URL-with-text (https://x[label]), and the
-  link:URL[label] macro, and tables (|=== fences, with optional
-  [cols="N,N,..."] directive). Anything outside this subset is
-  intentionally NOT highlighted; it is a parse error at render time
-  and the editor lets the raw text show through.
-
-  Build step 15 extends this file with admonitions and blockquotes.
-  Adding those constructs here ahead of time would highlight text the
-  parser still rejects, which is exactly the dishonest UX feedback we
-  are trying to avoid.
+  link:URL[label] macro, tables (|=== fences, with optional
+  [cols="N,N,..."] directive), admonitions in both forms — single-line
+  (NOTE: text and friends, restricted to the five known kinds) and
+  block ([NOTE]/[TIP]/[IMPORTANT]/[WARNING]/[CAUTION] followed by a
+  four-equals fence), and blockquotes (four-underscore fence, with
+  optional [quote, Author, Source] directive). Anything outside this
+  subset is intentionally NOT highlighted; it is a parse error at
+  render time and the editor lets the raw text show through.
 
   Style ids reference def.lang (shipped with GtkSourceView) so any
   installed style scheme renders sensible colours without bundling our
@@ -54,6 +53,11 @@
     <style id="table-fence"  name="Table Fence"    map-to="def:preprocessor"/>
     <style id="table-cell-separator" name="Table Cell Separator" map-to="def:list-marker"/>
     <style id="cols-directive" name="Cols Directive" map-to="def:preprocessor"/>
+    <style id="admonition-directive" name="Admonition Directive" map-to="def:preprocessor"/>
+    <style id="admonition-fence"     name="Admonition Fence"     map-to="def:preprocessor"/>
+    <style id="single-admonition"    name="Single-Line Admonition" map-to="def:note"/>
+    <style id="quote-directive"      name="Quote Directive"      map-to="def:preprocessor"/>
+    <style id="quote-fence"          name="Quote Fence"          map-to="def:preprocessor"/>
   </styles>
 
   <definitions>
@@ -162,6 +166,56 @@
     </context>
 
     <!--
+      Admonition fence: a line that is exactly four equals signs.
+      Matched whether or not preceded by a [NOTE]/[TIP]/… directive
+      — the parser performs the pairing; the highlighter only
+      colours the fence shape so the user sees the boundary.
+    -->
+    <context id="admonition-fence" style-ref="admonition-fence">
+      <match>^====\s*$</match>
+    </context>
+
+    <!--
+      Admonition directive: [NOTE], [TIP], [IMPORTANT], [WARNING],
+      or [CAUTION] on a line by itself. Highlighted regardless of
+      whether the next line is the four-equals fence; the parser
+      reports the missing-fence error at render time.
+    -->
+    <context id="admonition-directive" style-ref="admonition-directive">
+      <match>^\[(NOTE|TIP|IMPORTANT|WARNING|CAUTION)\]\s*$</match>
+    </context>
+
+    <!--
+      Single-line admonition: KIND: text where KIND is one of the
+      five known labels. The whole line is coloured so the user
+      sees the construct at a glance. Other inline contexts inside
+      the body still match (bold, italic, …) because GtkSourceView
+      composes nested context matches.
+    -->
+    <context id="single-admonition" style-ref="single-admonition">
+      <match>^(NOTE|TIP|IMPORTANT|WARNING|CAUTION):\s+.+$</match>
+    </context>
+
+    <!--
+      Quote fence: a line that is exactly four underscores. Used at
+      both ends of a blockquote. Highlighted as a preprocessor-style
+      marker so the user sees the boundaries.
+    -->
+    <context id="quote-fence" style-ref="quote-fence">
+      <match>^____\s*$</match>
+    </context>
+
+    <!--
+      Quote directive: [quote] or [quote, Author, Source] on a line
+      by itself. The captured contents (Author / Source) are not
+      validated by the highlighter — the parser does that and
+      surfaces malformed-attribution errors at render time.
+    -->
+    <context id="quote-directive" style-ref="quote-directive">
+      <match>^\[quote(?:,[^\]]*)?\]\s*$</match>
+    </context>
+
+    <!--
       Inline bold: *...* on a single line, with the asterisks adjacent
       to non-whitespace characters (matches the parser's rule that
       ``* foo *`` is plain prose, not a bold span). The negative
@@ -264,13 +318,22 @@
          macro both contain a bare URL at their start — without
          the precedence, the bare-url match would consume the
          scheme and prefix and prevent the bracketed-text region
-         from being recognised. -->
+         from being recognised. Admonition and quote fences /
+         directives appear with the rest of the block-level
+         constructs; the single-line admonition appears before
+         the inline contexts so its KIND: prefix is coloured as
+         an admonition (not as inline text). -->
     <context id="notes-asciidoc">
       <include>
         <context ref="code-block"/>
         <context ref="source-directive"/>
         <context ref="cols-directive"/>
         <context ref="table-fence"/>
+        <context ref="admonition-fence"/>
+        <context ref="admonition-directive"/>
+        <context ref="quote-fence"/>
+        <context ref="quote-directive"/>
+        <context ref="single-admonition"/>
         <context ref="heading"/>
         <context ref="image-macro"/>
         <context ref="unordered-list-bullet"/>

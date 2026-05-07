@@ -11,6 +11,8 @@ from __future__ import annotations
 import unittest
 
 from notes_app.asciidoc.lexer import (
+    AdmonitionDirectiveToken,
+    AdmonitionFenceToken,
     BlankToken,
     CodeDirectiveToken,
     CodeFenceToken,
@@ -20,12 +22,15 @@ from notes_app.asciidoc.lexer import (
     LineToken,
     ListBulletToken,
     ListNumberToken,
+    QuoteDirectiveToken,
+    QuoteFenceToken,
+    SingleAdmonitionToken,
     TableFenceToken,
     Token,
     source_lines,
     tokenize,
 )
-from notes_app.enums import TokenKind
+from notes_app.enums import AdmonitionKind, TokenKind
 
 
 # ---------------------------------------------------------------------------
@@ -329,6 +334,292 @@ class ColsDirectiveTokenizationTests(unittest.TestCase):
         self.assertIsInstance(tokens[0], LineToken)
 
 
+# ---------------------------------------------------------------------------
+# Admonition tokenisation (step 15)
+# ---------------------------------------------------------------------------
+
+
+class AdmonitionFenceTokenizationTests(unittest.TestCase):
+    """``====`` on its own line is an :class:`AdmonitionFenceToken`.
+
+    The four-equals literal is checked **before** the heading
+    classifier so it is never lexed as a level-4 heading with empty
+    body. Headings of level 5 or 6 (``=====`` / ``======``) still
+    parse as headings — the fence is exact-literal match only.
+    """
+
+    def test_table(self) -> None:
+        cases: tuple[tuple[str, str], ...] = (
+            ("plain fence", "===="),
+            ("trailing whitespace stripped", "====   "),
+        )
+        for desc, source in cases:
+            with self.subTest(desc):
+                tokens = tokenize(source)
+                self.assertEqual(len(tokens), 1)
+                token = tokens[0]
+                self.assertIsInstance(token, AdmonitionFenceToken)
+                assert isinstance(token, AdmonitionFenceToken)
+                self.assertEqual(token.kind, TokenKind.ADMONITION_FENCE)
+                self.assertEqual(token.line, 1)
+
+    def test_three_equals_is_a_heading_not_a_fence(self) -> None:
+        # Level 3 heading marker takes precedence: ``===`` is not the
+        # admonition fence. Falls through to HeadingToken with empty
+        # text.
+        tokens = tokenize("===")
+        self.assertEqual(len(tokens), 1)
+        self.assertIsInstance(tokens[0], HeadingToken)
+
+    def test_five_equals_is_a_heading_not_a_fence(self) -> None:
+        # Level 5 heading; the fence is exact four-equals match only.
+        tokens = tokenize("=====")
+        self.assertEqual(len(tokens), 1)
+        self.assertIsInstance(tokens[0], HeadingToken)
+
+    def test_six_equals_is_a_heading_not_a_fence(self) -> None:
+        tokens = tokenize("======")
+        self.assertEqual(len(tokens), 1)
+        self.assertIsInstance(tokens[0], HeadingToken)
+
+    def test_pair_of_fences_each_become_admonition_fence_tokens(self) -> None:
+        tokens = tokenize("[NOTE]\n====\nbody\n====\n")
+        self.assertIsInstance(tokens[0], AdmonitionDirectiveToken)
+        self.assertIsInstance(tokens[1], AdmonitionFenceToken)
+        self.assertIsInstance(tokens[2], LineToken)
+        self.assertIsInstance(tokens[3], AdmonitionFenceToken)
+
+
+class AdmonitionDirectiveTokenizationTests(unittest.TestCase):
+    """``[KIND]`` on its own line produces :class:`AdmonitionDirectiveToken`.
+
+    The lexer is permissive — any all-caps single word in brackets
+    matches. Validation against :class:`AdmonitionKind` happens at
+    parse time so an unknown label like ``[INFO]`` reaches the parser
+    as a directive token (and surfaces a specific
+    :class:`ParseErrorKind.UNKNOWN_ADMONITION_TYPE` rather than the
+    generic ``UNKNOWN_BLOCK``).
+    """
+
+    def test_table(self) -> None:
+        cases: tuple[tuple[str, str], ...] = (
+            ("note", "[NOTE]"),
+            ("tip", "[TIP]"),
+            ("important", "[IMPORTANT]"),
+            ("warning", "[WARNING]"),
+            ("caution", "[CAUTION]"),
+            ("unknown — still tokenised, parser rejects", "[INFO]"),
+            ("unknown long — still tokenised, parser rejects", "[FOOBAR]"),
+        )
+        for desc, source in cases:
+            with self.subTest(desc):
+                tokens = tokenize(source)
+                self.assertEqual(len(tokens), 1)
+                token = tokens[0]
+                self.assertIsInstance(token, AdmonitionDirectiveToken)
+                assert isinstance(token, AdmonitionDirectiveToken)
+                self.assertEqual(token.kind, TokenKind.ADMONITION_DIRECTIVE)
+                # The bracketed label is stripped of its delimiters.
+                self.assertEqual(token.kind_str, source[1:-1])
+
+    def test_lowercase_label_falls_through_to_line_token(self) -> None:
+        # ``[note]`` (lowercase) does not match the all-caps pattern.
+        tokens = tokenize("[note]")
+        self.assertEqual(len(tokens), 1)
+        # The bracketed shape is rejected later by _reject_unknown_block.
+        self.assertIsInstance(tokens[0], LineToken)
+
+    def test_mixed_case_falls_through(self) -> None:
+        tokens = tokenize("[Note]")
+        self.assertEqual(len(tokens), 1)
+        self.assertIsInstance(tokens[0], LineToken)
+
+    def test_directive_with_extra_content_falls_through(self) -> None:
+        # ``[NOTE foo]`` is not a clean directive; spaces/extras break
+        # the all-caps single-word rule.
+        tokens = tokenize("[NOTE foo]")
+        self.assertEqual(len(tokens), 1)
+        self.assertIsInstance(tokens[0], LineToken)
+
+
+class SingleAdmonitionTokenizationTests(unittest.TestCase):
+    """``KIND: text`` produces :class:`SingleAdmonitionToken`.
+
+    Restricted at lex time to the five known kinds — anything else
+    (``URL: foo``, ``TODO: bar``) is plain prose. The captured
+    :class:`AdmonitionKind` is validated by construction (the regex's
+    alternation enumerates the five labels).
+    """
+
+    def test_table(self) -> None:
+        cases: tuple[tuple[str, str, AdmonitionKind, str], ...] = (
+            ("note", "NOTE: hello", AdmonitionKind.NOTE, "hello"),
+            ("tip", "TIP: a tip", AdmonitionKind.TIP, "a tip"),
+            (
+                "important",
+                "IMPORTANT: read this",
+                AdmonitionKind.IMPORTANT,
+                "read this",
+            ),
+            (
+                "warning",
+                "WARNING: hot surface",
+                AdmonitionKind.WARNING,
+                "hot surface",
+            ),
+            (
+                "caution",
+                "CAUTION: be careful",
+                AdmonitionKind.CAUTION,
+                "be careful",
+            ),
+            (
+                "trailing whitespace stripped",
+                "NOTE: hello   ",
+                AdmonitionKind.NOTE,
+                "hello",
+            ),
+            (
+                "inline markup is opaque to lexer",
+                "NOTE: see *important* item",
+                AdmonitionKind.NOTE,
+                "see *important* item",
+            ),
+        )
+        for desc, source, kind, text in cases:
+            with self.subTest(desc):
+                tokens = tokenize(source)
+                self.assertEqual(len(tokens), 1)
+                token = tokens[0]
+                self.assertIsInstance(token, SingleAdmonitionToken)
+                assert isinstance(token, SingleAdmonitionToken)
+                self.assertEqual(token.kind, TokenKind.SINGLE_ADMONITION)
+                self.assertEqual(token.admonition_kind, kind)
+                self.assertEqual(token.text, text)
+
+    def test_unknown_kind_falls_through(self) -> None:
+        # ``URL:`` is not a known admonition label — stays prose.
+        tokens = tokenize("URL: https://example.com")
+        self.assertEqual(len(tokens), 1)
+        self.assertIsInstance(tokens[0], LineToken)
+
+    def test_lowercase_kind_falls_through(self) -> None:
+        # ``note: …`` (lowercase) is not an admonition.
+        tokens = tokenize("note: hello")
+        self.assertEqual(len(tokens), 1)
+        self.assertIsInstance(tokens[0], LineToken)
+
+    def test_kind_without_space_after_colon_falls_through(self) -> None:
+        # ``NOTE:hello`` (no space) — the regex requires colon-space.
+        tokens = tokenize("NOTE:hello")
+        self.assertEqual(len(tokens), 1)
+        self.assertIsInstance(tokens[0], LineToken)
+
+    def test_empty_text_after_colon_falls_through(self) -> None:
+        # ``NOTE: `` (only whitespace after) — after right-stripping
+        # becomes ``NOTE:`` which doesn't match (no space-then-text).
+        # Falls through to LineToken (becomes paragraph).
+        tokens = tokenize("NOTE: ")
+        self.assertEqual(len(tokens), 1)
+        self.assertIsInstance(tokens[0], LineToken)
+
+
+# ---------------------------------------------------------------------------
+# Blockquote tokenisation (step 15)
+# ---------------------------------------------------------------------------
+
+
+class QuoteFenceTokenizationTests(unittest.TestCase):
+    """``____`` on its own line is a :class:`QuoteFenceToken`.
+
+    Same fence-pair shape as ``|===`` and ``----`` — both opening and
+    closing lines emit the same token kind.
+    """
+
+    def test_table(self) -> None:
+        cases: tuple[tuple[str, str], ...] = (
+            ("plain fence", "____"),
+            ("trailing whitespace stripped", "____   "),
+        )
+        for desc, source in cases:
+            with self.subTest(desc):
+                tokens = tokenize(source)
+                self.assertEqual(len(tokens), 1)
+                token = tokens[0]
+                self.assertIsInstance(token, QuoteFenceToken)
+                assert isinstance(token, QuoteFenceToken)
+                self.assertEqual(token.kind, TokenKind.QUOTE_FENCE)
+                self.assertEqual(token.line, 1)
+
+    def test_three_underscores_is_a_line_token(self) -> None:
+        tokens = tokenize("___")
+        self.assertEqual(len(tokens), 1)
+        self.assertIsInstance(tokens[0], LineToken)
+
+    def test_five_underscores_is_a_line_token(self) -> None:
+        tokens = tokenize("_____")
+        self.assertEqual(len(tokens), 1)
+        self.assertIsInstance(tokens[0], LineToken)
+
+    def test_pair_of_fences_each_become_quote_fence_tokens(self) -> None:
+        tokens = tokenize("____\nbody\n____\n")
+        self.assertIsInstance(tokens[0], QuoteFenceToken)
+        self.assertIsInstance(tokens[1], LineToken)
+        self.assertIsInstance(tokens[2], QuoteFenceToken)
+
+
+class QuoteDirectiveTokenizationTests(unittest.TestCase):
+    """``[quote, …]`` produces :class:`QuoteDirectiveToken`.
+
+    The lexer captures the bracket body raw — the parser validates
+    field non-emptiness and arity.
+    """
+
+    def test_table(self) -> None:
+        cases: tuple[tuple[str, str, str | None], ...] = (
+            ("bare", "[quote]", None),
+            ("with author", "[quote, Author]", ", Author"),
+            (
+                "with author and source",
+                "[quote, Author, Source]",
+                ", Author, Source",
+            ),
+            (
+                "trailing comma — parser rejects",
+                "[quote,]",
+                ",",
+            ),
+            (
+                "extra commas — parser rejects",
+                "[quote, A, B, C]",
+                ", A, B, C",
+            ),
+        )
+        for desc, source, raw_arguments in cases:
+            with self.subTest(desc):
+                tokens = tokenize(source)
+                self.assertEqual(len(tokens), 1)
+                token = tokens[0]
+                self.assertIsInstance(token, QuoteDirectiveToken)
+                assert isinstance(token, QuoteDirectiveToken)
+                self.assertEqual(token.kind, TokenKind.QUOTE_DIRECTIVE)
+                self.assertEqual(token.raw_arguments, raw_arguments)
+
+    def test_quote_with_extra_text_in_keyword_falls_through(self) -> None:
+        # ``[quotes]`` is not the directive — keyword must be exactly
+        # ``quote``.
+        tokens = tokenize("[quotes]")
+        self.assertEqual(len(tokens), 1)
+        self.assertIsInstance(tokens[0], LineToken)
+
+    def test_uppercase_quote_falls_through(self) -> None:
+        # ``[QUOTE]`` matches AdmonitionDirective, not QuoteDirective —
+        # the labels are case-sensitive.
+        tokens = tokenize("[QUOTE]")
+        self.assertEqual(len(tokens), 1)
+        self.assertIsInstance(tokens[0], AdmonitionDirectiveToken)
+
+
 
 class BlankTokenizationTests(unittest.TestCase):
     """Empty and whitespace-only lines produce :class:`BlankToken`."""
@@ -356,11 +647,6 @@ class LineTokenizationTests(unittest.TestCase):
             ("inline-marked prose", "Some *bold* text", "Some *bold* text"),
             ("attribute entry — parser rejects", ":author: me", ":author: me"),
             ("comment — parser rejects", "// a comment", "// a comment"),
-            (
-                "blockquote fence — parser rejects",
-                "____",
-                "____",
-            ),
             (
                 "trailing whitespace stripped",
                 "text with trailing   ",

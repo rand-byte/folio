@@ -17,6 +17,8 @@ from __future__ import annotations
 import unittest
 
 from notes_app.asciidoc.ast import (
+    Admonition,
+    Blockquote,
     Bold,
     CodeBlock,
     Image,
@@ -33,7 +35,7 @@ from notes_app.asciidoc.ast import (
 )
 from notes_app.asciidoc.parser import parse
 from notes_app.config.defaults import SEED_WELCOME_NOTE_SOURCE
-from notes_app.enums import ParseErrorKind
+from notes_app.enums import AdmonitionKind, ParseErrorKind
 from notes_app.models.parse_error import ParseError
 
 
@@ -478,12 +480,9 @@ class UnknownBlockDetectionTests(unittest.TestCase):
 
     def test_table(self) -> None:
         cases: tuple[tuple[str, str], ...] = (
-            ("blockquote fence", "____\nquote\n____\n"),
             ("attribute entry", ":doctype: book\n"),
             ("compound attribute", ":source-highlighter: rouge\n"),
             ("line comment", "// a comment\n"),
-            ("admonition opener", "[NOTE]\n====\nbody\n====\n"),
-            ("quote directive", "[quote]\n----\nq\n----\n"),
             (
                 "[source,] empty lang falls through then rejected",
                 "[source,]\n----\nx\n----\n",
@@ -491,6 +490,10 @@ class UnknownBlockDetectionTests(unittest.TestCase):
             (
                 "[cols=\"\"] empty body falls through then rejected",
                 "[cols=\"\"]\n|===\n|a\n|===\n",
+            ),
+            (
+                "stray `====` admonition fence with no opener",
+                "====\nbody\n====\n",
             ),
         )
         for desc, source in cases:
@@ -791,6 +794,388 @@ class TableErrorTests(unittest.TestCase):
             parse("|===\n|*unclosed\n|===\n")
         self.assertEqual(ctx.exception.kind, ParseErrorKind.BAD_INLINE_SPAN)
         self.assertEqual(ctx.exception.line, 2)
+
+
+# ---------------------------------------------------------------------------
+# Admonitions (step 15) — single-line form
+# ---------------------------------------------------------------------------
+
+
+class SingleLineAdmonitionTests(unittest.TestCase):
+    """``KIND: text`` parses to an :class:`Admonition` with one paragraph."""
+
+    def test_basic_single_line_note(self) -> None:
+        doc = parse("NOTE: hello\n")
+        self.assertEqual(len(doc.blocks), 1)
+        admonition = doc.blocks[0]
+        assert isinstance(admonition, Admonition)
+        self.assertEqual(admonition.kind, AdmonitionKind.NOTE)
+        self.assertEqual(len(admonition.blocks), 1)
+        paragraph = admonition.blocks[0]
+        self.assertEqual(paragraph.inlines, (_t("hello", 1),))
+        self.assertEqual(admonition.source_line, 1)
+
+    def test_all_five_kinds(self) -> None:
+        cases: tuple[tuple[str, AdmonitionKind], ...] = (
+            ("NOTE: x\n", AdmonitionKind.NOTE),
+            ("TIP: x\n", AdmonitionKind.TIP),
+            ("IMPORTANT: x\n", AdmonitionKind.IMPORTANT),
+            ("WARNING: x\n", AdmonitionKind.WARNING),
+            ("CAUTION: x\n", AdmonitionKind.CAUTION),
+        )
+        for source, expected_kind in cases:
+            with self.subTest(source=source):
+                doc = parse(source)
+                admonition = doc.blocks[0]
+                assert isinstance(admonition, Admonition)
+                self.assertEqual(admonition.kind, expected_kind)
+
+    def test_inline_markup_inside_single_line_admonition(self) -> None:
+        # The text after ``KIND: `` is run through parse_inline so
+        # inline formatting is preserved.
+        doc = parse("NOTE: see *important* item\n")
+        admonition = doc.blocks[0]
+        assert isinstance(admonition, Admonition)
+        kinds = [type(n).__name__ for n in admonition.blocks[0].inlines]
+        self.assertIn("Bold", kinds)
+
+    def test_lowercase_kind_is_paragraph_not_admonition(self) -> None:
+        # ``note: …`` (lowercase) is plain prose.
+        doc = parse("note: hello\n")
+        self.assertEqual(len(doc.blocks), 1)
+        self.assertIsInstance(doc.blocks[0], Paragraph)
+
+
+# ---------------------------------------------------------------------------
+# Admonitions (step 15) — block form
+# ---------------------------------------------------------------------------
+
+
+class BlockAdmonitionTests(unittest.TestCase):
+    """``[KIND]\\n====\\n…\\n====`` parses to an :class:`Admonition`."""
+
+    def test_simple_block_note(self) -> None:
+        doc = parse("[NOTE]\n====\nbody\n====\n")
+        self.assertEqual(len(doc.blocks), 1)
+        admonition = doc.blocks[0]
+        assert isinstance(admonition, Admonition)
+        self.assertEqual(admonition.kind, AdmonitionKind.NOTE)
+        self.assertEqual(len(admonition.blocks), 1)
+        # The source_line is the directive line (line 1), not the
+        # fence line — this matters for error reporting.
+        self.assertEqual(admonition.source_line, 1)
+
+    def test_all_five_block_kinds(self) -> None:
+        for kind in AdmonitionKind:
+            source = f"[{kind.value}]\n====\nbody\n====\n"
+            with self.subTest(kind=kind):
+                doc = parse(source)
+                admonition = doc.blocks[0]
+                assert isinstance(admonition, Admonition)
+                self.assertEqual(admonition.kind, kind)
+
+    def test_block_admonition_with_multiple_paragraphs(self) -> None:
+        source = (
+            "[TIP]\n"
+            "====\n"
+            "First paragraph.\n"
+            "\n"
+            "Second paragraph.\n"
+            "====\n"
+        )
+        doc = parse(source)
+        admonition = doc.blocks[0]
+        assert isinstance(admonition, Admonition)
+        self.assertEqual(len(admonition.blocks), 2)
+
+    def test_block_admonition_with_inline_markup(self) -> None:
+        source = "[IMPORTANT]\n====\nUse *bold* here.\n====\n"
+        doc = parse(source)
+        admonition = doc.blocks[0]
+        assert isinstance(admonition, Admonition)
+        kinds = [type(n).__name__ for n in admonition.blocks[0].inlines]
+        self.assertIn("Bold", kinds)
+
+    def test_empty_block_admonition_body(self) -> None:
+        # ``[NOTE]\n====\n====`` — empty body. The parser permits this;
+        # the renderer shows just the kind header.
+        doc = parse("[NOTE]\n====\n====\n")
+        admonition = doc.blocks[0]
+        assert isinstance(admonition, Admonition)
+        self.assertEqual(admonition.blocks, ())
+
+    def test_unknown_admonition_type_raises(self) -> None:
+        # ``[INFO]`` is structurally well-formed but not a known kind.
+        with self.assertRaises(ParseError) as ctx:
+            parse("[INFO]\n====\nbody\n====\n")
+        self.assertEqual(
+            ctx.exception.kind,
+            ParseErrorKind.UNKNOWN_ADMONITION_TYPE,
+        )
+        self.assertEqual(ctx.exception.line, 1)
+
+    def test_unterminated_admonition_raises(self) -> None:
+        with self.assertRaises(ParseError) as ctx:
+            parse("[NOTE]\n====\nbody\n")
+        self.assertEqual(
+            ctx.exception.kind,
+            ParseErrorKind.UNTERMINATED_ADMONITION,
+        )
+
+    def test_directive_not_followed_by_fence_raises(self) -> None:
+        # ``[NOTE]\nplain text`` — directive without the ==== fence.
+        with self.assertRaises(ParseError) as ctx:
+            parse("[NOTE]\nplain text\n")
+        self.assertEqual(ctx.exception.kind, ParseErrorKind.UNKNOWN_BLOCK)
+        self.assertEqual(ctx.exception.line, 1)
+
+    def test_blank_line_between_directive_and_fence_raises(self) -> None:
+        # A blank line between the directive and the fence breaks the
+        # binding, same as for ``[source]`` and ``[cols=…]``.
+        with self.assertRaises(ParseError) as ctx:
+            parse("[NOTE]\n\n====\nbody\n====\n")
+        self.assertEqual(ctx.exception.kind, ParseErrorKind.UNKNOWN_BLOCK)
+
+    def test_directive_at_eof_raises(self) -> None:
+        with self.assertRaises(ParseError) as ctx:
+            parse("[NOTE]\n")
+        self.assertEqual(ctx.exception.kind, ParseErrorKind.UNKNOWN_BLOCK)
+
+    def test_block_inside_admonition_body_raises(self) -> None:
+        # Lists, code blocks, images, tables, nested admonitions, and
+        # blockquotes are all rejected with the inline-only error.
+        cases: tuple[tuple[str, str], ...] = (
+            ("list", "[NOTE]\n====\n* an item\n====\n"),
+            ("code fence", "[NOTE]\n====\n----\nx\n----\n====\n"),
+            (
+                "image macro",
+                "[NOTE]\n====\nimage::cat.png[]\n====\n",
+            ),
+            (
+                "nested admonition fence",
+                "[NOTE]\n====\n[TIP]\n====\nx\n====\n====\n",
+            ),
+            (
+                "table fence",
+                "[NOTE]\n====\n|===\n|a|b\n|===\n====\n",
+            ),
+            (
+                "blockquote fence",
+                "[NOTE]\n====\n____\nq\n____\n====\n",
+            ),
+            (
+                "heading",
+                "[NOTE]\n====\n== heading\n====\n",
+            ),
+        )
+        for desc, source in cases:
+            with self.subTest(desc):
+                with self.assertRaises(ParseError) as ctx:
+                    parse(source)
+                self.assertEqual(
+                    ctx.exception.kind,
+                    ParseErrorKind.BLOCK_INSIDE_INLINE_ONLY_CONTAINER,
+                )
+
+    def test_inline_error_inside_admonition_body_propagates(self) -> None:
+        # An unterminated ``*`` inside the body raises BAD_INLINE_SPAN.
+        with self.assertRaises(ParseError) as ctx:
+            parse("[NOTE]\n====\n*unclosed\n====\n")
+        self.assertEqual(ctx.exception.kind, ParseErrorKind.BAD_INLINE_SPAN)
+
+    def test_stray_admonition_fence_raises(self) -> None:
+        # A bare ``====`` with no preceding directive — there's no kind
+        # to associate the body with.
+        with self.assertRaises(ParseError) as ctx:
+            parse("====\nbody\n====\n")
+        self.assertEqual(ctx.exception.kind, ParseErrorKind.UNKNOWN_BLOCK)
+
+
+# ---------------------------------------------------------------------------
+# Blockquotes (step 15)
+# ---------------------------------------------------------------------------
+
+
+class BlockquoteNoDirectiveTests(unittest.TestCase):
+    """``____\\n…\\n____`` parses to an unattributed :class:`Blockquote`."""
+
+    def test_simple_blockquote(self) -> None:
+        doc = parse("____\nA quote.\n____\n")
+        self.assertEqual(len(doc.blocks), 1)
+        quote = doc.blocks[0]
+        assert isinstance(quote, Blockquote)
+        self.assertIsNone(quote.author)
+        self.assertIsNone(quote.source)
+        self.assertEqual(len(quote.blocks), 1)
+        # Without a directive, the source_line is the opening fence line.
+        self.assertEqual(quote.source_line, 1)
+
+    def test_blockquote_with_multiple_paragraphs(self) -> None:
+        source = (
+            "____\n"
+            "First paragraph.\n"
+            "\n"
+            "Second paragraph.\n"
+            "____\n"
+        )
+        doc = parse(source)
+        quote = doc.blocks[0]
+        assert isinstance(quote, Blockquote)
+        self.assertEqual(len(quote.blocks), 2)
+
+    def test_blockquote_inline_markup(self) -> None:
+        doc = parse("____\nUse *bold* here.\n____\n")
+        quote = doc.blocks[0]
+        assert isinstance(quote, Blockquote)
+        kinds = [type(n).__name__ for n in quote.blocks[0].inlines]
+        self.assertIn("Bold", kinds)
+
+    def test_empty_blockquote_body(self) -> None:
+        doc = parse("____\n____\n")
+        quote = doc.blocks[0]
+        assert isinstance(quote, Blockquote)
+        self.assertEqual(quote.blocks, ())
+
+
+class BlockquoteWithDirectiveTests(unittest.TestCase):
+    """``[quote, …]\\n____\\n…\\n____`` parses with attribution recorded."""
+
+    def test_author_only(self) -> None:
+        doc = parse("[quote, Mark Twain]\n____\nq\n____\n")
+        quote = doc.blocks[0]
+        assert isinstance(quote, Blockquote)
+        self.assertEqual(quote.author, "Mark Twain")
+        self.assertIsNone(quote.source)
+
+    def test_author_and_source(self) -> None:
+        doc = parse(
+            "[quote, Mark Twain, Notebook]\n____\nq\n____\n"
+        )
+        quote = doc.blocks[0]
+        assert isinstance(quote, Blockquote)
+        self.assertEqual(quote.author, "Mark Twain")
+        self.assertEqual(quote.source, "Notebook")
+
+    def test_bare_quote_directive(self) -> None:
+        # ``[quote]`` with no comma is the no-attribution shape.
+        doc = parse("[quote]\n____\nq\n____\n")
+        quote = doc.blocks[0]
+        assert isinstance(quote, Blockquote)
+        self.assertIsNone(quote.author)
+        self.assertIsNone(quote.source)
+
+    def test_directive_source_line_is_directive_line(self) -> None:
+        doc = parse("\n\n[quote, A]\n____\nq\n____\n")
+        quote = doc.blocks[0]
+        assert isinstance(quote, Blockquote)
+        # ``source_line`` is the directive line (line 3), not the
+        # fence line (4).
+        self.assertEqual(quote.source_line, 3)
+
+    def test_attribution_whitespace_is_stripped(self) -> None:
+        # ``[quote,  Author  ,  Source  ]`` — whitespace tolerated.
+        doc = parse(
+            "[quote,  Mark Twain  ,  Notebook  ]\n____\nq\n____\n"
+        )
+        quote = doc.blocks[0]
+        assert isinstance(quote, Blockquote)
+        self.assertEqual(quote.author, "Mark Twain")
+        self.assertEqual(quote.source, "Notebook")
+
+
+class BlockquoteErrorTests(unittest.TestCase):
+    """Every error variant the blockquote parser raises."""
+
+    def test_unterminated_blockquote_no_directive_raises(self) -> None:
+        with self.assertRaises(ParseError) as ctx:
+            parse("____\nbody\n")
+        self.assertEqual(
+            ctx.exception.kind,
+            ParseErrorKind.UNTERMINATED_BLOCKQUOTE,
+        )
+
+    def test_unterminated_blockquote_with_directive_raises(self) -> None:
+        with self.assertRaises(ParseError) as ctx:
+            parse("[quote, A]\n____\nbody\n")
+        self.assertEqual(
+            ctx.exception.kind,
+            ParseErrorKind.UNTERMINATED_BLOCKQUOTE,
+        )
+
+    def test_directive_not_followed_by_fence_raises(self) -> None:
+        with self.assertRaises(ParseError) as ctx:
+            parse("[quote, A]\nplain text\n")
+        self.assertEqual(
+            ctx.exception.kind,
+            ParseErrorKind.BAD_BLOCKQUOTE_DIRECTIVE,
+        )
+
+    def test_directive_followed_by_wrong_fence_raises(self) -> None:
+        # ``[quote, A]\n----`` — a code fence after the directive.
+        with self.assertRaises(ParseError) as ctx:
+            parse("[quote, A]\n----\nq\n----\n")
+        self.assertEqual(
+            ctx.exception.kind,
+            ParseErrorKind.BAD_BLOCKQUOTE_DIRECTIVE,
+        )
+
+    def test_empty_author_raises(self) -> None:
+        # ``[quote,]`` — trailing comma, empty author.
+        with self.assertRaises(ParseError) as ctx:
+            parse("[quote,]\n____\nq\n____\n")
+        self.assertEqual(
+            ctx.exception.kind,
+            ParseErrorKind.BAD_BLOCKQUOTE_DIRECTIVE,
+        )
+
+    def test_whitespace_only_author_raises(self) -> None:
+        with self.assertRaises(ParseError) as ctx:
+            parse("[quote,   ]\n____\nq\n____\n")
+        self.assertEqual(
+            ctx.exception.kind,
+            ParseErrorKind.BAD_BLOCKQUOTE_DIRECTIVE,
+        )
+
+    def test_empty_source_raises(self) -> None:
+        # ``[quote, Author, ]`` — trailing comma, empty source.
+        with self.assertRaises(ParseError) as ctx:
+            parse("[quote, Author, ]\n____\nq\n____\n")
+        self.assertEqual(
+            ctx.exception.kind,
+            ParseErrorKind.BAD_BLOCKQUOTE_DIRECTIVE,
+        )
+
+    def test_too_many_arguments_raises(self) -> None:
+        # ``[quote, A, B, C]`` — three args, only two allowed.
+        with self.assertRaises(ParseError) as ctx:
+            parse("[quote, A, B, C]\n____\nq\n____\n")
+        self.assertEqual(
+            ctx.exception.kind,
+            ParseErrorKind.BAD_BLOCKQUOTE_DIRECTIVE,
+        )
+
+    def test_block_inside_blockquote_body_raises(self) -> None:
+        cases: tuple[tuple[str, str], ...] = (
+            ("list", "____\n* an item\n____\n"),
+            ("code fence", "____\n----\nx\n----\n____\n"),
+            ("image macro", "____\nimage::cat.png[]\n____\n"),
+            ("table fence", "____\n|===\n|a\n|===\n____\n"),
+            ("admonition fence", "____\n[NOTE]\n====\nx\n====\n____\n"),
+            ("heading", "____\n== heading\n____\n"),
+        )
+        for desc, source in cases:
+            with self.subTest(desc):
+                with self.assertRaises(ParseError) as ctx:
+                    parse(source)
+                self.assertEqual(
+                    ctx.exception.kind,
+                    ParseErrorKind.BLOCK_INSIDE_INLINE_ONLY_CONTAINER,
+                )
+
+    def test_inline_error_inside_blockquote_body_propagates(self) -> None:
+        with self.assertRaises(ParseError) as ctx:
+            parse("____\n*unclosed\n____\n")
+        self.assertEqual(ctx.exception.kind, ParseErrorKind.BAD_INLINE_SPAN)
 
 
 # ---------------------------------------------------------------------------

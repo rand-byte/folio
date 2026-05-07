@@ -28,10 +28,13 @@ Principles & invariants
   to translate.
 * The :data:`ColumnWidthResolver` is read once per render (callers can
   call :meth:`render_into` again after a column-width change). Step 14
-  introduces the first block that actually consults it: tables, whose
+  introduced the first block that actually consults it: tables, whose
   cell ``Gtk.Label``s use ``max-width-chars`` derived from the live
   column width and the ``[cols="…"]`` proportions so the table fits
-  the article column without an internal scrollbar.
+  the article column without an internal scrollbar. Step 15 reuses the
+  same column-width-aware ``Gtk.Label`` strategy for admonition and
+  blockquote bodies — paragraphs are rendered as Pango-markup labels
+  that wrap at the column width, the same way table cells do.
 * Inline runs are emitted with a tag stack. A run of plain
   :class:`Text` records its start offset, inserts text, and applies
   every tag currently on the stack to the inserted range. This makes
@@ -59,6 +62,15 @@ Principles & invariants
   it never recurses through :meth:`_emit_inline`.
 """
 
+# The module's size reflects the breadth of block kinds the renderer
+# handles end-to-end: heading, paragraph, ordered/unordered lists,
+# code block, image, table, admonition, and blockquote — each with
+# its own widget-builder helper, plus the inline-tag application
+# code, the Pango-markup helper, and the cross-cutting column-width
+# arithmetic. Splitting solely to satisfy the line counter would
+# scatter helpers that share private constants and conventions.
+# pylint: disable=too-many-lines
+
 from __future__ import annotations
 
 from collections.abc import Callable
@@ -71,8 +83,10 @@ gi.require_version("Gdk", "4.0")
 from gi.repository import Gdk, GLib, Gtk  # noqa: E402
 
 from notes_app.asciidoc.ast import (
-    Bold,
+    Admonition,
     BlockNode,
+    Blockquote,
+    Bold,
     CodeBlock,
     Image,
     InlineNode,
@@ -135,6 +149,37 @@ _BLOCK_SEPARATOR: str = "\n\n"
 _TABLE_COLUMN_SPACING: int = 12
 _TABLE_ROW_SPACING: int = 4
 _TABLE_CELL_PADDING: int = 4
+
+# Spacing and padding inside a rendered admonition / blockquote.
+# Pixel values applied to the inner Gtk.Box that hosts the header
+# (admonition) or the body+attribution (blockquote). Kept as module
+# constants so visual tweaks are one edit; tests assert against these
+# specific values when introspecting widget layout.
+_ADMONITION_BODY_SPACING: int = 6
+_ADMONITION_BODY_PADDING: int = 8
+_BLOCKQUOTE_BODY_SPACING: int = 6
+_BLOCKQUOTE_BODY_PADDING: int = 8
+
+# CSS classes the admonition / blockquote widgets carry so an
+# application stylesheet can target them. The renderer adds these to
+# the produced widgets via ``Gtk.Widget.add_css_class``; the
+# stylesheet that styles them ships in :mod:`notes_app.ui.css.app_css`
+# from build step 12 onward. The names live here so they are imported
+# from one place by both the renderer and any future test that
+# verifies a particular class is set.
+_ADMONITION_FRAME_CSS_CLASS: str = "admonition"
+_ADMONITION_HEADER_CSS_CLASS: str = "admonition-header"
+_ADMONITION_BODY_CSS_CLASS: str = "admonition-body"
+_BLOCKQUOTE_FRAME_CSS_CLASS: str = "blockquote"
+_BLOCKQUOTE_BODY_CSS_CLASS: str = "blockquote-body"
+_BLOCKQUOTE_ATTRIBUTION_CSS_CLASS: str = "blockquote-attribution"
+
+# The bullet character that separates the attribution dash from the
+# author/source on a blockquote. An en-dash matches typographic
+# conventions for citations; using a Unicode literal keeps the source
+# readable and avoids HTML-escape gymnastics.
+_BLOCKQUOTE_ATTRIBUTION_PREFIX: str = "— "
+_BLOCKQUOTE_ATTRIBUTION_SEPARATOR: str = ", "
 
 
 class TextBufferRenderer:
@@ -281,11 +326,14 @@ class TextBufferRenderer:
             self._emit_image(buffer, block, attacher)
         elif isinstance(block, Table):
             self._emit_table(buffer, block, attacher)
+        elif isinstance(block, Admonition):
+            self._emit_admonition(buffer, block, attacher)
+        elif isinstance(block, Blockquote):
+            self._emit_blockquote(buffer, block, attacher)
         else:
             # Exhaustive over the current :data:`BlockNode` union. New
-            # block kinds (Admonition, Blockquote in step 15) must extend
-            # this dispatch — the ``else`` makes forgetting one a hard
-            # failure rather than silent omission.
+            # block kinds must extend this dispatch — the ``else`` makes
+            # forgetting one a hard failure rather than silent omission.
             raise TypeError(f"unknown block node: {type(block).__name__}")
 
     def _emit_section(
@@ -405,6 +453,64 @@ class TextBufferRenderer:
         """
         anchor = buffer.create_child_anchor(buffer.get_end_iter())
         widget = _build_table_widget(table, self._column_width_px())
+        attacher(anchor, widget)
+        buffer.insert(buffer.get_end_iter(), _BLOCK_SEPARATOR)
+
+    def _emit_admonition(
+        self,
+        buffer: Gtk.TextBuffer,
+        admonition: Admonition,
+        attacher: WidgetAttacher,
+    ) -> None:
+        """Insert an admonition widget at a child anchor.
+
+        The admonition is a :class:`Gtk.Frame` containing a
+        :class:`Gtk.Box` (vertical) of: a header label carrying the
+        admonition's kind name (e.g. ``NOTE``), then one wrapping
+        :class:`Gtk.Label` per body paragraph. Pango markup on each
+        body label preserves the inline formatting parsed by the
+        inline parser. The frame and its parts carry CSS classes
+        (:data:`_ADMONITION_FRAME_CSS_CLASS`,
+        :data:`_ADMONITION_HEADER_CSS_CLASS`,
+        :data:`_ADMONITION_BODY_CSS_CLASS`, plus a per-kind class
+        like ``admonition-note``) so the application stylesheet can
+        differentiate the five kinds visually without the renderer
+        embedding colours of its own.
+
+        Each body label uses ``max-width-chars`` derived from the
+        injected :data:`ColumnWidthResolver` (the same strategy as
+        table cells in step 14) so wrapping tracks the article
+        column. The renderer reads the column width once per
+        :meth:`render_into` call.
+        """
+        anchor = buffer.create_child_anchor(buffer.get_end_iter())
+        widget = _build_admonition_widget(admonition, self._column_width_px())
+        attacher(anchor, widget)
+        buffer.insert(buffer.get_end_iter(), _BLOCK_SEPARATOR)
+
+    def _emit_blockquote(
+        self,
+        buffer: Gtk.TextBuffer,
+        blockquote: Blockquote,
+        attacher: WidgetAttacher,
+    ) -> None:
+        """Insert a blockquote widget at a child anchor.
+
+        Layout mirrors :meth:`_emit_admonition`'s — a
+        :class:`Gtk.Frame` with a vertical :class:`Gtk.Box` of
+        wrapping :class:`Gtk.Label` paragraphs — plus an optional
+        attribution line (``— Author, Source`` form) when the
+        ``[quote, …]`` directive supplied attribution. The frame
+        carries the :data:`_BLOCKQUOTE_FRAME_CSS_CLASS` class so the
+        application stylesheet can render the design's
+        accent-bordered quote frame.
+
+        Body labels use ``max-width-chars`` derived from the column
+        width resolver, the same way admonition bodies and table
+        cells do.
+        """
+        anchor = buffer.create_child_anchor(buffer.get_end_iter())
+        widget = _build_blockquote_widget(blockquote, self._column_width_px())
         attacher(anchor, widget)
         buffer.insert(buffer.get_end_iter(), _BLOCK_SEPARATOR)
 
@@ -805,6 +911,186 @@ def _inline_to_pango_markup(node: InlineNode) -> str:
         return f'<a href="{href}">{inner}</a>'
     # Closed union; new inline kinds must extend this dispatch.
     raise TypeError(f"unknown inline node: {type(node).__name__}")
+
+
+def _build_admonition_widget(
+    admonition: Admonition,
+    column_width_px: int,
+) -> Gtk.Widget:
+    """Build the read-only admonition widget displayed in the buffer.
+
+    Layout: ``Gtk.Frame`` → ``Gtk.Box`` (vertical) of a header
+    :class:`Gtk.Label` (the kind name in upper case) followed by one
+    wrapping :class:`Gtk.Label` per body paragraph. Each body label
+    renders its inline content via Pango markup (same strategy as
+    table cells, sharing :func:`_inlines_to_pango_markup`) and uses
+    ``max-width-chars`` derived from ``column_width_px`` to wrap at
+    the article-column width. CSS classes are added to the frame
+    and its parts so the application stylesheet differentiates the
+    five admonition kinds.
+
+    An empty body (zero paragraphs) is permitted by the parser and
+    is rendered as just the header — the frame still appears so the
+    user sees that an admonition was opened.
+    """
+    box = Gtk.Box.new(Gtk.Orientation.VERTICAL, _ADMONITION_BODY_SPACING)
+    box.set_margin_start(_ADMONITION_BODY_PADDING)
+    box.set_margin_end(_ADMONITION_BODY_PADDING)
+    box.set_margin_top(_ADMONITION_BODY_PADDING)
+    box.set_margin_bottom(_ADMONITION_BODY_PADDING)
+
+    header = Gtk.Label.new(admonition.kind.value)
+    header.set_xalign(0.0)
+    header.add_css_class(_ADMONITION_HEADER_CSS_CLASS)
+    box.append(header)
+
+    max_width_chars = max(1, TARGET_CHARS_PER_LINE)
+    if column_width_px > 0:
+        # Mirror the table-cell math: average glyph width is
+        # ``column_width_px / TARGET_CHARS_PER_LINE``; the body label
+        # gets the full column. The two factors cancel — the result
+        # is just TARGET_CHARS_PER_LINE — but we thread column_width_px
+        # through anyway so a future Pango-measured implementation
+        # plugs in here without changing the call site.
+        max_width_chars = max(
+            1,
+            round(column_width_px / (column_width_px / TARGET_CHARS_PER_LINE)),
+        )
+
+    for paragraph in admonition.blocks:
+        body_label = _build_paragraph_label(
+            paragraph,
+            css_class=_ADMONITION_BODY_CSS_CLASS,
+            max_width_chars=max_width_chars,
+        )
+        box.append(body_label)
+
+    frame = Gtk.Frame.new()
+    frame.set_hexpand(True)
+    frame.add_css_class(_ADMONITION_FRAME_CSS_CLASS)
+    # Add a per-kind class (admonition-note, admonition-tip, …) so the
+    # stylesheet can colour each kind distinctly without the renderer
+    # embedding colour values. The :class:`AdmonitionKind`'s value is
+    # the canonical upper-case label; lower-casing it produces the
+    # CSS class suffix.
+    frame.add_css_class(
+        f"{_ADMONITION_FRAME_CSS_CLASS}-{admonition.kind.value.lower()}"
+    )
+    frame.set_child(box)
+    return frame
+
+
+def _build_blockquote_widget(
+    blockquote: Blockquote,
+    column_width_px: int,
+) -> Gtk.Widget:
+    """Build the read-only blockquote widget displayed in the buffer.
+
+    Layout mirrors :func:`_build_admonition_widget` but without the
+    header label and with an optional trailing attribution row when
+    the ``[quote, Author, Source]`` directive supplied attribution.
+    The frame and its parts carry CSS classes
+    (:data:`_BLOCKQUOTE_FRAME_CSS_CLASS`,
+    :data:`_BLOCKQUOTE_BODY_CSS_CLASS`,
+    :data:`_BLOCKQUOTE_ATTRIBUTION_CSS_CLASS`) so the application
+    stylesheet can render the design's left-border accent.
+
+    The attribution string is built by :func:`_build_attribution_text`:
+    ``"— Author"`` when only the author is set, ``"— Author, Source"``
+    when both are. The leading en-dash matches typographic conventions
+    for citations.
+    """
+    box = Gtk.Box.new(Gtk.Orientation.VERTICAL, _BLOCKQUOTE_BODY_SPACING)
+    box.set_margin_start(_BLOCKQUOTE_BODY_PADDING)
+    box.set_margin_end(_BLOCKQUOTE_BODY_PADDING)
+    box.set_margin_top(_BLOCKQUOTE_BODY_PADDING)
+    box.set_margin_bottom(_BLOCKQUOTE_BODY_PADDING)
+
+    max_width_chars = max(1, TARGET_CHARS_PER_LINE)
+    if column_width_px > 0:
+        max_width_chars = max(
+            1,
+            round(column_width_px / (column_width_px / TARGET_CHARS_PER_LINE)),
+        )
+
+    for paragraph in blockquote.blocks:
+        body_label = _build_paragraph_label(
+            paragraph,
+            css_class=_BLOCKQUOTE_BODY_CSS_CLASS,
+            max_width_chars=max_width_chars,
+        )
+        box.append(body_label)
+
+    attribution_text = _build_attribution_text(
+        blockquote.author,
+        blockquote.source,
+    )
+    if attribution_text is not None:
+        attribution_label = Gtk.Label.new(attribution_text)
+        attribution_label.set_wrap(True)
+        attribution_label.set_max_width_chars(max_width_chars)
+        attribution_label.set_xalign(0.0)
+        attribution_label.add_css_class(_BLOCKQUOTE_ATTRIBUTION_CSS_CLASS)
+        box.append(attribution_label)
+
+    frame = Gtk.Frame.new()
+    frame.set_hexpand(True)
+    frame.add_css_class(_BLOCKQUOTE_FRAME_CSS_CLASS)
+    frame.set_child(box)
+    return frame
+
+
+def _build_paragraph_label(
+    paragraph: Paragraph,
+    *,
+    css_class: str,
+    max_width_chars: int,
+) -> Gtk.Label:
+    """Build a single wrapping :class:`Gtk.Label` for a body paragraph.
+
+    Shared by admonition and blockquote body rendering. Renders the
+    paragraph's inline content via Pango markup so bold, italic,
+    monospace, and link spans inside the body are preserved. The
+    label is left-aligned, top-aligned, and configured to wrap at
+    ``max_width_chars`` characters so it tracks the article column.
+    """
+    markup = _inlines_to_pango_markup(paragraph.inlines)
+    label = Gtk.Label.new(None)
+    label.set_markup(markup)
+    label.set_wrap(True)
+    label.set_max_width_chars(max_width_chars)
+    label.set_xalign(0.0)
+    label.set_yalign(0.0)
+    label.set_hexpand(True)
+    label.add_css_class(css_class)
+    return label
+
+
+def _build_attribution_text(
+    author: str | None,
+    source: str | None,
+) -> str | None:
+    """Build the attribution line shown below a blockquote body.
+
+    Returns :data:`None` when both fields are :data:`None` (a bare
+    ``[quote]`` or no directive at all — no attribution shown).
+    Returns ``"— Author"`` when only the author is set, or
+    ``"— Author, Source"`` when both are. The leading en-dash and
+    comma separator are module-level constants
+    (:data:`_BLOCKQUOTE_ATTRIBUTION_PREFIX`,
+    :data:`_BLOCKQUOTE_ATTRIBUTION_SEPARATOR`).
+    """
+    if author is None and source is None:
+        return None
+    parts: list[str] = []
+    if author is not None:
+        parts.append(author)
+    if source is not None:
+        parts.append(source)
+    return (
+        _BLOCKQUOTE_ATTRIBUTION_PREFIX
+        + _BLOCKQUOTE_ATTRIBUTION_SEPARATOR.join(parts)
+    )
 
 
 def _build_image_placeholder(filename: str) -> Gtk.Widget:
