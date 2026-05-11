@@ -15,13 +15,14 @@ from gi.repository import Gdk, Gtk  # noqa: E402
 
 from notes_app.config.defaults import TARGET_CHARS_PER_LINE
 from notes_app.controllers.app_state import AppState
-from notes_app.enums import MimeKind
+from notes_app.enums import MimeKind, ParseErrorKind
 from notes_app.models.attachment import Attachment
 from notes_app.models.note import Note
 from notes_app.ui.note_view import (
     ArticleContainer,
     NoteView,
     _FALLBACK_CHAR_WIDTH_PX,
+    _message_for,
     _placeholder_image_bytes,
 )
 
@@ -430,20 +431,31 @@ class NoteViewSmokeTests(unittest.TestCase):
 def _find_text_view_buffer(view: NoteView) -> Gtk.TextBuffer:
     """Walk the widget tree and pull out the inner TextView's buffer.
 
-    The structure is ``NoteView → ScrolledWindow → [Viewport →]
-    ArticleContainer → TextView``. ``Gtk.ScrolledWindow`` wraps any
-    non-:class:`Gtk.Scrollable` child in a :class:`Gtk.Viewport`
-    automatically; since :class:`ArticleContainer` is a ``Gtk.Box``
-    (not natively scrollable), the viewport is always present in
-    production and the helper steps past it.
+    The structure is ``NoteView → [Revealer →] ScrolledWindow →
+    [Viewport →] ArticleContainer → TextView``. From step 16 onwards
+    the parse-error banner sits in a :class:`Gtk.Revealer` *prepended*
+    to the vertical box, so the helper now walks past it. The
+    ``ScrolledWindow`` is the box's *next* sibling.
+    ``Gtk.ScrolledWindow`` wraps any non-:class:`Gtk.Scrollable`
+    child in a :class:`Gtk.Viewport` automatically; since
+    :class:`ArticleContainer` is a ``Gtk.Box`` (not natively
+    scrollable), the viewport is always present in production and
+    the helper steps past it.
 
-    We walk ``get_first_child`` / ``get_child`` rather than reaching
-    into private attributes of :class:`NoteView`, so the test stays
-    agnostic to its internal field names.
+    We walk ``get_first_child`` / ``get_next_sibling`` / ``get_child``
+    rather than reaching into private attributes of :class:`NoteView`,
+    so the test stays agnostic to its internal field names.
     """
-    scrolled = view.get_first_child()
+    first = view.get_first_child()
+    # The banner revealer (step 16+) is the very first child. Hop
+    # past it; the ScrolledWindow follows.
+    if isinstance(first, Gtk.Revealer):
+        scrolled = first.get_next_sibling()
+    else:
+        scrolled = first
     assert isinstance(scrolled, Gtk.ScrolledWindow), (
-        f"first child should be a ScrolledWindow, got {type(scrolled).__name__}"
+        f"expected a ScrolledWindow in the NoteView stack, "
+        f"got {type(scrolled).__name__}"
     )
     inner = scrolled.get_child()
     if isinstance(inner, Gtk.Viewport):
@@ -625,6 +637,212 @@ class NoteViewAttachmentSmokeTests(unittest.TestCase):
         state = AppState()
         view = NoteView(note_repository=repo, app_state=state)
         self.assertEqual(view.image_bytes_resolver("any.png"), b"")
+
+
+# ---------------------------------------------------------------------------
+# _message_for: exhaustiveness and content
+# ---------------------------------------------------------------------------
+
+
+class MessageForTests(unittest.TestCase):
+    """Pin the user-facing message helper used by the parse-error
+    banner. Exhaustiveness over :class:`ParseErrorKind` is enforced
+    so a new error kind cannot ship without a banner message.
+    """
+
+    def test_every_parse_error_kind_has_a_message(self) -> None:
+        # Iterating the enum is what makes this an exhaustiveness
+        # check — a member with no entry in ``_message_for`` would
+        # raise on the ``match`` (pattern-match exhaustiveness via
+        # the missing case at runtime is by design here, since
+        # Python doesn't enforce exhaustiveness at type-check time
+        # for non-Literal enums without external tooling).
+        for kind in ParseErrorKind:
+            with self.subTest(kind=kind):
+                message = _message_for(kind, 42)
+                self.assertIsInstance(message, str)
+                self.assertTrue(message)
+                # The line number must appear in the message — the
+                # banner is the only context the user has, so the
+                # location has to be visible.
+                self.assertIn("42", message)
+
+    def test_unsupported_link_scheme_message_lists_supported_schemes(self) -> None:
+        # The Sourdough note's specific failure is on this kind, so
+        # pin its content explicitly.
+        message = _message_for(ParseErrorKind.UNSUPPORTED_LINK_SCHEME, 39)
+        self.assertIn("39", message)
+        for scheme in ("http", "https", "mailto"):
+            self.assertIn(scheme, message)
+
+    def test_message_does_not_leak_internal_message(self) -> None:
+        # Smoke check: the developer-oriented strings (square
+        # brackets around `cols=` or specific quotes) don't leak
+        # into the user-facing copy. The banner is consumer copy,
+        # not a developer dump.
+        message = _message_for(ParseErrorKind.BAD_COLS_DIRECTIVE, 7)
+        self.assertNotIn("'", message)
+
+
+# ---------------------------------------------------------------------------
+# Parse-error banner integration with refresh
+# ---------------------------------------------------------------------------
+
+
+@unittest.skipUnless(_display_available(), "no GDK display")
+class NoteViewErrorBannerTests(unittest.TestCase):
+    """The parse-error banner is hidden by default, revealed on
+    parse failure with a kind-specific message, and re-hidden when
+    the user navigates to a parseable note."""
+
+    def test_banner_hidden_initially_with_no_selection(self) -> None:
+        # No note selected at construction → the banner must be
+        # hidden, the buffer empty.
+        repo = _FakeNoteRepository()
+        app_state = AppState()
+        view = NoteView(note_repository=repo, app_state=app_state)
+        self.assertFalse(view.error_banner_visible)
+        self.assertEqual(view.error_banner_text, "")
+
+    def test_banner_hidden_on_successful_render(self) -> None:
+        repo = _FakeNoteRepository()
+        repo.notes["note-A"] = _make_note("note-A")  # parses cleanly
+        app_state = AppState()
+        view = NoteView(note_repository=repo, app_state=app_state)
+        app_state.set_selected_note_id("note-A")
+        self.assertFalse(view.error_banner_visible)
+        self.assertEqual(view.error_banner_text, "")
+
+    def test_banner_revealed_on_parse_error(self) -> None:
+        # A note whose source raises ParseError makes the banner
+        # appear with a kind-specific message AND clears the buffer.
+        repo = _FakeNoteRepository()
+        # `:bad name:` lexes as a LineToken; the parser raises
+        # BAD_ATTRIBUTE_ENTRY against it.
+        repo.notes["note-A"] = _make_note(
+            "note-A",
+            source=":bad name: value\n",
+        )
+        app_state = AppState()
+        view = NoteView(note_repository=repo, app_state=app_state)
+        app_state.set_selected_note_id("note-A")
+
+        self.assertTrue(view.error_banner_visible)
+        self.assertIn("Line 1", view.error_banner_text)
+        # Buffer must be empty so no stale content sits below the
+        # banner.
+        buffer = _find_text_view_buffer(view)
+        self.assertEqual(
+            buffer.get_text(
+                buffer.get_start_iter(),
+                buffer.get_end_iter(),
+                False,
+            ),
+            "",
+        )
+
+    def test_banner_message_reflects_specific_error_kind(self) -> None:
+        # Different parse-error kinds produce different messages.
+        repo = _FakeNoteRepository()
+        # Unsupported link scheme — what the Sourdough fixture
+        # actually trips on, after the parser fixes have landed.
+        repo.notes["note-A"] = _make_note(
+            "note-A",
+            source="link:ftp://example.com[click]\n",
+        )
+        app_state = AppState()
+        view = NoteView(note_repository=repo, app_state=app_state)
+        app_state.set_selected_note_id("note-A")
+
+        self.assertTrue(view.error_banner_visible)
+        text = view.error_banner_text
+        # The message says it's a link-scheme problem and lists the
+        # supported schemes.
+        self.assertIn("scheme", text)
+        for scheme in ("http", "https", "mailto"):
+            self.assertIn(scheme, text)
+
+    def test_banner_recovers_when_selecting_clean_note(self) -> None:
+        # After a parse-error display, navigating to a parseable
+        # note re-hides the banner — banner state and buffer state
+        # stay in lockstep with the current selection.
+        repo = _FakeNoteRepository()
+        repo.notes["bad"] = _make_note(
+            "bad", source="link:javascript:alert(1)[x]\n",
+        )
+        repo.notes["good"] = _make_note("good")
+        app_state = AppState()
+        view = NoteView(note_repository=repo, app_state=app_state)
+
+        app_state.set_selected_note_id("bad")
+        self.assertTrue(view.error_banner_visible)
+
+        app_state.set_selected_note_id("good")
+        self.assertFalse(view.error_banner_visible)
+        self.assertEqual(view.error_banner_text, "")
+
+    def test_banner_hidden_when_selection_clears_after_error(self) -> None:
+        # After a parse error, clearing the selection (None) must
+        # also hide the banner — the user is no longer looking at a
+        # note at all.
+        repo = _FakeNoteRepository()
+        repo.notes["bad"] = _make_note(
+            "bad", source="*unclosed bold\n",
+        )
+        app_state = AppState()
+        view = NoteView(note_repository=repo, app_state=app_state)
+        app_state.set_selected_note_id("bad")
+        self.assertTrue(view.error_banner_visible)
+
+        app_state.set_selected_note_id(None)
+        self.assertFalse(view.error_banner_visible)
+
+    def test_banner_hidden_when_selection_points_to_missing_note(self) -> None:
+        # A stale id (note deleted in another window) clears the
+        # banner just like a None selection — the user gets neither
+        # stale content nor a stale error.
+        repo = _FakeNoteRepository()
+        repo.notes["bad"] = _make_note(
+            "bad", source="*unclosed\n",
+        )
+        app_state = AppState()
+        view = NoteView(note_repository=repo, app_state=app_state)
+        app_state.set_selected_note_id("bad")
+        self.assertTrue(view.error_banner_visible)
+
+        app_state.set_selected_note_id("does-not-exist")
+        self.assertFalse(view.error_banner_visible)
+
+    def test_navigating_to_bad_note_does_not_show_stale_content(self) -> None:
+        # The plan's specific concern: the user clicks a note that
+        # doesn't parse and sees the *previous* note's render.
+        # After the fix, the buffer is empty.
+        repo = _FakeNoteRepository()
+        repo.notes["good"] = _make_note(
+            "good", source="= Welcome\n\nIts contents.\n",
+        )
+        repo.notes["bad"] = _make_note(
+            "bad", source="link:bogus://x[t]\n",
+        )
+        app_state = AppState()
+        view = NoteView(note_repository=repo, app_state=app_state)
+
+        app_state.set_selected_note_id("good")
+        buffer = _find_text_view_buffer(view)
+        good_text = buffer.get_text(
+            buffer.get_start_iter(), buffer.get_end_iter(), False,
+        )
+        self.assertIn("Welcome", good_text)
+
+        app_state.set_selected_note_id("bad")
+        bad_text = buffer.get_text(
+            buffer.get_start_iter(), buffer.get_end_iter(), False,
+        )
+        # Buffer has been cleared — no leftover from "good".
+        self.assertEqual(bad_text, "")
+        self.assertNotIn("Welcome", bad_text)
+        # And the banner explains what happened.
+        self.assertTrue(view.error_banner_visible)
 
 
 if __name__ == "__main__":

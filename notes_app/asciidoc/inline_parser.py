@@ -36,6 +36,12 @@ Principles & invariants
     :class:`ParseErrorKind.UNSUPPORTED_LINK_SCHEME`. The macro must
     have a non-empty display text and a closing ``]`` on the same
     line, otherwise :class:`ParseErrorKind.BAD_LINK_MACRO` fires.
+    The URL may be wrapped in a ``++…++`` passthrough — inside the
+    passthrough every character is literal, including inline
+    markers that would otherwise terminate a bare URL. After the
+    closing ``++`` the URL is validated against :class:`LinkScheme`
+    exactly as in the unwrapped form. An unmatched closing ``++``
+    raises :class:`ParseErrorKind.UNTERMINATED_PASSTHROUGH`.
 
 * Marker matching is **non-greedy** and **recursive** for the spans
   whose body is re-parsed (``*``, ``_``, ``[.line-through]#…#``,
@@ -88,6 +94,16 @@ _MONOSPACE_MARKER: str = "`"
 _LINK_MACRO_PREFIX: str = "link:"
 _DISPLAY_TEXT_OPEN: str = "["
 _DISPLAY_TEXT_CLOSE: str = "]"
+
+# Inline passthrough delimiter. Inside a ``link:`` macro, ``link:++…++[t]``
+# wraps a URL whose body contains characters that would otherwise trip
+# the inline scanner (``*``, ``_``, ``#``, ``[``, …) or whose scheme
+# is not a member of :class:`LinkScheme`. Inside the passthrough, every
+# character is literal — the scanner does not interpret inline markers
+# and does not require the URL to begin with a recognised scheme. After
+# the closing ``++`` the URL is unwrapped and validated against
+# :class:`LinkScheme` like any other ``link:`` URL.
+_PASSTHROUGH_MARKER: str = "++"
 
 # Bare URL is recognised only when the source has one of these literal
 # prefixes at a word boundary. They map onto :class:`LinkScheme` members
@@ -514,21 +530,40 @@ class _Scanner:
         On entry ``self.pos`` points at the ``l`` of ``link:``. On
         return it points one past the closing ``]`` of the display
         text.
+
+        Two URL shapes are accepted:
+
+        * ``link:URL[text]`` — the URL begins with a recognised
+          scheme (``http``, ``https``, ``mailto``) and runs until
+          a URL terminator or the active enclosing close marker.
+        * ``link:++URL++[text]`` — the URL is wrapped in ``++``
+          passthrough markers. Inside the passthrough every
+          character is literal, including the inline markers
+          (``*``, ``_``, ``#``, backtick) that would otherwise
+          terminate a bare URL. After the closing ``++`` the URL
+          is validated against :class:`LinkScheme` exactly as in
+          the unwrapped form. An unmatched closing ``++`` raises
+          :class:`ParseErrorKind.UNTERMINATED_PASSTHROUGH`.
         """
         self.pos += len(_LINK_MACRO_PREFIX)
-        url_start = self.pos
-        scheme = self._consume_link_macro_scheme(url_start)
-        # Scheme has been consumed; continue scanning the rest of the
-        # URL until the ``[`` that opens the display text — also
-        # bounded by the active enclosing close marker, when set.
-        while self.pos < len(self.text):
-            char = self.text[self.pos]
-            if char in _URL_TERMINATORS:
-                break
-            if active_close is not None and char == active_close:
-                break
-            self.pos += 1
-        url = self.text[url_start:self.pos]
+        if self._matches_at_pos(_PASSTHROUGH_MARKER):
+            url = self._consume_link_macro_passthrough_url()
+            scheme = self._validate_link_scheme(url)
+        else:
+            url_start = self.pos
+            scheme = self._consume_link_macro_scheme(url_start)
+            # Scheme has been consumed; continue scanning the rest of
+            # the URL until the ``[`` that opens the display text —
+            # also bounded by the active enclosing close marker, when
+            # set.
+            while self.pos < len(self.text):
+                char = self.text[self.pos]
+                if char in _URL_TERMINATORS:
+                    break
+                if active_close is not None and char == active_close:
+                    break
+                self.pos += 1
+            url = self.text[url_start:self.pos]
         if (
             self.pos >= len(self.text)
             or self.text[self.pos] != _DISPLAY_TEXT_OPEN
@@ -549,6 +584,76 @@ class _Scanner:
             text=display,
             source_line=self.line,
         )
+
+    def _consume_link_macro_passthrough_url(self) -> str:
+        """Consume a ``++URL++`` passthrough body and return the URL.
+
+        On entry ``self.pos`` points at the first ``+`` of the
+        opening ``++`` marker. On return it points one past the
+        closing ``++``. Raises
+        :class:`ParseErrorKind.UNTERMINATED_PASSTHROUGH` if the line
+        ends before a closing ``++`` is found.
+        """
+        # Skip the opening ``++``.
+        self.pos += len(_PASSTHROUGH_MARKER)
+        body_start = self.pos
+        # Scan for the closing ``++`` on the same line. The body is
+        # taken verbatim; no character inside the passthrough has
+        # syntactic meaning (this is what makes the construct safe
+        # for URLs containing ``*`` / ``_`` / ``#`` / ``[``).
+        while self.pos < len(self.text):
+            if self._matches_at_pos(_PASSTHROUGH_MARKER):
+                body = self.text[body_start:self.pos]
+                self.pos += len(_PASSTHROUGH_MARKER)
+                return body
+            self.pos += 1
+        raise ParseError(
+            line=self.line,
+            column=0,
+            message=(
+                "unterminated passthrough span: expected closing '++' "
+                "before end of line"
+            ),
+            kind=ParseErrorKind.UNTERMINATED_PASSTHROUGH,
+        )
+
+    def _validate_link_scheme(self, url: str) -> LinkScheme:
+        """Validate that ``url`` starts with an allow-listed scheme.
+
+        Used for ``link:++URL++[text]`` after the passthrough body
+        has been unwrapped. Mirrors the validation in
+        :meth:`_consume_link_macro_scheme`, but takes a pre-extracted
+        URL rather than scanning ``self.text`` — the cursor has
+        already moved past the closing ``++``.
+
+        Raises :class:`ParseErrorKind.UNSUPPORTED_LINK_SCHEME` for a
+        scheme outside :class:`LinkScheme`, and
+        :class:`ParseErrorKind.BAD_LINK_MACRO` for a URL with no
+        recognisable scheme.
+        """
+        match = _GENERIC_SCHEME_RE.match(url)
+        if match is None:
+            raise ParseError(
+                line=self.line,
+                column=0,
+                message=(
+                    "link: macro is missing a URL with a recognised scheme"
+                ),
+                kind=ParseErrorKind.BAD_LINK_MACRO,
+            )
+        scheme_text = match.group(1).lower()
+        try:
+            return LinkScheme(scheme_text)
+        except ValueError as exc:
+            raise ParseError(
+                line=self.line,
+                column=0,
+                message=(
+                    f"unsupported link scheme: {scheme_text!r}; "
+                    f"only {', '.join(s.value for s in LinkScheme)} are allowed"
+                ),
+                kind=ParseErrorKind.UNSUPPORTED_LINK_SCHEME,
+            ) from exc
 
     def _consume_link_macro_scheme(self, url_start: int) -> LinkScheme:
         """Match a generic scheme after ``link:`` and validate it.

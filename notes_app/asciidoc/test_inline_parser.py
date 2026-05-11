@@ -869,5 +869,105 @@ class MixedConstructTests(unittest.TestCase):
         )
 
 
+class LinkMacroPassthroughTests(unittest.TestCase):
+    """``link:++URL++[text]`` — passthrough URL containing inline
+    markers that would otherwise be interpreted by the scanner.
+
+    The construct exists so a user can paste a URL containing ``*``,
+    ``_``, ``#``, or ``[`` without escape gymnastics. Inside the
+    passthrough every character is literal; after the closing
+    ``++`` the URL is validated against :class:`LinkScheme` exactly
+    as in the unwrapped form.
+    """
+
+    def test_passthrough_around_https_url(self) -> None:
+        result = parse_inline(
+            "link:++https://example.com++[text]", _LINE
+        )
+        self.assertEqual(
+            result,
+            (
+                _link(
+                    "https://example.com",
+                    LinkScheme.HTTPS,
+                    _t("text"),
+                ),
+            ),
+        )
+
+    def test_passthrough_preserves_inline_markers_in_url(self) -> None:
+        # The whole point of the passthrough: a ``*`` inside the URL
+        # is literal, not a bold opener.
+        result = parse_inline(
+            "link:++https://example.com/a*b++[text]", _LINE
+        )
+        link = result[0]
+        assert isinstance(link, Link)
+        self.assertEqual(link.url, "https://example.com/a*b")
+
+    def test_passthrough_preserves_brackets_in_url(self) -> None:
+        # ``[`` inside the URL is literal — without the passthrough,
+        # it would be the display-text opener.
+        result = parse_inline(
+            "link:++https://example.com/a[b]c++[text]", _LINE
+        )
+        link = result[0]
+        assert isinstance(link, Link)
+        self.assertEqual(link.url, "https://example.com/a[b]c")
+
+    def test_passthrough_unterminated_raises(self) -> None:
+        with self.assertRaises(ParseError) as ctx:
+            parse_inline("link:++https://x[text]", _LINE)
+        self.assertEqual(
+            ctx.exception.kind,
+            ParseErrorKind.UNTERMINATED_PASSTHROUGH,
+        )
+
+    def test_passthrough_with_unsupported_scheme_raises(self) -> None:
+        # The passthrough wraps the URL syntactically, but the scheme
+        # validation still applies after the closing ``++``. The
+        # Sourdough fixture's ``link:++recipe://…++[…]`` lands here.
+        with self.assertRaises(ParseError) as ctx:
+            parse_inline(
+                "link:++recipe://x++[t]", _LINE
+            )
+        self.assertEqual(
+            ctx.exception.kind,
+            ParseErrorKind.UNSUPPORTED_LINK_SCHEME,
+        )
+
+    def test_passthrough_with_no_scheme_raises_bad_link_macro(self) -> None:
+        # ``link:++++[t]`` — empty passthrough body. The unwrapped
+        # URL has no scheme at all → BAD_LINK_MACRO.
+        with self.assertRaises(ParseError) as ctx:
+            parse_inline("link:++++[t]", _LINE)
+        self.assertEqual(
+            ctx.exception.kind,
+            ParseErrorKind.BAD_LINK_MACRO,
+        )
+
+    def test_passthrough_followed_by_missing_brackets_raises(self) -> None:
+        # ``link:++https://x++`` — passthrough closed but no
+        # ``[display]`` afterwards.
+        with self.assertRaises(ParseError) as ctx:
+            parse_inline("link:++https://x++", _LINE)
+        self.assertEqual(
+            ctx.exception.kind,
+            ParseErrorKind.BAD_LINK_MACRO,
+        )
+
+    def test_passthrough_with_display_inline_formatting(self) -> None:
+        # The display text after a passthrough URL still parses for
+        # inline formatting, just like the non-passthrough form.
+        result = parse_inline(
+            "link:++https://x++[*bold* link]", _LINE
+        )
+        link = result[0]
+        assert isinstance(link, Link)
+        # The display contains a Bold node and a Text node.
+        kinds = [type(n).__name__ for n in link.text]
+        self.assertIn("Bold", kinds)
+
+
 if __name__ == "__main__":
     unittest.main()

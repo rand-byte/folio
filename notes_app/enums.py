@@ -123,6 +123,7 @@ class TokenKind(StrEnum):
     SINGLE_ADMONITION = auto()
     QUOTE_DIRECTIVE = auto()
     QUOTE_FENCE = auto()
+    ATTRIBUTE_ENTRY = auto()
     BLANK = auto()
     LINE = auto()
 
@@ -151,6 +152,8 @@ class ParseErrorKind(StrEnum):
     UNSUPPORTED_LINK_SCHEME = auto()
     BAD_LINK_MACRO = auto()
     UNTERMINATED_MONOSPACE = auto()
+    UNTERMINATED_PASSTHROUGH = auto()
+    BAD_ATTRIBUTE_ENTRY = auto()
     BLOCK_INSIDE_INLINE_ONLY_CONTAINER = auto()
 
 

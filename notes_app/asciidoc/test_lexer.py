@@ -13,6 +13,7 @@ import unittest
 from notes_app.asciidoc.lexer import (
     AdmonitionDirectiveToken,
     AdmonitionFenceToken,
+    AttributeEntryToken,
     BlankToken,
     CodeDirectiveToken,
     CodeFenceToken,
@@ -333,6 +334,137 @@ class ColsDirectiveTokenizationTests(unittest.TestCase):
         self.assertEqual(len(tokens), 1)
         self.assertIsInstance(tokens[0], LineToken)
 
+    def test_cols_with_sibling_options_field_recognised(self) -> None:
+        # ``[cols="3,1", options="header"]`` — the cols directive
+        # alongside another attribute. Real-world AsciiDoc routinely
+        # combines these; the lexer extracts the cols value and
+        # discards the sibling.
+        tokens = tokenize('[cols="3,1", options="header"]')
+        self.assertEqual(len(tokens), 1)
+        token = tokens[0]
+        self.assertIsInstance(token, ColsDirectiveToken)
+        assert isinstance(token, ColsDirectiveToken)
+        self.assertEqual(token.raw, "3,1")
+
+    def test_cols_with_multiple_sibling_fields_recognised(self) -> None:
+        # ``[cols="…", options="…", frame=topbot]`` — three fields,
+        # quoted and unquoted, in any order. All siblings are
+        # discarded by the lexer; only the cols value survives.
+        tokens = tokenize(
+            '[cols="1,2,3", options="header", frame=topbot]'
+        )
+        self.assertEqual(len(tokens), 1)
+        token = tokens[0]
+        self.assertIsInstance(token, ColsDirectiveToken)
+        assert isinstance(token, ColsDirectiveToken)
+        self.assertEqual(token.raw, "1,2,3")
+
+    def test_attribute_list_without_cols_falls_through(self) -> None:
+        # ``[options="header"]`` — a valid attribute list but with no
+        # cols field. The lexer is **not** a permissive
+        # attribute-list catch-all; without a cols field the line
+        # falls through to LineToken and the parser rejects it.
+        tokens = tokenize('[options="header"]')
+        self.assertEqual(len(tokens), 1)
+        self.assertIsInstance(tokens[0], LineToken)
+
+    def test_cols_field_after_other_fields_recognised(self) -> None:
+        # Cols may appear in any position within the attribute list.
+        tokens = tokenize('[options="header", cols="2,3"]')
+        self.assertEqual(len(tokens), 1)
+        token = tokens[0]
+        self.assertIsInstance(token, ColsDirectiveToken)
+        assert isinstance(token, ColsDirectiveToken)
+        self.assertEqual(token.raw, "2,3")
+
+    def test_malformed_attribute_list_falls_through(self) -> None:
+        # Trailing comma, unbalanced quotes, etc. all fall through to
+        # a LineToken so the parser raises UNKNOWN_BLOCK against the
+        # bracketed shape — strict mode is preserved.
+        bad_inputs = (
+            '[cols="1,2",]',  # trailing comma
+            '[cols="unterminated]',  # unterminated quote
+            '[cols=]',  # bare ``=``
+            '[=value]',  # missing name
+        )
+        for source in bad_inputs:
+            with self.subTest(source=source):
+                tokens = tokenize(source)
+                self.assertEqual(len(tokens), 1)
+                self.assertIsInstance(tokens[0], LineToken)
+
+
+# ---------------------------------------------------------------------------
+# Attribute entry tokenisation
+# ---------------------------------------------------------------------------
+
+
+class AttributeEntryTokenizationTests(unittest.TestCase):
+    """``:name: value`` and the bare ``:name:`` setter form lex distinctly.
+
+    The lexer recognises the shape so the parser can consume-and-discard
+    a contiguous header run without peeking at LineToken text. Whether
+    the entry is *positionally* valid (i.e. inside the document header)
+    is enforced by the parser, not the lexer.
+    """
+
+    def test_table(self) -> None:
+        cases: tuple[tuple[str, str, str, str | None], ...] = (
+            # (description, source, expected name, expected value)
+            ("name with value", ":author: Me", "author", "Me"),
+            (
+                "name with hyphenated value",
+                ":revdate: 2026-04-14",
+                "revdate",
+                "2026-04-14",
+            ),
+            (
+                "name with comma-separated value",
+                ":tags: favorite, reference",
+                "tags",
+                "favorite, reference",
+            ),
+            ("bare setter form", ":doctype:", "doctype", None),
+            (
+                "name with hyphens",
+                ":source-highlighter: rouge",
+                "source-highlighter",
+                "rouge",
+            ),
+            (
+                "name with underscores",
+                ":my_attr: value",
+                "my_attr",
+                "value",
+            ),
+            (
+                "trailing-space-only value collapses to bare setter form",
+                ":empty: ",
+                "empty",
+                None,
+            ),
+        )
+        for desc, source, expected_name, expected_value in cases:
+            with self.subTest(desc):
+                tokens = tokenize(source)
+                self.assertEqual(len(tokens), 1)
+                token = tokens[0]
+                self.assertIsInstance(token, AttributeEntryToken)
+                assert isinstance(token, AttributeEntryToken)
+                self.assertEqual(token.kind, TokenKind.ATTRIBUTE_ENTRY)
+                self.assertEqual(token.name, expected_name)
+                self.assertEqual(token.value, expected_value)
+
+    def test_malformed_falls_through_to_line_token(self) -> None:
+        # Empty name (``::``), name with space (``:bad name:``), and
+        # name with a leading digit (``:123:``) all fall through to
+        # LineToken — the parser then rejects them as UNKNOWN_BLOCK.
+        for source in ("::", ":: value", ":bad name:", ":123: value"):
+            with self.subTest(source=source):
+                tokens = tokenize(source)
+                self.assertEqual(len(tokens), 1)
+                self.assertIsInstance(tokens[0], LineToken)
+
 
 # ---------------------------------------------------------------------------
 # Admonition tokenisation (step 15)
@@ -645,7 +777,6 @@ class LineTokenizationTests(unittest.TestCase):
         cases: tuple[tuple[str, str, str], ...] = (
             ("plain prose", "Hello world", "Hello world"),
             ("inline-marked prose", "Some *bold* text", "Some *bold* text"),
-            ("attribute entry — parser rejects", ":author: me", ":author: me"),
             ("comment — parser rejects", "// a comment", "// a comment"),
             (
                 "trailing whitespace stripped",

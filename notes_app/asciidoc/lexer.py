@@ -30,7 +30,11 @@ Principles & invariants
   :class:`AdmonitionFenceToken` (``====``),
   :class:`SingleAdmonitionToken` (``NOTE: text``),
   :class:`QuoteDirectiveToken` (``[quote, Author, Source]``), and
-  :class:`QuoteFenceToken` (``____``).
+  :class:`QuoteFenceToken` (``____``). A later extension adds
+  :class:`AttributeEntryToken` (``:name: value``) — recognised at lex
+  time so the parser can consume-and-discard a contiguous run at the
+  document header without forcing the parser to peek at raw
+  :class:`LineToken` text.
 * The :data:`Token` union is closed: every concrete token class belongs
   to it. This lets the parser pattern-match exhaustively.
 * The four-equals admonition fence and four-underscore blockquote fence
@@ -38,6 +42,13 @@ Principles & invariants
   precedence, ``====`` would otherwise be lexed as a level-4 heading
   with empty body — a precedence bug that would make every block
   admonition look like a string of empty headings.
+* The ``[cols="…"]`` directive is matched against an AsciiDoc
+  block-attribute-list shape (``[k=v, k="v,v", k]``) rather than a
+  whole-line literal, so siblings like ``options="header"`` and
+  ``frame=topbot`` no longer derail the cols recognition. Only the
+  ``cols`` field's value is preserved on the produced
+  :class:`ColsDirectiveToken`; other fields are recognised and
+  discarded — the renderer ignores them anyway.
 """
 
 from __future__ import annotations
@@ -292,6 +303,39 @@ class QuoteFenceToken:
 
 
 @dataclass(frozen=True)
+class AttributeEntryToken:
+    """A document attribute entry: ``:name: value`` or ``:name:``.
+
+    Recognised at the lexer level so the parser can consume a
+    contiguous run of these at the start of the document (between an
+    optional level-1 title and the first body block) without peeking
+    at :class:`LineToken` text. The parsed entries are *discarded* by
+    the parser — there is no attribute consumer in the application
+    today; the AST has no field for them. Recognising them here is
+    purely about distinguishing "valid AsciiDoc the parser knows it
+    can ignore" from "unknown construct" so the parser's strict-mode
+    error story stays accurate.
+
+    ``name`` matches ``[A-Za-z][A-Za-z0-9_-]*`` (so ``::`` and
+    ``:bad name:`` fall through to :class:`LineToken` and are
+    rejected by the parser). ``value`` is :data:`None` for the bare
+    ``:name:`` setter form, otherwise the trimmed substring after the
+    closing colon and one space; trailing whitespace is stripped by
+    the line classifier. An :class:`AttributeEntryToken` reaching the
+    parser anywhere *other* than the document header is rejected as
+    :data:`ParseErrorKind.UNKNOWN_BLOCK` — the lexer's classification
+    is a necessary, not sufficient, condition for "valid attribute
+    entry".
+    """
+
+    kind: ClassVar[TokenKind] = TokenKind.ATTRIBUTE_ENTRY
+
+    line: int
+    name: str
+    value: str | None
+
+
+@dataclass(frozen=True)
 class BlankToken:
     """A blank or whitespace-only line.
 
@@ -339,6 +383,7 @@ type Token = (
     | SingleAdmonitionToken
     | QuoteDirectiveToken
     | QuoteFenceToken
+    | AttributeEntryToken
     | BlankToken
     | LineToken
 )
@@ -368,9 +413,6 @@ _CODE_DIRECTIVE_BARE: str = "[source]"
 _CODE_DIRECTIVE_WITH_LANG_PREFIX: str = "[source,"
 _CODE_DIRECTIVE_SUFFIX: str = "]"
 
-_COLS_DIRECTIVE_PREFIX: str = '[cols="'
-_COLS_DIRECTIVE_SUFFIX: str = '"]'
-
 _HEADING_MARKER_CHAR: str = "="
 
 # An ``[ALL_CAPS]`` directive on a line by itself — admonition opener
@@ -393,6 +435,30 @@ _SINGLE_ADMONITION_RE: re.Pattern[str] = re.compile(
 # the ``quote`` keyword is captured raw — the parser splits and
 # validates. The lexer only checks the structural shape.
 _QUOTE_DIRECTIVE_RE: re.Pattern[str] = re.compile(r"^\[quote(,.*)?\]$")
+
+# A document attribute entry: ``:name:`` (bare setter) or ``:name: value``.
+# ``name`` must start with a letter and contain only letters, digits,
+# underscores, or hyphens — matching standard AsciiDoc attribute names.
+# The ``value`` capture is whatever follows the closing colon and one
+# space; an entry with the colon-space but no value (``:name: ``) is
+# treated as an empty value, distinct from the bare-setter form
+# (``:name:``) which has ``value is None``.
+_ATTRIBUTE_ENTRY_RE: re.Pattern[str] = re.compile(
+    r"^:([A-Za-z][A-Za-z0-9_-]*):( (.*))?$"
+)
+
+# AsciiDoc block attribute list shape: ``[k=v, k="v", k]``. The
+# ``cols`` field is extracted from this when present. Other recognised
+# fields (``options``, ``frame``, ``stripes``, …) are not modelled —
+# they are tolerated inside the brackets so a real-world directive
+# like ``[cols="3,1", options="header"]`` no longer derails the
+# cols-directive recognition. A bracketed line that is *not* a valid
+# block attribute list (unbalanced quotes, malformed key=value
+# segment) falls through to :class:`LineToken` and is rejected by
+# :func:`_Parser._reject_unknown_block`.
+_ATTRIBUTE_LIST_PREFIX: str = "["
+_ATTRIBUTE_LIST_SUFFIX: str = "]"
+_COLS_FIELD_NAME: str = "cols"
 
 
 # ---------------------------------------------------------------------------
@@ -503,6 +569,15 @@ def _classify_line(raw_line: str, line_number: int) -> Token:
     if single_admonition is not None:
         return single_admonition
 
+    # Attribute entry — placed *after* the heading classifier (so a
+    # mistaken ``=`` line is still a heading) but *before* the
+    # generic LineToken fallback. The header-vs-mid-document
+    # distinction is the parser's job; the lexer only emits the
+    # token shape.
+    attribute_entry = _try_attribute_entry(line, line_number)
+    if attribute_entry is not None:
+        return attribute_entry
+
     if line.startswith(_IMAGE_MACRO_PREFIX):
         return ImageMacroToken(
             line=line_number,
@@ -557,30 +632,202 @@ def _try_code_directive(line: str, line_number: int) -> CodeDirectiveToken | Non
 
 
 def _try_cols_directive(line: str, line_number: int) -> ColsDirectiveToken | None:
-    """If ``line`` is ``[cols="N,N,..."]``, return the token.
+    """If ``line`` is a ``[…]`` attribute list containing ``cols="…"``, return it.
 
-    The lexer only checks the structural shape: a ``[cols="`` prefix, a
-    closing ``"]`` suffix, and a non-empty body in between. Whether the
-    body is well-formed (positive integers separated by commas) is the
-    parser's job — :class:`ParseErrorKind.BAD_COLS_DIRECTIVE` carries
-    that contract. Returning ``None`` here for a malformed-looking shape
-    falls through to a plain :class:`LineToken`, which the parser then
-    rejects as ``UNKNOWN_BLOCK`` (matching how the same path handles
-    ``[source,]`` and other near-miss directive shapes).
+    The lexer accepts the full AsciiDoc block-attribute-list shape
+    ``[k=v, k="v", k]`` so a real-world directive like
+    ``[cols="3,1", options="header"]`` is recognised in full instead
+    of derailing on the comma between the cols quotes and the
+    sibling field. Only the value of the ``cols`` field is preserved
+    on the produced token; other recognised fields (``options``,
+    ``frame``, ``stripes``, …) are tolerated and dropped — the
+    renderer ignores them anyway. A bracketed line that is not a
+    valid attribute list (unbalanced quotes, malformed segment) or
+    one that doesn't contain a ``cols`` field at all falls through
+    to :class:`LineToken`; the parser then rejects it as
+    :class:`ParseErrorKind.UNKNOWN_BLOCK`.
+
+    The whole-line shape ``[cols="…"]`` (no other fields) is the
+    common case and still produces the same token, byte-for-byte
+    identical to what step 14's narrow matcher emitted.
     """
     if not (
-        line.startswith(_COLS_DIRECTIVE_PREFIX)
-        and line.endswith(_COLS_DIRECTIVE_SUFFIX)
+        line.startswith(_ATTRIBUTE_LIST_PREFIX)
+        and line.endswith(_ATTRIBUTE_LIST_SUFFIX)
+        and len(line) >= 2
     ):
         return None
-    raw = line[
-        len(_COLS_DIRECTIVE_PREFIX): -len(_COLS_DIRECTIVE_SUFFIX)
-    ].strip()
-    if not raw:
-        # ``[cols=""]`` — no proportions at all. Fall through so the
-        # parser can raise UNKNOWN_BLOCK against the bracketed shape.
+    body = line[len(_ATTRIBUTE_LIST_PREFIX):-len(_ATTRIBUTE_LIST_SUFFIX)]
+    fields = _split_attribute_list_fields(body)
+    if fields is None:
         return None
-    return ColsDirectiveToken(line=line_number, raw=raw)
+    for name, value in fields:
+        if name != _COLS_FIELD_NAME:
+            continue
+        if value is None or not value:
+            # ``[cols=""]`` or ``[cols]`` — empty / missing value.
+            # Falls through to LineToken so the parser raises
+            # ``UNKNOWN_BLOCK`` against the bracketed shape, matching
+            # the existing contract in
+            # :class:`ColsDirectiveTokenizationTests.test_empty_body_falls_through_to_line_token`.
+            return None
+        return ColsDirectiveToken(line=line_number, raw=value)
+    return None
+
+
+def _split_attribute_list_fields(
+    body: str,
+) -> list[tuple[str, str | None]] | None:
+    # pylint: disable=too-many-return-statements,too-many-branches,too-many-statements
+    # The attribute-list grammar is a syntactic state machine with
+    # multiple early-exit paths (each malformed shape → ``None``) and
+    # three distinct value shapes (bare name, unquoted value, quoted
+    # value) each with their own post-value cleanup. Splitting into
+    # sub-functions would require passing ``pos`` and
+    # ``just_consumed_separator`` mutable state across them, which
+    # would be *less* readable than the linear walk. The complexity is
+    # essential to the problem.
+    """Split an AsciiDoc attribute-list body into ``(name, value)`` pairs.
+
+    Returns :data:`None` if ``body`` is not a syntactically valid
+    attribute list — the lexer's contract is permissive at the line
+    level, so a rejection here just falls the line through to a
+    :class:`LineToken` and lets the parser raise ``UNKNOWN_BLOCK``.
+
+    Field shapes accepted, separated by commas at the top level:
+    * ``name`` — bare key; ``value`` is :data:`None`.
+    * ``name=value`` — unquoted value; whitespace around either side
+      is stripped. The unquoted value cannot itself contain a comma.
+    * ``name="value"`` — quoted value; commas and spaces inside the
+      quotes are preserved verbatim. The closing quote must be the
+      last non-whitespace character of the field (or precede the
+      next ``,`` separator).
+
+    There is no escape mechanism for the quotes — a value containing
+    a literal ``"`` is not representable. That matches the documented
+    AsciiDoc subset (no escapes anywhere).
+
+    An empty body produces an empty list (``[]``), not :data:`None` —
+    the *caller* (``_try_cols_directive``) decides whether the empty
+    list is acceptable for its purposes.
+    """
+    fields: list[tuple[str, str | None]] = []
+    pos = 0
+    length = len(body)
+    just_consumed_separator = False
+    while pos < length:
+        # Skip leading whitespace before a field.
+        while pos < length and body[pos] in (" ", "\t"):
+            pos += 1
+        if pos >= length:
+            # Trailing whitespace after the last field — fine when
+            # we did NOT just consume a separator (``[a , ]`` is
+            # malformed; ``[a ]`` is fine).
+            if just_consumed_separator:
+                return None
+            break
+
+        # Extract the field name.
+        name_start = pos
+        while pos < length and body[pos] not in (",", "=", " ", "\t"):
+            pos += 1
+        name = body[name_start:pos]
+        if not name:
+            return None
+
+        # Skip any whitespace between name and ``=`` / ``,`` / EOF.
+        while pos < length and body[pos] in (" ", "\t"):
+            pos += 1
+
+        if pos >= length or body[pos] == ",":
+            # Bare-name field. Move past the optional comma.
+            fields.append((name, None))
+            if pos < length:
+                pos += 1
+                just_consumed_separator = True
+            else:
+                just_consumed_separator = False
+            continue
+
+        if body[pos] != "=":
+            return None
+        pos += 1
+
+        # Skip whitespace after ``=``.
+        while pos < length and body[pos] in (" ", "\t"):
+            pos += 1
+
+        if pos < length and body[pos] == '"':
+            # Quoted value: scan to the next ``"``.
+            pos += 1
+            value_start = pos
+            while pos < length and body[pos] != '"':
+                pos += 1
+            if pos >= length:
+                # Unterminated quote — malformed.
+                return None
+            value = body[value_start:pos]
+            pos += 1  # past the closing quote
+            # After a quoted value, the next thing must be EOF, or a
+            # comma (with optional whitespace before).
+            while pos < length and body[pos] in (" ", "\t"):
+                pos += 1
+            if pos < length and body[pos] != ",":
+                return None
+            fields.append((name, value))
+            if pos < length:
+                pos += 1
+                just_consumed_separator = True
+            else:
+                just_consumed_separator = False
+            continue
+
+        # Unquoted value: scan to the next ``,`` or EOF.
+        value_start = pos
+        while pos < length and body[pos] != ",":
+            pos += 1
+        value = body[value_start:pos].rstrip(" \t")
+        fields.append((name, value))
+        if pos < length:
+            pos += 1
+            just_consumed_separator = True
+        else:
+            just_consumed_separator = False
+
+    # Reached end of body. A trailing comma without a following
+    # field (``[a,]``) is malformed regardless of where the loop
+    # exited from.
+    if just_consumed_separator:
+        return None
+    return fields
+
+
+def _try_attribute_entry(
+    line: str,
+    line_number: int,
+) -> AttributeEntryToken | None:
+    """If ``line`` is a ``:name:`` or ``:name: value`` entry, return the token.
+
+    The lexer is permissive: any well-shaped name (letter-led, then
+    letters/digits/underscores/hyphens) yields a token. Whether the
+    entry is *positionally* valid (i.e. inside the document header) is
+    the parser's job — it consumes a contiguous run of these between
+    the optional level-1 title and the first body block, and rejects
+    any further occurrence as :class:`ParseErrorKind.UNKNOWN_BLOCK`.
+    """
+    match = _ATTRIBUTE_ENTRY_RE.match(line)
+    if match is None:
+        return None
+    name = match.group(1)
+    # ``group(2)`` is the optional ``" value"`` capture (with the
+    # leading space); ``group(3)`` is the value alone. ``None`` means
+    # the bare ``:name:`` setter form. ``" "`` (empty value group 3)
+    # is a deliberate empty-string value, not the bare-setter form.
+    if match.group(2) is None:
+        value: str | None = None
+    else:
+        value = match.group(3)
+    return AttributeEntryToken(line=line_number, name=name, value=value)
 
 
 def _try_admonition_directive(

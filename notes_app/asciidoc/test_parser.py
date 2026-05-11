@@ -480,8 +480,6 @@ class UnknownBlockDetectionTests(unittest.TestCase):
 
     def test_table(self) -> None:
         cases: tuple[tuple[str, str], ...] = (
-            ("attribute entry", ":doctype: book\n"),
-            ("compound attribute", ":source-highlighter: rouge\n"),
             ("line comment", "// a comment\n"),
             (
                 "[source,] empty lang falls through then rejected",
@@ -513,6 +511,42 @@ class UnknownBlockDetectionTests(unittest.TestCase):
         doc = parse("first line\n// looks like a comment but is prose\n")
         self.assertEqual(len(doc.blocks), 1)
         self.assertIsInstance(doc.blocks[0], Paragraph)
+
+    def test_attribute_entry_after_paragraph_is_unknown_block(self) -> None:
+        # Attribute entries appearing *after* a body block (not in the
+        # document header) raise UNKNOWN_BLOCK — positionally invalid,
+        # not malformed.
+        with self.assertRaises(ParseError) as ctx:
+            parse("body paragraph.\n\n:doctype: book\n")
+        self.assertEqual(
+            ctx.exception.kind,
+            ParseErrorKind.UNKNOWN_BLOCK,
+        )
+
+    def test_attribute_entry_after_section_is_unknown_block(self) -> None:
+        # Same — even when the body is a section heading, an
+        # attribute entry past it is mid-document.
+        with self.assertRaises(ParseError) as ctx:
+            parse("== Section\n\n:author: me\n")
+        self.assertEqual(
+            ctx.exception.kind,
+            ParseErrorKind.UNKNOWN_BLOCK,
+        )
+
+    def test_malformed_attribute_entry_raises_bad_attribute_entry(self) -> None:
+        # Names that don't match the lexer's strict shape (digit-led,
+        # space-containing) lex as LineToken and reach the parser
+        # via _reject_unknown_block, which raises the dedicated
+        # BAD_ATTRIBUTE_ENTRY kind so the banner can show a tailored
+        # message.
+        for source in (":123: value\n", ":bad name: value\n"):
+            with self.subTest(source=source):
+                with self.assertRaises(ParseError) as ctx:
+                    parse(source)
+                self.assertEqual(
+                    ctx.exception.kind,
+                    ParseErrorKind.BAD_ATTRIBUTE_ENTRY,
+                )
 
 
 # ---------------------------------------------------------------------------
@@ -1238,6 +1272,180 @@ class WelcomeNoteRoundTripTests(unittest.TestCase):
         self.assertEqual(len(code_blocks), 1)
         cb = code_blocks[0]
         self.assertIn("def hello", cb.content)
+
+
+# ---------------------------------------------------------------------------
+# Document header attribute entries
+# ---------------------------------------------------------------------------
+
+
+class DocumentHeaderAttributeTests(unittest.TestCase):
+    """A contiguous run of ``:name: value`` entries at the document
+    header is consumed and discarded by the parser.
+
+    The AST has no field for attributes — no consumer in the
+    application currently reads them — so the test exercises that
+    each entry reaches the parser, is recognised as valid, and does
+    not appear in the resulting block list.
+    """
+
+    def test_single_header_attribute_after_title(self) -> None:
+        doc = parse("= Title\n:author: Me\n\nbody\n")
+        self.assertEqual(doc.title, (_t("Title", 1),))
+        self.assertEqual(len(doc.blocks), 1)
+        self.assertIsInstance(doc.blocks[0], Paragraph)
+
+    def test_multiple_header_attributes_after_title(self) -> None:
+        doc = parse(
+            "= Title\n"
+            ":author: Me\n"
+            ":revdate: 2026-04-14\n"
+            ":tags: favorite, reference\n"
+            "\n"
+            "body\n"
+        )
+        self.assertEqual(doc.title, (_t("Title", 1),))
+        self.assertEqual(len(doc.blocks), 1)
+        self.assertIsInstance(doc.blocks[0], Paragraph)
+
+    def test_header_attributes_with_no_title(self) -> None:
+        # Without a title, header entries are still consumed at the
+        # very top of the document.
+        doc = parse(":author: Me\n:revdate: 2026-04-14\n\nbody\n")
+        self.assertIsNone(doc.title)
+        self.assertEqual(len(doc.blocks), 1)
+        self.assertIsInstance(doc.blocks[0], Paragraph)
+
+    def test_bare_setter_form_is_consumed(self) -> None:
+        doc = parse("= Title\n:doctype:\n\nbody\n")
+        self.assertEqual(len(doc.blocks), 1)
+        self.assertIsInstance(doc.blocks[0], Paragraph)
+
+    def test_blank_line_between_attributes_is_tolerated(self) -> None:
+        # A single blank between two attribute entries does not close
+        # the header — the run extends across blanks until a real
+        # body block appears.
+        doc = parse(
+            "= Title\n"
+            ":author: Me\n"
+            "\n"
+            ":revdate: 2026-04-14\n"
+            "\n"
+            "body\n"
+        )
+        self.assertEqual(len(doc.blocks), 1)
+        self.assertIsInstance(doc.blocks[0], Paragraph)
+
+    def test_attribute_after_first_body_block_is_unknown_block(self) -> None:
+        # Once the first body block has been parsed, any subsequent
+        # attribute entry is positionally invalid.
+        with self.assertRaises(ParseError) as ctx:
+            parse("= Title\n\nfirst body.\n\n:author: Me\n")
+        self.assertEqual(
+            ctx.exception.kind,
+            ParseErrorKind.UNKNOWN_BLOCK,
+        )
+
+    def test_header_attributes_dont_block_section_recognition(self) -> None:
+        # After the header attribute run, a level-2 heading still
+        # opens a section the normal way.
+        doc = parse(
+            "= Title\n"
+            ":author: Me\n"
+            "\n"
+            "== Section\n"
+            "\n"
+            "body\n"
+        )
+        self.assertEqual(len(doc.blocks), 1)
+        self.assertIsInstance(doc.blocks[0], Section)
+
+
+# ---------------------------------------------------------------------------
+# Multi-line single-line admonitions (§3.5)
+# ---------------------------------------------------------------------------
+
+
+class MultiLineSingleAdmonitionTests(unittest.TestCase):
+    """``KIND: text`` followed by continuation lines absorbs them all
+    into one paragraph inside the admonition.
+
+    Without this rule, the second line would become a stray
+    paragraph *outside* the admonition box — the soft failure §S1
+    of the plan called out for the Sourdough fixture's NOTE / TIP
+    blocks.
+    """
+
+    def test_two_line_note_absorbs_continuation(self) -> None:
+        doc = parse("NOTE: first line\nsecond line\n")
+        self.assertEqual(len(doc.blocks), 1)
+        admonition = doc.blocks[0]
+        assert isinstance(admonition, Admonition)
+        self.assertEqual(admonition.kind, AdmonitionKind.NOTE)
+        self.assertEqual(len(admonition.blocks), 1)
+        # The paragraph contains: 'first line' + newline + 'second line'.
+        paragraph = admonition.blocks[0]
+        text_pieces = [
+            n.content for n in paragraph.inlines if isinstance(n, Text)
+        ]
+        self.assertIn("first line", text_pieces)
+        self.assertIn("second line", text_pieces)
+        self.assertIn("\n", text_pieces)
+
+    def test_blank_line_terminates_continuation(self) -> None:
+        # A blank line ends the admonition; the second paragraph is
+        # *not* part of the admonition box.
+        doc = parse("NOTE: first line\n\nsecond paragraph\n")
+        self.assertEqual(len(doc.blocks), 2)
+        admonition = doc.blocks[0]
+        assert isinstance(admonition, Admonition)
+        # The note's paragraph has only the first line.
+        self.assertEqual(len(admonition.blocks), 1)
+        admonition_text = [
+            n.content
+            for n in admonition.blocks[0].inlines
+            if isinstance(n, Text)
+        ]
+        self.assertEqual(admonition_text, ["first line"])
+        # The trailing paragraph is at the document level.
+        self.assertIsInstance(doc.blocks[1], Paragraph)
+
+    def test_block_start_after_admonition_ends_continuation(self) -> None:
+        # A list bullet at block-start ends the admonition's run
+        # without a blank between.
+        doc = parse("TIP: hint\n* a list item\n")
+        self.assertEqual(len(doc.blocks), 2)
+        self.assertIsInstance(doc.blocks[0], Admonition)
+        self.assertIsInstance(doc.blocks[1], UnorderedList)
+
+    def test_continuation_line_inline_error_points_at_correct_line(self) -> None:
+        # A bad inline span on a continuation line must be reported
+        # against that line, not the admonition's opener.
+        with self.assertRaises(ParseError) as ctx:
+            parse("NOTE: first\nsecond *unclosed\n")
+        self.assertEqual(ctx.exception.line, 2)
+
+    def test_inline_markup_on_continuation_line(self) -> None:
+        doc = parse("NOTE: plain\nthen *bold* text\n")
+        admonition = doc.blocks[0]
+        assert isinstance(admonition, Admonition)
+        kinds = [type(n).__name__ for n in admonition.blocks[0].inlines]
+        self.assertIn("Bold", kinds)
+
+    def test_three_line_admonition_with_bold_on_each(self) -> None:
+        doc = parse(
+            "WARNING: *one*\n"
+            "*two*\n"
+            "*three*\n"
+        )
+        admonition = doc.blocks[0]
+        assert isinstance(admonition, Admonition)
+        bolds = [
+            n
+            for n in admonition.blocks[0].inlines
+            if isinstance(n, Bold)
+        ]
+        self.assertEqual(len(bolds), 3)
 
 
 if __name__ == "__main__":

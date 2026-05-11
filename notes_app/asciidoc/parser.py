@@ -89,6 +89,7 @@ from notes_app.asciidoc.inline_parser import parse_inline
 from notes_app.asciidoc.lexer import (
     AdmonitionDirectiveToken,
     AdmonitionFenceToken,
+    AttributeEntryToken,
     BlankToken,
     CodeDirectiveToken,
     CodeFenceToken,
@@ -125,10 +126,16 @@ _COMMENT_PREFIX: str = "//"
 # character; subsequent ``|`` characters split the line into cells.
 _TABLE_CELL_SEPARATOR: str = "|"
 
-# An attribute entry such as ``:doctype: book`` or ``:source-highlighter:``.
-# Step 4 does not support attribute entries, so any line matching this
-# pattern is rejected as ``UNKNOWN_BLOCK`` rather than treated as prose.
-_ATTRIBUTE_ENTRY_RE: re.Pattern[str] = re.compile(r"^:[A-Za-z0-9_-]+:")
+# A line that *looks* like an attribute entry but failed to lex as one
+# (because the lexer is strict: name must be letter-led and contain
+# only letters / digits / underscores / hyphens). The parser uses
+# this to raise :class:`ParseErrorKind.BAD_ATTRIBUTE_ENTRY` against
+# malformed shapes — distinct from ``UNKNOWN_BLOCK`` so the banner
+# in :mod:`notes_app.ui.note_view` can render a tailored message.
+# Valid attribute entries arrive as :class:`AttributeEntryToken` and
+# never reach this regex; only malformed ones fall through to
+# :class:`LineToken`.
+_MALFORMED_ATTRIBUTE_ENTRY_RE: re.Pattern[str] = re.compile(r"^:[^:\n]*:")
 
 # An image macro is split into ``filename`` and ``attrs`` on the first
 # unescaped ``[``. Step 4 does not interpret ``attrs`` — but it does
@@ -187,12 +194,55 @@ class _Parser:
         """Parse the whole token stream into a :class:`Document`."""
         self._skip_blanks()
         title = self._try_consume_document_title()
+        self._consume_document_attributes()
         blocks = self._parse_blocks(stop_at_heading_level=None)
         return Document(
             title=title,
             blocks=tuple(blocks),
             source_line=_DOCUMENT_SOURCE_LINE,
         )
+
+    def _consume_document_attributes(self) -> None:
+        """Discard a contiguous run of header attribute entries.
+
+        The header attribute run sits between the optional level-1
+        title and the first body block. It is a sequence of
+        :class:`AttributeEntryToken`\\ s (potentially interleaved with
+        :class:`BlankToken`\\ s — blanks alone do not close the
+        header). The run ends at the first non-attribute,
+        non-blank token.
+
+        Entries are *discarded*: the AST has no field for them
+        because no consumer in the application currently reads
+        attribute values. If/when one appears (search, sidebar
+        metadata, render-time substitution), this method is the
+        single place that needs to start populating a field on
+        :class:`Document`.
+
+        An :class:`AttributeEntryToken` reaching the parser anywhere
+        *after* this consumption is rejected as
+        :class:`ParseErrorKind.UNKNOWN_BLOCK` — see
+        :meth:`_parse_non_heading_block`.
+        """
+        while self.pos < len(self.tokens):
+            token = self.tokens[self.pos]
+            if isinstance(token, AttributeEntryToken):
+                self.pos += 1
+                continue
+            if isinstance(token, BlankToken):
+                # A blank between two attribute entries does not close
+                # the header; advance and check the next token.
+                lookahead = self.pos + 1
+                if (
+                    lookahead < len(self.tokens)
+                    and isinstance(
+                        self.tokens[lookahead],
+                        AttributeEntryToken,
+                    )
+                ):
+                    self.pos += 1
+                    continue
+            return
 
     def _try_consume_document_title(self) -> tuple[InlineNode, ...] | None:
         """If the next token is a level-1 heading, consume it as the title.
@@ -349,6 +399,23 @@ class _Parser:
             return self._parse_blockquote_with_directive(token)
         if isinstance(token, QuoteFenceToken):
             return self._parse_blockquote_no_directive(token)
+        if isinstance(token, AttributeEntryToken):
+            # Header attribute entries are consumed by
+            # ``_consume_document_attributes`` before block dispatch
+            # ever sees them. Reaching this branch means the entry
+            # appears mid-document, which is not a position AsciiDoc
+            # permits. Reject with ``UNKNOWN_BLOCK`` (positionally
+            # invalid), not ``BAD_ATTRIBUTE_ENTRY`` (which is reserved
+            # for *malformed* shapes).
+            raise ParseError(
+                line=token.line,
+                column=0,
+                message=(
+                    "attribute entries are only valid in the document "
+                    "header (between the title and the first body block)"
+                ),
+                kind=ParseErrorKind.UNKNOWN_BLOCK,
+            )
         if isinstance(token, LineToken):
             self._reject_unknown_block(token)
             return self._parse_paragraph()
@@ -369,11 +436,11 @@ class _Parser:
         """Raise if the line begins a known-but-unsupported block.
 
         Lines that look like AsciiDoc structural directives we do not
-        yet implement (attribute entries, line comments, ``[…]``
-        directives that fell through every specialised matcher) must
-        produce a parse error rather than be silently swept into a
-        paragraph. The parser detects these at block-start only —
-        once we are mid-paragraph, a ``//`` line is part of the prose.
+        yet implement (line comments, ``[…]`` directives that fell
+        through every specialised matcher) must produce a parse error
+        rather than be silently swept into a paragraph. The parser
+        detects these at block-start only — once we are mid-paragraph,
+        a ``//`` line is part of the prose.
 
         Step 14 dropped the ``|===`` table-fence rejection from this
         check because tables are now supported — a ``|===`` line
@@ -386,6 +453,13 @@ class _Parser:
         specialised matchers did not recognise (e.g. malformed
         ``[source,]`` and ``[cols=""]`` shapes that the lexer falls
         through).
+
+        Attribute entries are now consumed as :class:`AttributeEntryToken`
+        at the document header (see :meth:`_consume_document_attributes`).
+        A malformed shape (``::``, ``:bad name:``, ``:123: x``) lexes
+        as :class:`LineToken` and is rejected here as
+        :class:`ParseErrorKind.BAD_ATTRIBUTE_ENTRY` — distinct from
+        ``UNKNOWN_BLOCK`` so the banner can show a tailored message.
         """
         text = token.text
 
@@ -396,12 +470,16 @@ class _Parser:
                 message="line comments are not supported",
                 kind=ParseErrorKind.UNKNOWN_BLOCK,
             )
-        if _ATTRIBUTE_ENTRY_RE.match(text):
+        if _MALFORMED_ATTRIBUTE_ENTRY_RE.match(text):
             raise ParseError(
                 line=token.line,
                 column=0,
-                message="attribute entries are not supported",
-                kind=ParseErrorKind.UNKNOWN_BLOCK,
+                message=(
+                    "malformed attribute entry: name must start with a "
+                    "letter and contain only letters, digits, "
+                    "underscores, or hyphens"
+                ),
+                kind=ParseErrorKind.BAD_ATTRIBUTE_ENTRY,
             )
         # Lines wrapped in ``[…]`` — even malformed ``[source,]`` and
         # ``[cols=""]`` — all land here. They are paragraph-shaped
@@ -861,19 +939,44 @@ class _Parser:
         self,
         token: SingleAdmonitionToken,
     ) -> Admonition:
-        """Wrap a ``NOTE: text`` line in an :class:`Admonition` node.
+        """Wrap a ``KIND: text`` line plus continuation lines in an admonition.
 
         The kind has already been validated by the lexer (the regex
         only matches the five known labels). The text is run through
         :func:`parse_inline` so inline formatting like ``*bold*`` or
-        ``_italic_`` inside the admonition body is preserved. The
-        result is exactly one :class:`Paragraph` in the
+        ``_italic_`` inside the admonition body is preserved.
+
+        Because users routinely wrap admonition prose across multiple
+        source lines without a blank between, the parser absorbs any
+        immediately-following :class:`LineToken`\\ s into the same
+        paragraph — joined with ``Text("\\n", line)`` connectors,
+        exactly as :meth:`_parse_paragraph` does. The run ends at the
+        first :class:`BlankToken` or non-paragraph block-start token.
+
+        The result is exactly one :class:`Paragraph` in the
         :class:`Admonition`'s ``blocks`` field, so the renderer's
         single-form / block-form code paths fully converge.
+
+        Per-line inline parsing keeps :class:`ParseError.line` exact
+        for an unmatched marker on a continuation line — without it,
+        the error would point at the admonition's opener line.
         """
         self.pos += 1
-        inlines = parse_inline(token.text, token.line)
-        paragraph = Paragraph(inlines=inlines, source_line=token.line)
+        inlines: list[InlineNode] = list(parse_inline(token.text, token.line))
+        # Walk forward absorbing consecutive LineTokens. Stop at the
+        # first BlankToken or non-LineToken — that token is the next
+        # block (or paragraph terminator) and is left for the outer
+        # block dispatch to handle.
+        while (
+            self.pos < len(self.tokens)
+            and isinstance(self.tokens[self.pos], LineToken)
+        ):
+            line_token = self.tokens[self.pos]
+            assert isinstance(line_token, LineToken)
+            inlines.append(Text(content="\n", source_line=line_token.line))
+            inlines.extend(parse_inline(line_token.text, line_token.line))
+            self.pos += 1
+        paragraph = Paragraph(inlines=tuple(inlines), source_line=token.line)
         return Admonition(
             kind=token.admonition_kind,
             blocks=(paragraph,),

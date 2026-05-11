@@ -22,6 +22,16 @@ Principles & invariants
   migration runner is invoked exactly once per process lifetime;
   it is itself idempotent, but skipping the work avoids redundant
   version reads on activations past the first.
+* The application's CSS bundle is loaded on the first activation and
+  attached to the default :class:`Gdk.Display` at
+  :data:`Gtk.STYLE_PROVIDER_PRIORITY_APPLICATION` — the lowest priority
+  band that still wins over the theme's own provider. Theme files,
+  user overrides, and runtime style providers all stack above it,
+  which is exactly the precedence the GTK 4 documentation recommends
+  for application-bundled CSS. The bundle is read via
+  :mod:`importlib.resources` so it works both from a source checkout
+  and from an installed wheel — there is no filesystem path
+  assumption.
 * The seeded welcome note is loaded by id (:data:`SEED_WELCOME_NOTE_ID`).
   If the user has deleted it, the application falls back to the most
   recently modified note in the library (:meth:`NoteRepositoryProtocol.list_all`
@@ -47,12 +57,15 @@ Principles & invariants
 
 from __future__ import annotations
 
+import importlib.resources
+
 import gi
 
+gi.require_version("Gdk", "4.0")
 gi.require_version("Gio", "2.0")
 gi.require_version("Gtk", "4.0")
 # pylint: disable=wrong-import-position
-from gi.repository import Gio, Gtk  # noqa: E402
+from gi.repository import Gdk, Gio, Gtk  # noqa: E402
 
 from notes_app.config.defaults import SEED_WELCOME_NOTE_ID
 from notes_app.config.paths import database_path
@@ -73,6 +86,26 @@ GTK uses this to enforce single-instance behaviour and to name the
 application's resource bundles. The string is fixed across releases —
 changing it would orphan any per-application user settings the OS may
 record under it.
+"""
+
+
+_APPLICATION_CSS_PACKAGE: str = "notes_app.ui.css"
+"""The package containing bundled application CSS resources.
+
+Loaded via :mod:`importlib.resources` rather than a filesystem path
+so the bundle resolves correctly whether the app is run from a
+source checkout, an installed wheel, or a frozen build. The
+``pyproject.toml`` ``package-data`` entry must ship the same path or
+the bundle isn't there at runtime.
+"""
+
+
+_APPLICATION_CSS_FILENAME: str = "app.css"
+"""The single CSS file at the root of :data:`_APPLICATION_CSS_PACKAGE`.
+
+v1 has one CSS file; if more are added, this loader is the place to
+iterate them. The file styles the note-view parse-error banner (and
+later, any other application-level visuals that need theming).
 """
 
 
@@ -134,6 +167,14 @@ class NotesApplication(Gtk.Application):
         database, so re-invocation across activations would still be
         safe — but skipping the call avoids the redundant version
         read.
+
+        The bundled application CSS is loaded here too — once per
+        process, attached to the default :class:`Gdk.Display` at
+        :data:`Gtk.STYLE_PROVIDER_PRIORITY_APPLICATION`. This must
+        run *after* :meth:`Gtk.Application.__init__` (so that GTK
+        is initialised and a default display exists) but *before*
+        any window is built (so the styling is in place for the
+        first paint).
         """
         self._database = Database(database_path())
         apply_pending(self._database)
@@ -146,6 +187,7 @@ class NotesApplication(Gtk.Application):
             attachments=self._attachment_store,
             app_state=self._app_state,
         )
+        _load_application_css()
 
     def _build_initial_window(self) -> MainWindow:
         """Construct the first :class:`MainWindow` and seed the
@@ -208,3 +250,37 @@ class NotesApplication(Gtk.Application):
             return
         # No notes at all — leave the selection empty. ``NoteView``
         # renders an empty buffer in that case.
+
+
+def _load_application_css() -> None:
+    """Read the bundled application CSS and attach it to the default display.
+
+    The CSS bundle is loaded via :mod:`importlib.resources` so it
+    resolves correctly across source checkout, installed wheel, and
+    frozen-bundle deployments. The provider is added at
+    :data:`Gtk.STYLE_PROVIDER_PRIORITY_APPLICATION` — the
+    documented band for application-bundled styles, sitting *below*
+    user overrides and the theme but *above* the GTK fallback. This
+    is the precedence the GTK 4 docs recommend for application CSS.
+
+    The function returns silently when the default display is not
+    available — a defensive guard for embedded or test contexts
+    where :class:`Gtk.Application` runs without a display. Production
+    always has one by the time :meth:`_initialise_runtime` runs.
+    """
+    display = Gdk.Display.get_default()
+    if display is None:
+        return
+    css_source = (
+        importlib.resources
+        .files(_APPLICATION_CSS_PACKAGE)
+        .joinpath(_APPLICATION_CSS_FILENAME)
+        .read_text(encoding="utf-8")
+    )
+    provider = Gtk.CssProvider.new()
+    provider.load_from_string(css_source)
+    Gtk.StyleContext.add_provider_for_display(
+        display,
+        provider,
+        Gtk.STYLE_PROVIDER_PRIORITY_APPLICATION,
+    )

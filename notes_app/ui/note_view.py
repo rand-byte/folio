@@ -12,7 +12,9 @@ Principles & invariants
   ``Gtk.ScrolledWindow`` (horizontal AUTOMATIC, vertical AUTOMATIC) →
   :class:`ArticleContainer` (a ``Gtk.Box`` subclass that enforces the
   fixed-width text column rule) → read-only ``Gtk.TextView`` populated
-  by :class:`TextBufferRenderer`.
+  by :class:`TextBufferRenderer`. A :class:`Gtk.Revealer` containing
+  the parse-error banner is *prepended* to that stack — it sits above
+  the scroller at the top of the pane and is hidden by default.
 * :class:`ArticleContainer` enforces the text-column rule: when allocated
   *wider* than the target column, the slack becomes equal left/right
   margins, centring the column; when allocated *narrower*, both margins
@@ -54,10 +56,21 @@ Principles & invariants
   stays untouched.
 * The widget tree is constructed once at ``__init__``. :meth:`refresh`
   re-runs the parser and renderer against the currently selected note,
-  but never reshapes the widget tree. This keeps GTK's child-anchor
-  bookkeeping clean: a render that fails (parse error) leaves the
-  previous valid render in place, exactly as the plan's error-handling
-  policy requires.
+  but never reshapes the widget tree.
+* **Parse-error handling.** When the parser raises, :meth:`refresh`
+  clears the buffer and reveals the inline-notice banner with a
+  user-facing message keyed by :class:`ParseErrorKind`. Selecting a
+  note that doesn't parse therefore shows an empty article column
+  with a banner pointing at the offending line, *not* the previous
+  note's stale render. Banner state and buffer state are kept in
+  lockstep — there is no combination "stale buffer + visible banner"
+  or "empty buffer + hidden banner".
+* The user-facing message table (:func:`_message_for`) lives in this
+  module rather than as a method on :class:`ParseError` because the
+  parser is pure and reusable; embedding UI copy in it would couple
+  the parser to this UI's tone. The mapping is *exhaustive* over
+  :class:`ParseErrorKind` so adding a new error kind forces an
+  update here — caught by a unit test that iterates the enum.
 """
 
 from __future__ import annotations
@@ -75,6 +88,7 @@ from notes_app.asciidoc.tag_table import build_tag_table
 from notes_app.asciidoc.textbuffer_renderer import TextBufferRenderer
 from notes_app.config.defaults import TARGET_CHARS_PER_LINE
 from notes_app.controllers.app_state import AppState
+from notes_app.enums import LinkScheme, ParseErrorKind
 from notes_app.models.parse_error import ParseError
 from notes_app.storage.protocols import (
     AttachmentStoreProtocol,
@@ -99,6 +113,139 @@ width. A real font's "M" is never zero pixels wide, but defending
 against a corner case (e.g. measuring before the widget has any font at
 all) keeps the column at least usable rather than collapsing to zero.
 """
+
+
+_BANNER_CSS_CLASS: str = "note-view-banner"
+"""CSS class applied to the banner ``Gtk.Box`` so the bundled
+stylesheet can style it (warning yellow background, padded
+inline-notice look). The class name is stable across releases — the
+stylesheet that targets it is shipped with the application.
+"""
+
+
+_ALLOWED_SCHEMES_LIST: str = ", ".join(s.value for s in LinkScheme)
+"""Pre-computed comma-joined list of supported link schemes, used in
+the user-facing message for :data:`ParseErrorKind.UNSUPPORTED_LINK_SCHEME`.
+Computed once at import time so the message is stable and the enum is
+queried only once.
+"""
+
+
+def _message_for(kind: ParseErrorKind, line: int) -> str:
+    # pylint: disable=too-many-return-statements,too-many-branches
+    # The ``match`` is intentionally exhaustive over
+    # :class:`ParseErrorKind` — every member produces a distinct
+    # user-facing message, so the number of cases equals the size of
+    # the enum. Splitting them into a dispatch dict would replace
+    # one ``match`` block with a dict literal of equal length and
+    # would break Python's pattern-match exhaustiveness story (a
+    # missing key fails at runtime, while a missing match arm shows
+    # up to type-checkers that understand ``Never``).
+    """Return a user-facing message for a parse error.
+
+    The mapping is exhaustive over :class:`ParseErrorKind` — every
+    member must produce a sentence. A unit test iterates the enum and
+    asserts each kind has an entry, so adding a new kind forces an
+    update here at the same time.
+
+    The parser's internal ``ParseError.message`` is *not* shown
+    verbatim because those strings are written for developers and
+    would confuse end users. The message is short, line-prefixed
+    where useful, and mentions the user's most likely fix when
+    obvious.
+    """
+    match kind:
+        case ParseErrorKind.UNTERMINATED_CODE_BLOCK:
+            return (
+                f"Line {line}: a code block was opened but never closed "
+                "with `----`."
+            )
+        case ParseErrorKind.UNKNOWN_BLOCK:
+            return (
+                f"Line {line}: this construct isn't recognised. Check for "
+                "a typo, an unsupported directive, or a misplaced attribute."
+            )
+        case ParseErrorKind.BAD_IMAGE_MACRO:
+            return (
+                f"Line {line}: the image macro is malformed. Expected "
+                "`image::filename[attrs]`."
+            )
+        case ParseErrorKind.BAD_INLINE_SPAN:
+            return (
+                f"Line {line}: an inline formatting marker (`*`, `_`, or "
+                "`#`) was opened but not closed on the same line."
+            )
+        case ParseErrorKind.EMPTY_HEADING:
+            return f"Line {line}: a heading marker has no text after it."
+        case ParseErrorKind.UNTERMINATED_TABLE:
+            return (
+                f"Line {line}: a table was opened but never closed with "
+                "`|===`."
+            )
+        case ParseErrorKind.EMPTY_TABLE:
+            return f"Line {line}: this table has no rows between the fences."
+        case ParseErrorKind.TABLE_ROW_ARITY_MISMATCH:
+            return (
+                f"Line {line}: a table row has a different number of cells "
+                "than the header."
+            )
+        case ParseErrorKind.BAD_COLS_DIRECTIVE:
+            return (
+                f"Line {line}: the `[cols=…]` directive is malformed. Each "
+                "value must be a positive integer."
+            )
+        case ParseErrorKind.UNTERMINATED_ADMONITION:
+            return (
+                f"Line {line}: an admonition block was opened but never "
+                "closed with `====`."
+            )
+        case ParseErrorKind.UNKNOWN_ADMONITION_TYPE:
+            return (
+                f"Line {line}: unknown admonition kind — expected NOTE, "
+                "TIP, IMPORTANT, WARNING, or CAUTION."
+            )
+        case ParseErrorKind.UNTERMINATED_BLOCKQUOTE:
+            return (
+                f"Line {line}: a blockquote was opened but never closed "
+                "with `____`."
+            )
+        case ParseErrorKind.BAD_BLOCKQUOTE_DIRECTIVE:
+            return (
+                f"Line {line}: the `[quote, …]` directive is malformed. "
+                "Expected up to two non-empty fields after `quote`."
+            )
+        case ParseErrorKind.UNSUPPORTED_LINK_SCHEME:
+            return (
+                f"Line {line}: this note uses a link scheme that isn't "
+                f"supported (only {_ALLOWED_SCHEMES_LIST})."
+            )
+        case ParseErrorKind.BAD_LINK_MACRO:
+            return (
+                f"Line {line}: the `link:` macro is malformed. Expected "
+                "`link:URL[display text]`."
+            )
+        case ParseErrorKind.UNTERMINATED_MONOSPACE:
+            return (
+                f"Line {line}: a backtick-monospace span was opened but "
+                "never closed."
+            )
+        case ParseErrorKind.UNTERMINATED_PASSTHROUGH:
+            return (
+                f"Line {line}: a `++…++` passthrough was opened but never "
+                "closed."
+            )
+        case ParseErrorKind.BAD_ATTRIBUTE_ENTRY:
+            return (
+                f"Line {line}: malformed attribute entry. The name must "
+                "start with a letter and contain only letters, digits, "
+                "underscores, or hyphens."
+            )
+        case ParseErrorKind.BLOCK_INSIDE_INLINE_ONLY_CONTAINER:
+            return (
+                f"Line {line}: this container only accepts paragraphs — "
+                "block-level constructs (headings, lists, code blocks, "
+                "tables, admonitions, blockquotes) cannot appear inside it."
+            )
 
 
 def _placeholder_image_bytes(_filename: str) -> bytes:
@@ -239,6 +386,7 @@ class ArticleContainer(Gtk.Box):
 
 
 class NoteView(Gtk.Box):
+    # pylint: disable=too-many-instance-attributes
     """The rendered-note pane.
 
     The pane is a vertical box: today only the scrolled article; later
@@ -255,9 +403,11 @@ class NoteView(Gtk.Box):
     :func:`_placeholder_image_bytes` is wired instead.
 
     The instance-attribute count exceeds pylint's default ceiling of
-    seven because step 11 introduces two new fields
+    seven because step 11 introduced two fields
     (:attr:`_attachments`, :attr:`_current_note_id`) on top of the
-    five already required to wire the renderer + selection plumbing.
+    five already required to wire the renderer + selection plumbing,
+    and step 16 adds two more (:attr:`_error_banner_revealer`,
+    :attr:`_error_banner_label`) for the inline parse-error banner.
     Splitting these into a helper class would obscure the obvious
     "the view holds the things it needs to render" relationship.
     """
@@ -267,7 +417,9 @@ class NoteView(Gtk.Box):
     # (``Gtk.TextTagTable``, :class:`ArticleContainer`,
     # ``Gtk.ScrolledWindow``) are kept alive by their GTK parent-child
     # references — adding them as ``self.`` attributes would duplicate
-    # those references for no behavioural benefit.
+    # those references for no behavioural benefit. The error banner's
+    # revealer and label *are* stored because :meth:`refresh` toggles
+    # them on every selection change.
     _note_repository: NoteRepositoryProtocol
     _attachments: AttachmentStoreProtocol | None
     _app_state: AppState
@@ -275,6 +427,8 @@ class NoteView(Gtk.Box):
     _text_view: Gtk.TextView
     _renderer: TextBufferRenderer
     _current_note_id: str | None
+    _error_banner_revealer: Gtk.Revealer
+    _error_banner_label: Gtk.Label
 
     def __init__(
         self,
@@ -293,6 +447,27 @@ class NoteView(Gtk.Box):
         # attachments. ``refresh`` updates it on every render so the
         # closure always sees the current note context.
         self._current_note_id = None
+
+        # Build the parse-error banner and prepend it to the vertical
+        # stack. The revealer hides itself by default with a 0 ms
+        # transition so the construction-time refresh does not flash a
+        # banner before its hide-on-success arm fires. When a parse
+        # error fires, ``refresh`` calls ``set_reveal_child(True)``;
+        # on success it calls ``set_reveal_child(False)``.
+        self._error_banner_revealer = Gtk.Revealer()
+        self._error_banner_revealer.set_transition_type(
+            Gtk.RevealerTransitionType.NONE,
+        )
+        self._error_banner_revealer.set_reveal_child(False)
+        banner_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=0)
+        banner_box.add_css_class(_BANNER_CSS_CLASS)
+        self._error_banner_label = Gtk.Label()
+        self._error_banner_label.set_wrap(True)
+        self._error_banner_label.set_xalign(0.0)
+        self._error_banner_label.set_hexpand(True)
+        banner_box.append(self._error_banner_label)
+        self._error_banner_revealer.set_child(banner_box)
+        self.append(self._error_banner_revealer)
 
         # Build the text-buffer rendering substrate. The tag table is
         # owned by the buffer in GTK 4; constructing the buffer with
@@ -373,29 +548,35 @@ class NoteView(Gtk.Box):
 
         Behaviour:
 
-        * No selection → buffer cleared, ``_current_note_id`` cleared.
+        * No selection → buffer cleared, banner hidden,
+          ``_current_note_id`` cleared.
         * Selection points to a note that no longer exists → buffer
-          cleared, ``_current_note_id`` cleared. The note-list widget
-          elsewhere will pick a new selection on its next refresh;
-          this view does not second-guess.
-        * Parse error in the source → buffer left untouched (so the
-          previous valid render stays visible). The plan's error-
-          handling policy is to surface parse errors via the editor
-          gutter; doing nothing here is what preserves that contract.
-          ``_current_note_id`` IS still updated to the new selection
-          so the next render attempt and any image lookup target the
-          right note.
+          cleared, banner hidden, ``_current_note_id`` cleared. The
+          note-list widget elsewhere will pick a new selection on its
+          next refresh; this view does not second-guess.
+        * Parse error in the source → buffer cleared, banner revealed
+          with a kind-specific message. ``_current_note_id`` IS still
+          updated to the new selection so any image lookup or
+          subsequent re-render targets the right note.
+        * Successful render → buffer populated with the rendered
+          article, banner hidden.
+
+        Banner state and buffer state are kept in lockstep — there is
+        no combination "stale buffer + visible banner" or "empty
+        buffer + hidden banner" produced by this method.
         """
         note_id = self._app_state.selected_note_id
         if note_id is None:
             self._current_note_id = None
             self._buffer.set_text("")
+            self._hide_error_banner()
             return
         try:
             note = self._note_repository.get(note_id)
         except KeyError:
             self._current_note_id = None
             self._buffer.set_text("")
+            self._hide_error_banner()
             return
         # Update the resolver's view of "current note" BEFORE invoking
         # the renderer, so any image macro encountered during the
@@ -409,14 +590,32 @@ class NoteView(Gtk.Box):
                 note_id=note.id,
                 attach_widget=self._attach_child_widget,
             )
-        except ParseError:
-            # Per the plan: "the source is still saved (the user's
-            # text is sacred) — only the *rendered* view is gated on
-            # parse success." Leaving the buffer untouched keeps the
-            # last-good render in place. Step 9+ surfaces the error
-            # through an editor-side panel; step 8 simply preserves
-            # the old render.
+        except ParseError as exc:
+            # Clear the buffer so a stale render from the previously
+            # selected note does not sit under the new note's title;
+            # show the banner with a user-facing message keyed by the
+            # error's kind. This is the failure mode the plan calls
+            # out: without these two lines the user sees the previous
+            # note's content for a note that doesn't parse.
+            self._buffer.set_text("")
+            self._error_banner_label.set_text(_message_for(exc.kind, exc.line))
+            self._error_banner_revealer.set_reveal_child(True)
             return
+        # Render succeeded — make sure no stale banner remains visible.
+        self._hide_error_banner()
+
+    def _hide_error_banner(self) -> None:
+        """Hide the parse-error banner.
+
+        Centralised because both the no-selection / not-found arms
+        and the success path of :meth:`refresh` use it; keeping the
+        sequence (``set_reveal_child(False)`` + clear label text) in
+        one place ensures the banner cannot end up "hidden but with
+        last error's text", which would be a confusing state should
+        the revealer's transition ever be made non-instant.
+        """
+        self._error_banner_revealer.set_reveal_child(False)
+        self._error_banner_label.set_text("")
 
     # ------------------------------------------------------------------
     # Signal handlers
@@ -502,6 +701,24 @@ class NoteView(Gtk.Box):
         mutation (e.g. a selection change) is visible through it.
         """
         return self._resolve_image_bytes
+
+    @property
+    def error_banner_visible(self) -> bool:
+        """``True`` iff the parse-error banner is currently revealed.
+
+        Public read-only so tests can assert the success / failure
+        bookkeeping without reaching into the revealer's children.
+        """
+        return self._error_banner_revealer.get_reveal_child()
+
+    @property
+    def error_banner_text(self) -> str:
+        """The current text of the parse-error banner.
+
+        Empty when no parse error is being shown — see
+        :meth:`_hide_error_banner` for the convention.
+        """
+        return self._error_banner_label.get_text()
 
 
 # ---------------------------------------------------------------------------
