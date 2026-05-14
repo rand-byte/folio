@@ -12,8 +12,9 @@ import gi
 
 gi.require_version("Gdk", "4.0")
 gi.require_version("Gtk", "4.0")
+gi.require_version("Gsk", "4.0")
 # pylint: disable=wrong-import-position
-from gi.repository import Gdk, Gtk  # noqa: E402
+from gi.repository import Gdk, Gsk, Gtk  # noqa: E402
 
 from notes_app.config.defaults import (
     ARTICLE_BOTTOM_MARGIN_LINES,
@@ -370,77 +371,221 @@ class ArticleContainerWidthGettersTests(unittest.TestCase):
         self.assertEqual(len(line_calls), 1)
 
 
+class _CapturingChild(Gtk.Widget):
+    """A bare :class:`Gtk.Widget` that records its last allocate / measure call.
+
+    Plugged into the size-allocate tests as :class:`ArticleContainer`'s
+    single child so the tests can assert what arguments the container
+    passes through :meth:`Gtk.Widget.allocate` (width / height /
+    baseline / transform) and :meth:`Gtk.Widget.measure` (orientation /
+    for-size) on it.
+
+    The Python overrides of :meth:`allocate` and :meth:`measure`
+    intercept the calls *before* they reach the C implementation, so
+    no real layout work happens — the recorded args are the
+    container's outputs verbatim. A reported height is returned from
+    :meth:`measure` so the vertical-forwarding test has something
+    deterministic to assert on.
+    """
+
+    recorded_allocate_calls: list[tuple[int, int, int, Gsk.Transform | None]]
+    recorded_measure_calls: list[tuple[Gtk.Orientation, int]]
+    _reported_vertical_height: int
+
+    def __init__(self, *, reported_vertical_height: int = 0) -> None:
+        super().__init__()
+        self.recorded_allocate_calls = []
+        self.recorded_measure_calls = []
+        self._reported_vertical_height = reported_vertical_height
+
+    def allocate(  # pylint: disable=arguments-differ
+        self,
+        width: int,
+        height: int,
+        baseline: int,
+        transform: Gsk.Transform | None,
+    ) -> None:
+        self.recorded_allocate_calls.append((width, height, baseline, transform))
+
+    def measure(  # pylint: disable=arguments-differ
+        self,
+        orientation: Gtk.Orientation,
+        for_size: int,
+    ) -> tuple[int, int, int, int]:
+        self.recorded_measure_calls.append((orientation, for_size))
+        if orientation == Gtk.Orientation.VERTICAL:
+            h = self._reported_vertical_height
+            return (h, h, -1, -1)
+        return (0, 0, -1, -1)
+
+
+def _transform_x_offset(transform: Gsk.Transform | None) -> int:
+    """Extract the X translation of ``transform`` (or 0 for ``None``).
+
+    Reads the affine 2-D components via :meth:`Gsk.Transform.to_2d`;
+    the fifth value is ``dx``. Tests assert on the offset because the
+    transform's identity isn't otherwise observable — the container's
+    contract is "the child appears at X = offset", not "the container
+    uses this particular ``Gsk.Transform`` object".
+    """
+    if transform is None:
+        return 0
+    _xx, _yx, _xy, _yy, dx, _dy = transform.to_2d()
+    return int(dx)
+
+
+@unittest.skipUnless(_display_available(), "no GDK display")
+class ArticleContainerBaseClassTests(unittest.TestCase):
+    """Lock the base class so the GTK 4 ``Gtk.Box``-can't-override-vfuncs
+    regression cannot reappear.
+
+    ``Gtk.Box`` delegates :meth:`measure` / :meth:`size_allocate` to its
+    ``BoxLayout`` layout manager at the C level, which means Python
+    overrides of :meth:`do_measure` / :meth:`do_size_allocate` on a
+    ``Gtk.Box`` subclass are dead code — the unit tests would pass
+    (the methods exist and run when called directly) while the live
+    widget behaved like a plain ``Gtk.Box``. The fix is to subclass
+    :class:`Gtk.Widget` instead; this test asserts that base class.
+    """
+
+    def test_article_container_is_a_gtk_widget_not_a_gtk_box(self) -> None:
+        container = _make_test_article_container()
+        self.assertIsInstance(container, Gtk.Widget)
+        self.assertNotIsInstance(container, Gtk.Box)
+
+
 @unittest.skipUnless(_display_available(), "no GDK display")
 class ArticleContainerSizeAllocateTests(unittest.TestCase):
     """Pin the column-width rule from §10 of the plan.
 
-    A wide allocation centres the column with equal margins; a narrow
-    or exact allocation leaves both margins at 0 (the parent
-    :class:`Gtk.ScrolledWindow` is responsible for the horizontal
-    scrollbar in that case — the test does not assert on that).
+    A wide allocation centres the column by offsetting the child via a
+    translate-X :class:`Gsk.Transform`; a narrow or exact allocation
+    leaves the offset at 0 (the parent :class:`Gtk.ScrolledWindow` is
+    responsible for the horizontal scrollbar in that case — the test
+    does not assert on that). In every case, the child is allocated
+    exactly :meth:`ArticleContainer.outer_column_width` pixels wide —
+    that is the column-pinning invariant.
 
-    Note that ``do_size_allocate`` centres against
-    :meth:`ArticleContainer.outer_column_width` (the widget's actual
-    width including inner padding), not against the bare text width —
-    the inner padding is part of the column from the layout's
-    perspective.
+    The assertions read the offset back from the recorded transform via
+    :func:`_transform_x_offset`; the container's contract is "the child
+    appears at X = offset", not "the container constructs this
+    particular ``Gsk.Transform`` object", so the tests check the
+    observable effect rather than object identity.
     """
 
-    def test_wide_window_sets_equal_margins_absorbing_slack(self) -> None:
-        container = _make_test_article_container(char_w=10, line_h=20)
+    def _container_with_capturing_child(
+        self,
+        *,
+        char_w: int = 10,
+        line_h: int = 20,
+    ) -> tuple[ArticleContainer, _CapturingChild]:
+        container = _make_test_article_container(char_w=char_w, line_h=line_h)
+        child = _CapturingChild()
+        container.set_child(child)
+        return container, child
+
+    def test_wide_window_centres_child_with_half_slack_offset(self) -> None:
+        container, child = self._container_with_capturing_child()
         outer = container.outer_column_width()
         allocated = outer + 200  # 200 px of slack
         container.do_size_allocate(allocated, 600, -1)
 
-        expected_side = (allocated - outer) // 2  # 100
-        self.assertEqual(container.get_margin_start(), expected_side)
-        self.assertEqual(container.get_margin_end(), expected_side)
+        self.assertEqual(len(child.recorded_allocate_calls), 1)
+        width, height, baseline, transform = child.recorded_allocate_calls[0]
+        self.assertEqual(width, outer)
+        self.assertEqual(height, 600)
+        self.assertEqual(baseline, -1)
+        self.assertEqual(_transform_x_offset(transform), (allocated - outer) // 2)
 
-    def test_narrow_window_sets_zero_margins(self) -> None:
-        container = _make_test_article_container(char_w=10, line_h=20)
+    def test_narrow_window_places_child_at_zero_offset(self) -> None:
+        container, child = self._container_with_capturing_child()
         outer = container.outer_column_width()
-        # Narrower than the outer target — column does not shrink;
-        # outer ScrolledWindow is responsible for the scrollbar (out
-        # of scope here).
+        # Narrower than the outer target — column does not shrink; the
+        # outer ScrolledWindow is responsible for the scrollbar (out of
+        # scope here).
         container.do_size_allocate(outer - 200, 600, -1)
-        self.assertEqual(container.get_margin_start(), 0)
-        self.assertEqual(container.get_margin_end(), 0)
 
-    def test_exact_outer_width_sets_zero_margins(self) -> None:
+        self.assertEqual(len(child.recorded_allocate_calls), 1)
+        width, _height, _baseline, transform = child.recorded_allocate_calls[0]
+        # Column-pinning invariant: child is allocated outer wide even
+        # though the parent gave us less.
+        self.assertEqual(width, outer)
+        self.assertEqual(_transform_x_offset(transform), 0)
+        # ``None`` is the GTK 4 idiom for "no transform"; verify the
+        # zero-offset path takes that fast-path.
+        self.assertIsNone(transform)
+
+    def test_exact_outer_width_places_child_at_zero_offset(self) -> None:
         # The boundary: allocated == outer → no slack to absorb. The
         # ``>`` (strict) check in the implementation is what produces
-        # this; ``>=`` would produce a 0-margin allocation here too,
+        # this; ``>=`` would produce a 0-offset allocation here too,
         # but the strict form makes the equality case explicit.
-        container = _make_test_article_container(char_w=10, line_h=20)
+        container, child = self._container_with_capturing_child()
         outer = container.outer_column_width()
         container.do_size_allocate(outer, 600, -1)
-        self.assertEqual(container.get_margin_start(), 0)
-        self.assertEqual(container.get_margin_end(), 0)
 
-    def test_repeated_allocate_with_same_width_is_idempotent(self) -> None:
-        # The implementation guards margin writes with an inequality
-        # check so the ``queue_resize`` triggered by ``set_margin_*``
-        # cannot oscillate. After a stable allocation, repeating it
-        # leaves the margins in place.
-        container = _make_test_article_container(char_w=10, line_h=20)
+        self.assertEqual(len(child.recorded_allocate_calls), 1)
+        _width, _height, _baseline, transform = child.recorded_allocate_calls[0]
+        self.assertEqual(_transform_x_offset(transform), 0)
+        self.assertIsNone(transform)
+
+    def test_repeated_allocate_with_same_width_is_stable(self) -> None:
+        # The implementation does not require an idempotence guard
+        # (it doesn't write ``self.margin-*``, only allocates the
+        # child) — every call produces the same offset against the
+        # same width.
+        container, child = self._container_with_capturing_child()
         outer = container.outer_column_width()
         allocated = outer + 80
         for _ in range(3):
             container.do_size_allocate(allocated, 400, -1)
-        expected_side = (allocated - outer) // 2  # 40
-        self.assertEqual(container.get_margin_start(), expected_side)
-        self.assertEqual(container.get_margin_end(), expected_side)
 
-    def test_widening_then_narrowing_resets_margins_to_zero(self) -> None:
-        container = _make_test_article_container(char_w=10, line_h=20)
+        self.assertEqual(len(child.recorded_allocate_calls), 3)
+        expected_offset = (allocated - outer) // 2  # 40
+        for width, _height, _baseline, transform in child.recorded_allocate_calls:
+            self.assertEqual(width, outer)
+            self.assertEqual(_transform_x_offset(transform), expected_offset)
+
+    def test_widening_then_narrowing_resets_offset_to_zero(self) -> None:
+        container, child = self._container_with_capturing_child()
         outer = container.outer_column_width()
         # Wide first.
         container.do_size_allocate(outer + 300, 600, -1)
-        self.assertGreater(container.get_margin_start(), 0)
-        # Then narrow — margins must drop back to 0.
+        _w0, _h0, _b0, transform_wide = child.recorded_allocate_calls[-1]
+        self.assertGreater(_transform_x_offset(transform_wide), 0)
+        # Then narrow — offset must drop back to 0.
         container.do_size_allocate(outer - 100, 600, -1)
-        self.assertEqual(container.get_margin_start(), 0)
-        self.assertEqual(container.get_margin_end(), 0)
+        _w1, _h1, _b1, transform_narrow = child.recorded_allocate_calls[-1]
+        self.assertEqual(_transform_x_offset(transform_narrow), 0)
+        self.assertIsNone(transform_narrow)
+
+    def test_child_always_allocated_outer_column_width_pixels_wide(
+        self,
+    ) -> None:
+        # The column-pinning invariant: across wide, exact, and narrow
+        # allocations, the width passed to the child is always exactly
+        # :meth:`outer_column_width`. The parent allocation's slack is
+        # absorbed by the offset, not by stretching or shrinking the
+        # child.
+        container, child = self._container_with_capturing_child()
+        outer = container.outer_column_width()
+        for parent_width in (outer - 200, outer, outer + 50, outer + 500):
+            with self.subTest(parent_width=parent_width):
+                child.recorded_allocate_calls.clear()
+                container.do_size_allocate(parent_width, 500, -1)
+                self.assertEqual(len(child.recorded_allocate_calls), 1)
+                width, _h, _b, _t = child.recorded_allocate_calls[0]
+                self.assertEqual(width, outer)
+
+    def test_allocate_is_a_no_op_when_no_child_is_set(self) -> None:
+        # Defensive path: the container is constructible without a
+        # child (production sets one immediately, but unit tests build
+        # one without). Allocating must not raise.
+        container = _make_test_article_container(char_w=10, line_h=20)
+        outer = container.outer_column_width()
+        # No assertion target beyond "does not raise" — the
+        # implementation has nothing to delegate to.
+        container.do_size_allocate(outer + 100, 600, -1)
 
 
 @unittest.skipUnless(_display_available(), "no GDK display")
@@ -453,6 +598,11 @@ class ArticleContainerMeasureTests(unittest.TestCase):
     The reported width is :meth:`outer_column_width` (text + inner
     padding), not the bare text width — the padding is part of the
     column from the layout's perspective.
+
+    The vertical-measurement override forwards to the single child at
+    the *outer* column width — the width the child will actually be
+    allocated, so its height computation matches the column it
+    renders into.
     """
 
     def test_horizontal_minimum_and_natural_equal_outer_column_width(
@@ -481,9 +631,81 @@ class ArticleContainerMeasureTests(unittest.TestCase):
     def test_hexpand_is_set_so_wide_viewport_overshoots_natural(self) -> None:
         # ``hexpand`` is what tells a wide ``Viewport`` to allocate us
         # more than our natural width — the precondition for the
-        # margin-absorbing branch in ``do_size_allocate``.
+        # centring branch in ``do_size_allocate``.
         container = _make_test_article_container(char_w=10, line_h=20)
         self.assertTrue(container.get_hexpand())
+
+    def test_vertical_measure_with_no_child_returns_zero(self) -> None:
+        # No child to measure → nothing to contribute. The horizontal
+        # path stays at ``outer_column_width``; only the vertical path
+        # is affected.
+        container = _make_test_article_container(char_w=10, line_h=20)
+        minimum, natural, baseline_min, baseline_nat = container.do_measure(
+            Gtk.Orientation.VERTICAL, -1,
+        )
+        self.assertEqual(minimum, 0)
+        self.assertEqual(natural, 0)
+        self.assertEqual(baseline_min, -1)
+        self.assertEqual(baseline_nat, -1)
+
+    def test_vertical_measure_forwards_to_child_at_outer_column_width(
+        self,
+    ) -> None:
+        # Width reported by the child is what the container reports
+        # vertically; ``for_size`` from the parent is capped to
+        # ``outer_column_width`` so the child wraps against the column
+        # it will be allocated, not against the parent's wider
+        # viewport.
+        container = _make_test_article_container(char_w=10, line_h=20)
+        child = _CapturingChild(reported_vertical_height=123)
+        container.set_child(child)
+        outer = container.outer_column_width()
+
+        minimum, natural, _, _ = container.do_measure(
+            Gtk.Orientation.VERTICAL, outer + 500,
+        )
+        self.assertEqual(minimum, 123)
+        self.assertEqual(natural, 123)
+        # for_size > outer → capped to outer.
+        self.assertEqual(
+            child.recorded_measure_calls,
+            [(Gtk.Orientation.VERTICAL, outer)],
+        )
+
+    def test_vertical_measure_passes_outer_when_for_size_is_unconstrained(
+        self,
+    ) -> None:
+        # ``for_size == -1`` is GTK's "no horizontal constraint" hint;
+        # the container substitutes ``outer_column_width`` because that
+        # is what the child will actually be allocated.
+        container = _make_test_article_container(char_w=10, line_h=20)
+        child = _CapturingChild(reported_vertical_height=77)
+        container.set_child(child)
+        outer = container.outer_column_width()
+
+        container.do_measure(Gtk.Orientation.VERTICAL, -1)
+        self.assertEqual(
+            child.recorded_measure_calls,
+            [(Gtk.Orientation.VERTICAL, outer)],
+        )
+
+    def test_vertical_measure_passes_for_size_when_narrower_than_outer(
+        self,
+    ) -> None:
+        # When the parent's hint is narrower than the column the
+        # container forwards it as-is — there is no point asking the
+        # child for a height at a width it will never see.
+        container = _make_test_article_container(char_w=10, line_h=20)
+        child = _CapturingChild(reported_vertical_height=42)
+        container.set_child(child)
+        outer = container.outer_column_width()
+        narrower = outer - 50
+
+        container.do_measure(Gtk.Orientation.VERTICAL, narrower)
+        self.assertEqual(
+            child.recorded_measure_calls,
+            [(Gtk.Orientation.VERTICAL, narrower)],
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -585,7 +807,7 @@ def _find_text_view(view: NoteView) -> Gtk.TextView:
     ``ScrolledWindow`` is the box's *next* sibling.
     ``Gtk.ScrolledWindow`` wraps any non-:class:`Gtk.Scrollable`
     child in a :class:`Gtk.Viewport` automatically; since
-    :class:`ArticleContainer` is a ``Gtk.Box`` (not natively
+    :class:`ArticleContainer` is a ``Gtk.Widget`` (not natively
     scrollable), the viewport is always present in production and
     the helper steps past it.
 

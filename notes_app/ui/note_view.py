@@ -10,17 +10,26 @@ Principles & invariants
   :class:`AttachmentStoreProtocol`.
 * The pane's layout is the three-step stack from §2 of the plan:
   ``Gtk.ScrolledWindow`` (horizontal AUTOMATIC, vertical AUTOMATIC) →
-  :class:`ArticleContainer` (a ``Gtk.Box`` subclass that enforces the
-  fixed-width text column rule) → read-only ``Gtk.TextView`` populated
-  by :class:`TextBufferRenderer`. A :class:`Gtk.Revealer` containing
-  the parse-error banner is *prepended* to that stack — it sits above
-  the scroller at the top of the pane and is hidden by default.
+  :class:`ArticleContainer` (a ``Gtk.Widget`` subclass with a single
+  child that enforces the fixed-width text column rule) → read-only
+  ``Gtk.TextView`` populated by :class:`TextBufferRenderer`. A
+  :class:`Gtk.Revealer` containing the parse-error banner is
+  *prepended* to that stack — it sits above the scroller at the top
+  of the pane and is hidden by default.
 * :class:`ArticleContainer` enforces the text-column rule: when allocated
-  *wider* than the target column, the slack becomes equal left/right
-  margins, centring the column; when allocated *narrower*, both margins
-  are 0 and the parent ``ScrolledWindow`` is responsible for the
-  horizontal scrollbar — the column never shrinks. The font never
-  scales with window width (see §2 / decision 7 of the plan).
+  *wider* than the target column, the slack becomes an equal-on-both-sides
+  horizontal translation of the child, centring the column; when allocated
+  *narrower*, the child is placed at offset 0 and the parent
+  ``ScrolledWindow`` is responsible for the horizontal scrollbar — the
+  column never shrinks. The font never scales with window width (see
+  §2 / decision 7 of the plan).
+* ``Gtk.Box`` subclasses cannot override ``measure`` / ``size_allocate``
+  in GTK 4 because ``Gtk.Box`` delegates to its ``BoxLayout`` layout
+  manager — those vfuncs are invoked through the layout manager at the
+  C level and a Python-level override on the box subclass is dead code.
+  The only correct base for this widget is therefore ``Gtk.Widget``,
+  with manual single-child management via :meth:`set_parent` /
+  :meth:`unparent` and :meth:`Gtk.Widget.allocate` on the child.
 * The target column width is :data:`TARGET_CHARS_PER_LINE` ×
   *measured glyph width*. The measurement is injected as a callable so
   tests can stub it without needing a realised font, and so production
@@ -52,11 +61,13 @@ Principles & invariants
   for the widget tree.)
 * The size-allocate vfunc — *not* the ``size-allocate`` signal, which is
   deprecated in GTK 4 — is the documented place to react to a fresh
-  allocation. :meth:`ArticleContainer.do_size_allocate` updates
-  :attr:`Gtk.Widget.margin-start` and :attr:`Gtk.Widget.margin-end`
-  on ``self`` only when the values would actually change, so the
-  ``queue_resize`` that follows a margin write does not introduce an
-  oscillating layout pass.
+  allocation. :meth:`ArticleContainer.do_size_allocate` builds a
+  translate-X :class:`Gsk.Transform` to position the single child and
+  calls :meth:`Gtk.Widget.allocate` on it with that transform. This
+  avoids the re-layout cycle that writing ``margin-start`` /
+  ``margin-end`` on ``self`` from inside ``size_allocate`` would
+  trigger; it is the GTK 4 idiom for "offset the single child by N
+  pixels along X without rerunning the parent's layout".
 * Image resolution flows through an :data:`ImageBytesResolver` built
   internally by :class:`NoteView` from an injected
   :class:`AttachmentStoreProtocol`. The resolver is a closure over
@@ -104,8 +115,10 @@ import gi
 
 gi.require_version("Gtk", "4.0")
 gi.require_version("Pango", "1.0")
+gi.require_version("Gsk", "4.0")
+gi.require_version("Graphene", "1.0")
 # pylint: disable=wrong-import-position
-from gi.repository import Gtk  # noqa: E402
+from gi.repository import Graphene, Gsk, Gtk  # noqa: E402
 
 from notes_app.asciidoc.tag_table import build_tag_table
 from notes_app.asciidoc.textbuffer_renderer import TextBufferRenderer
@@ -317,26 +330,43 @@ def _placeholder_image_bytes(_filename: str) -> bytes:
     return b""
 
 
-class ArticleContainer(Gtk.Box):
-    """A vertical ``Gtk.Box`` that pins its content to a fixed column.
+class ArticleContainer(Gtk.Widget):
+    """A :class:`Gtk.Widget` subclass with one child that pins width to a column.
 
-    The container is *vertical* (so the rendered article, plus future
-    breadcrumb / metadata strip, stack top-to-bottom). Two vfunc
-    overrides together implement the column-width rule from §2 of the
-    plan:
+    The container holds a single child (in production, the rendered-view
+    :class:`Gtk.TextView`) and enforces the column-width rule from §2 of
+    the plan via two vfunc overrides:
 
     * :meth:`do_measure` reports :meth:`outer_column_width` as both the
-      minimum and natural width on the horizontal axis. The minimum is
+      minimum and natural width on the horizontal axis — the minimum is
       what makes the parent ``Gtk.ScrolledWindow`` show a horizontal
-      scrollbar when its allocation is below the target — the column
-      does not shrink. The natural width gives parents a hint about
-      our preferred size when nothing else constrains them.
-    * :meth:`do_size_allocate` updates ``margin-start`` and
-      ``margin-end`` so a *wider* allocation absorbs its slack as equal
-      side margins (centring the column) without changing the inner
-      content area's width. Chaining to ``Gtk.Box.do_size_allocate``
-      lets the standard box layout run against the (now narrower by
-      ``2 × margin``) inner area.
+      scrollbar when its allocation is below the target. On the
+      vertical axis, the call is forwarded to the child's
+      :meth:`Gtk.Widget.measure` at the outer column width so the
+      child's wrapping (e.g. ``Gtk.TextView`` in ``WORD_CHAR`` mode)
+      computes its height against the width it will actually receive.
+    * :meth:`do_size_allocate` builds a translate-X
+      :class:`Gsk.Transform` that offsets the child by half the
+      available slack when the allocation is wider than the column,
+      and by zero otherwise. The child is always allocated exactly
+      :meth:`outer_column_width` pixels wide — the column never
+      shrinks, even when the parent allocation is narrower (the
+      overflow is what the parent ``ScrolledWindow`` scrolls).
+
+    Why ``Gtk.Widget`` and not ``Gtk.Box``: in GTK 4, ``Gtk.Box`` uses a
+    ``BoxLayout`` *layout manager*, and the widget-level
+    :meth:`measure` / :meth:`size_allocate` vfuncs on ``Gtk.Box``
+    delegate to that layout manager at the C level. A Python override
+    of :meth:`do_measure` / :meth:`do_size_allocate` on a ``Gtk.Box``
+    subclass is therefore dead code — never reached at runtime, even
+    though calling those methods directly from Python (as a unit test
+    might) appears to work. ``Gtk.Widget`` has no such indirection.
+
+    Single-child management is manual: :meth:`set_child` replaces
+    :meth:`Gtk.Box.append`; it unparents any prior child and parents
+    the new one via :meth:`Gtk.Widget.set_parent`. The child shows up
+    via :meth:`Gtk.Widget.get_first_child` exactly as under any other
+    ``Gtk.Widget`` parent.
 
     Construction takes a :data:`CharWidthMeasurer` and a
     :data:`LineHeightMeasurer`. Each measurer is invoked exactly once
@@ -355,6 +385,7 @@ class ArticleContainer(Gtk.Box):
     _line_height_measurer: LineHeightMeasurer
     _cached_char_width_px: int | None
     _cached_line_height_px: int | None
+    _child: Gtk.Widget | None
 
     def __init__(
         self,
@@ -362,18 +393,34 @@ class ArticleContainer(Gtk.Box):
         char_width_measurer: CharWidthMeasurer,
         line_height_measurer: LineHeightMeasurer,
     ) -> None:
-        super().__init__(orientation=Gtk.Orientation.VERTICAL, spacing=0)
+        super().__init__()
         self._char_width_measurer = char_width_measurer
         self._line_height_measurer = line_height_measurer
         self._cached_char_width_px = None
         self._cached_line_height_px = None
+        self._child = None
         # ``hexpand`` is what tells the parent ``Gtk.ScrolledWindow``'s
         # ``Gtk.Viewport`` to allocate us *more* than our natural width
         # when there is room — without it, the viewport would clamp us
-        # to the natural width and the wide-window margin path would
+        # to the natural width and the wide-window centring path would
         # never fire because ``do_size_allocate`` would always receive
         # exactly :meth:`outer_column_width`.
         self.set_hexpand(True)
+
+    def set_child(self, child: Gtk.Widget) -> None:
+        """Attach the container's single child, replacing any prior one.
+
+        Unparents the previously held child (if any) before parenting
+        the new one via :meth:`Gtk.Widget.set_parent`, which is the GTK
+        4 API for adding a child to a custom ``Gtk.Widget`` container
+        that manages its child manually (i.e. without a layout
+        manager). The child becomes visible via the standard
+        :meth:`Gtk.Widget.get_first_child` walk after this call.
+        """
+        if self._child is not None:
+            self._child.unparent()
+        self._child = child
+        child.set_parent(self)
 
     def char_width_px(self) -> int:
         """Return the cached measured width of the reference glyph.
@@ -447,20 +494,25 @@ class ArticleContainer(Gtk.Box):
         to give us. Reporting the same value for both means the column
         never spontaneously grows past its target on its own — only
         ``hexpand`` (set in ``__init__``) lets a parent give us more,
-        and the extra is absorbed by the size-allocate margin logic.
+        and the extra is absorbed by the size-allocate centring logic.
 
-        On the vertical axis, defer to :class:`Gtk.Box`'s standard
-        measurement (sum of children's heights at ``for_size``).
-        Baselines are not meaningful for this widget.
+        On the vertical axis, defer to the single child's
+        :meth:`Gtk.Widget.measure`, asking it for its height at the
+        *outer* column width — the width the child will actually be
+        allocated. ``for_size`` (the parent's cross-axis hint) is
+        clamped to at most :meth:`outer_column_width` so the child
+        wraps at the column rather than at a wider viewport. With no
+        child, vertical measure returns zeroes. Baselines are not
+        meaningful for this widget.
         """
         if orientation == Gtk.Orientation.HORIZONTAL:
             target = self.outer_column_width()
             return (target, target, -1, -1)
-        # ``for_size`` here is the horizontal allocation; passing it
-        # through means children that wrap (e.g. ``Gtk.TextView`` in
-        # ``WORD_CHAR`` mode) compute their height against the actual
-        # column width.
-        return Gtk.Box.do_measure(self, orientation, for_size)
+        if self._child is None:
+            return (0, 0, -1, -1)
+        outer = self.outer_column_width()
+        child_for_size = min(for_size, outer) if for_size > 0 else outer
+        return self._child.measure(orientation, child_for_size)
 
     def do_size_allocate(  # pylint: disable=arguments-differ
         self,
@@ -472,27 +524,41 @@ class ArticleContainer(Gtk.Box):
 
         When ``width`` is strictly greater than
         :meth:`outer_column_width`, the slack ``width - target`` is
-        split equally between ``margin-start`` and ``margin-end``.
-        Otherwise both margins are 0 — the parent ``ScrolledWindow``
-        scrolls horizontally to expose the column at its target size.
-
-        Margin writes are guarded with an inequality check so the
-        ``queue_resize`` they trigger does not produce an oscillating
-        layout pass: once the value stabilises, subsequent allocates
-        with the same ``width`` are no-ops on the margins.
+        split equally on either side of the child and applied as a
+        translate-X :class:`Gsk.Transform` on the child's allocate
+        call. Otherwise the child is allocated at offset 0 (transform
+        ``None``) — the parent ``ScrolledWindow`` scrolls horizontally
+        to expose the column at its target size. The child is always
+        allocated exactly :meth:`outer_column_width` pixels wide
+        regardless of ``width``; that is the column-pinning invariant.
+        The transform path is allocate-cycle-free, unlike the prior
+        ``set_margin_*`` approach.
         """
-        target = self.outer_column_width()
-        if width > target:
-            side_margin = (width - target) // 2
+        if self._child is None:
+            return
+        outer = self.outer_column_width()
+        if width > outer:
+            x_offset = (width - outer) // 2
         else:
-            side_margin = 0
+            x_offset = 0
+        transform = _translate_x_transform(x_offset)
+        self._child.allocate(outer, height, baseline, transform)
 
-        if self.get_margin_start() != side_margin:
-            self.set_margin_start(side_margin)
-        if self.get_margin_end() != side_margin:
-            self.set_margin_end(side_margin)
 
-        Gtk.Box.do_size_allocate(self, width, height, baseline)
+def _translate_x_transform(dx: int) -> Gsk.Transform | None:
+    """Return a translate-X :class:`Gsk.Transform`, or ``None`` for ``dx == 0``.
+
+    Used by :meth:`ArticleContainer.do_size_allocate` to position its
+    single child. Returning ``None`` for the zero case lets the child's
+    :meth:`Gtk.Widget.allocate` take the no-transform fast path —
+    matching the GTK 4 idiom of passing ``None`` when no transform is
+    needed.
+    """
+    if dx == 0:
+        return None
+    point = Graphene.Point()
+    point.init(float(dx), 0.0)
+    return Gsk.Transform.new().translate(point)
 
 
 class NoteView(Gtk.Box):
@@ -610,7 +676,7 @@ class NoteView(Gtk.Box):
             char_width_measurer=char_width_measurer,
             line_height_measurer=line_height_measurer,
         )
-        article_container.append(self._text_view)
+        article_container.set_child(self._text_view)
 
         # The four breathing-space margins on the rendered-view
         # ``Gtk.TextView``. All four are font-relative — top / bottom

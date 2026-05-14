@@ -103,7 +103,7 @@ _DEFAULT_WINDOW_WIDTH_PX: Final[int] = 1200
 
 Wide enough that the rendered article column gets its full
 :data:`TARGET_CHARS_PER_LINE` × char-width allocation with slack on
-both sides of the article column, so the wide-window margin branch
+both sides of the article column, so the wide-window centring branch
 of :meth:`ArticleContainer.do_size_allocate` fires on the first
 allocation. Narrow enough to fit a 1366×768 laptop comfortably.
 """

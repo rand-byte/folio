@@ -95,6 +95,7 @@ Layers may only import **downward**. Every arrow below points from caller to cal
 | Add a notebook-level user action | `controllers/notebook_controller.py` → caller in `ui/sidebar.py` | `storage/notebook_repository.py` if storage shape changes |
 | Change rendered-view styling | `asciidoc/tag_table.py` (tag definitions) — every visual style lives in exactly one place, including block-level paragraph styling for admonitions / blockquotes / code blocks | rarely `asciidoc/textbuffer_renderer.py` for layout (only table sizing escapes to widget land) |
 | Tune article column margins | `config/defaults.py` (the three `ARTICLE_*` multipliers) | none — `ui/note_view.py` reads the constants once at `NoteView.__init__` and applies them to the inner `Gtk.TextView`'s four margins |
+| Change rendered-view layout sizing | `ui/note_view.py` `ArticleContainer` — note that it must remain a `Gtk.Widget` subclass; `Gtk.Box` silently disables `do_measure`/`do_size_allocate` overrides because its `BoxLayout` layout manager intercepts them | `ui/test_note_view.py` `ArticleContainer*` tests |
 | Change application chrome / CSS | `ui/css/app.css` | bumping `pyproject.toml` `package-data` if a new asset is added |
 | Change source-editor syntax highlight | `asciidoc/language_spec.lang` (GtkSourceView grammar) | nothing else; the file is data |
 | Tune a constant (sizes, quotas) | `config/defaults.py` | none — that is the point of this module |
