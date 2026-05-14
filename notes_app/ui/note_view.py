@@ -29,6 +29,27 @@ Principles & invariants
   lifetime of the :class:`ArticleContainer` — font changes during a
   session would invalidate the cache, but v1 has no in-app font
   customisation so this is a non-issue.
+* The four article margins (top / bottom / left / right) are derived
+  from the same injected Pango measurements as the column width — both
+  the M-width measurer (existing) and a sibling line-height measurer
+  (new). Cached for the container's lifetime via the same
+  ``_cached_..._px`` pattern. Top and bottom are :data:`ARTICLE_TOP_MARGIN_LINES`
+  / :data:`ARTICLE_BOTTOM_MARGIN_LINES` multiplied by the measured line
+  height; left and right are :data:`ARTICLE_INNER_HPADDING_CHARS`
+  multiplied by the measured M-width.
+* :class:`ArticleContainer` exposes three sizing getters:
+  :meth:`text_column_width` (the 66-character text area, passed to the
+  renderer for table / image layout), :meth:`outer_column_width` (the
+  widget's actual width, including inner horizontal padding on both
+  sides, used by :meth:`do_measure` and :meth:`do_size_allocate`), and
+  :meth:`line_height_px` / :meth:`char_width_px` (the font-derived
+  units the :class:`NoteView` reads when setting the four
+  :class:`Gtk.TextView` margins).
+* The four ``Gtk.TextView`` margins are set once at
+  :meth:`NoteView.__init__`. They do not change on selection or on
+  render — :meth:`NoteView.refresh` only rebuilds buffer contents, not
+  chrome. (Same lifecycle invariant the rest of this docstring states
+  for the widget tree.)
 * The size-allocate vfunc — *not* the ``size-allocate`` signal, which is
   deprecated in GTK 4 — is the documented place to react to a fresh
   allocation. :meth:`ArticleContainer.do_size_allocate` updates
@@ -88,7 +109,12 @@ from gi.repository import Gtk  # noqa: E402
 
 from notes_app.asciidoc.tag_table import build_tag_table
 from notes_app.asciidoc.textbuffer_renderer import TextBufferRenderer
-from notes_app.config.defaults import TARGET_CHARS_PER_LINE
+from notes_app.config.defaults import (
+    ARTICLE_BOTTOM_MARGIN_LINES,
+    ARTICLE_INNER_HPADDING_CHARS,
+    ARTICLE_TOP_MARGIN_LINES,
+    TARGET_CHARS_PER_LINE,
+)
 from notes_app.controllers.app_state import AppState
 from notes_app.enums import LinkScheme, ParseErrorKind
 from notes_app.models.parse_error import ParseError
@@ -105,7 +131,18 @@ type CharWidthMeasurer = Callable[[], int]
 Injected at construction of :class:`ArticleContainer` so tests can pass
 a fixed integer and production can wire a Pango-layout-based measurer
 that runs against the live ``Gtk.TextView``. The result is cached after
-the first call — see :meth:`ArticleContainer.target_column_width`.
+the first call — see :meth:`ArticleContainer.char_width_px`.
+"""
+
+
+type LineHeightMeasurer = Callable[[], int]
+"""Callable returning the pixel height of one line in the body font.
+
+Injected the same way as :data:`CharWidthMeasurer` so tests can pass a
+fixed integer; production wires a Pango-layout-based measurer that lays
+out a single glyph and returns ``log_rect.height``. The result is
+cached after the first call alongside the M-width measurement — see
+:meth:`ArticleContainer.line_height_px`.
 """
 
 
@@ -114,6 +151,18 @@ _FALLBACK_CHAR_WIDTH_PX: int = 8
 width. A real font's "M" is never zero pixels wide, but defending
 against a corner case (e.g. measuring before the widget has any font at
 all) keeps the column at least usable rather than collapsing to zero.
+"""
+
+
+_FALLBACK_LINE_HEIGHT_PX: int = 2 * _FALLBACK_CHAR_WIDTH_PX
+"""Defensive fallback for a non-positive line-height measurement.
+
+Mirrors :data:`_FALLBACK_CHAR_WIDTH_PX`: fonts don't have a zero line
+height in practice, but the symmetry with the M-width fallback keeps
+the container drawable in pathological cases (e.g. measuring before
+the widget has any font at all). The chosen value (16 px) matches the
+default body-text line height of a 12-13 px font, which is sensible
+for the rest of the app's chrome.
 """
 
 
@@ -276,7 +325,7 @@ class ArticleContainer(Gtk.Box):
     overrides together implement the column-width rule from §2 of the
     plan:
 
-    * :meth:`do_measure` reports :meth:`target_column_width` as both the
+    * :meth:`do_measure` reports :meth:`outer_column_width` as both the
       minimum and natural width on the horizontal axis. The minimum is
       what makes the parent ``Gtk.ScrolledWindow`` show a horizontal
       scrollbar when its allocation is below the target — the column
@@ -289,52 +338,109 @@ class ArticleContainer(Gtk.Box):
       lets the standard box layout run against the (now narrower by
       ``2 × margin``) inner area.
 
-    Construction takes a :data:`CharWidthMeasurer`. The measurer is
-    invoked exactly once across the container's lifetime — the result
-    is cached and used for every subsequent
-    :meth:`target_column_width` call (which both vfuncs above invoke).
+    Construction takes a :data:`CharWidthMeasurer` and a
+    :data:`LineHeightMeasurer`. Each measurer is invoked exactly once
+    across the container's lifetime — the result is cached and reused
+    by all subsequent getter calls. Three width getters
+    (:meth:`text_column_width`, :meth:`outer_column_width`,
+    :meth:`char_width_px`) are derived from the M-width measurement;
+    one (:meth:`line_height_px`) from the line-height measurement. The
+    :class:`NoteView` owns the *outer* widget size (used by the two
+    vfuncs) while the renderer is fed the *text* width — the inner
+    horizontal padding sits between the two and is enforced by the
+    :class:`Gtk.TextView`'s ``left-margin`` / ``right-margin``.
     """
 
     _char_width_measurer: CharWidthMeasurer
+    _line_height_measurer: LineHeightMeasurer
     _cached_char_width_px: int | None
+    _cached_line_height_px: int | None
 
-    def __init__(self, *, char_width_measurer: CharWidthMeasurer) -> None:
+    def __init__(
+        self,
+        *,
+        char_width_measurer: CharWidthMeasurer,
+        line_height_measurer: LineHeightMeasurer,
+    ) -> None:
         super().__init__(orientation=Gtk.Orientation.VERTICAL, spacing=0)
         self._char_width_measurer = char_width_measurer
+        self._line_height_measurer = line_height_measurer
         self._cached_char_width_px = None
+        self._cached_line_height_px = None
         # ``hexpand`` is what tells the parent ``Gtk.ScrolledWindow``'s
         # ``Gtk.Viewport`` to allocate us *more* than our natural width
         # when there is room — without it, the viewport would clamp us
         # to the natural width and the wide-window margin path would
         # never fire because ``do_size_allocate`` would always receive
-        # exactly :meth:`target_column_width`.
+        # exactly :meth:`outer_column_width`.
         self.set_hexpand(True)
 
-    def target_column_width(self) -> int:
-        """Return the desired pixel width of the article column.
+    def char_width_px(self) -> int:
+        """Return the cached measured width of the reference glyph.
 
-        Computed as :data:`TARGET_CHARS_PER_LINE` × the measured glyph
-        width. The measurement is taken on the first call and cached
-        afterwards. A non-positive measurement is replaced by
-        :data:`_FALLBACK_CHAR_WIDTH_PX` so the column is never zero
-        pixels wide.
+        Computed via the injected :data:`CharWidthMeasurer` on the
+        first call and cached afterwards. A non-positive measurement
+        is replaced by :data:`_FALLBACK_CHAR_WIDTH_PX` so derived
+        widths never collapse to zero pixels.
         """
         if self._cached_char_width_px is None:
             measured = self._char_width_measurer()
             self._cached_char_width_px = (
                 measured if measured > 0 else _FALLBACK_CHAR_WIDTH_PX
             )
-        return TARGET_CHARS_PER_LINE * self._cached_char_width_px
+        return self._cached_char_width_px
+
+    def line_height_px(self) -> int:
+        """Return the cached measured pixel height of one body-font line.
+
+        Computed via the injected :data:`LineHeightMeasurer` on the
+        first call and cached afterwards. A non-positive measurement
+        is replaced by :data:`_FALLBACK_LINE_HEIGHT_PX` for the same
+        defensive reason as :meth:`char_width_px`.
+        """
+        if self._cached_line_height_px is None:
+            measured = self._line_height_measurer()
+            self._cached_line_height_px = (
+                measured if measured > 0 else _FALLBACK_LINE_HEIGHT_PX
+            )
+        return self._cached_line_height_px
+
+    def text_column_width(self) -> int:
+        """Return the pixel width of the *text area* (no padding).
+
+        Computed as :data:`TARGET_CHARS_PER_LINE` ×
+        :meth:`char_width_px`. This is what the renderer needs for
+        table / image layout — the width of one line of rendered
+        prose, not including the inner horizontal padding that the
+        :class:`Gtk.TextView`'s ``left-margin`` / ``right-margin`` add
+        between the column edge and the text.
+        """
+        return TARGET_CHARS_PER_LINE * self.char_width_px()
+
+    def outer_column_width(self) -> int:
+        """Return the pixel width of the article column including padding.
+
+        Computed as ``(TARGET_CHARS_PER_LINE + 2 ×
+        ARTICLE_INNER_HPADDING_CHARS)`` × :meth:`char_width_px`. Used
+        by :meth:`do_measure` and :meth:`do_size_allocate` as the
+        actual widget width — the inner padding sits between this
+        outer edge and the text area, so the 66-char text width is
+        preserved while the column itself is wider.
+        """
+        return (
+            (TARGET_CHARS_PER_LINE + 2 * ARTICLE_INNER_HPADDING_CHARS)
+            * self.char_width_px()
+        )
 
     def do_measure(  # pylint: disable=arguments-differ
         self,
         orientation: Gtk.Orientation,
         for_size: int,
     ) -> tuple[int, int, int, int]:
-        """Report the target column width as both min and natural.
+        """Report the outer column width as both min and natural.
 
         On the horizontal axis, both minimum and natural width equal
-        :meth:`target_column_width`. The minimum is what makes a
+        :meth:`outer_column_width`. The minimum is what makes a
         narrow allocation trigger the parent
         ``Gtk.ScrolledWindow``'s horizontal scrollbar; the natural is
         the hint a parent uses when it has flexibility about how much
@@ -348,7 +454,7 @@ class ArticleContainer(Gtk.Box):
         Baselines are not meaningful for this widget.
         """
         if orientation == Gtk.Orientation.HORIZONTAL:
-            target = self.target_column_width()
+            target = self.outer_column_width()
             return (target, target, -1, -1)
         # ``for_size`` here is the horizontal allocation; passing it
         # through means children that wrap (e.g. ``Gtk.TextView`` in
@@ -365,7 +471,7 @@ class ArticleContainer(Gtk.Box):
         """Centre the article column horizontally inside ``width``.
 
         When ``width`` is strictly greater than
-        :meth:`target_column_width`, the slack ``width - target`` is
+        :meth:`outer_column_width`, the slack ``width - target`` is
         split equally between ``margin-start`` and ``margin-end``.
         Otherwise both margins are 0 — the parent ``ScrolledWindow``
         scrolls horizontally to expose the column at its target size.
@@ -375,7 +481,7 @@ class ArticleContainer(Gtk.Box):
         layout pass: once the value stabilises, subsequent allocates
         with the same ``width`` are no-ops on the margins.
         """
-        target = self.target_column_width()
+        target = self.outer_column_width()
         if width > target:
             side_margin = (width - target) // 2
         else:
@@ -493,12 +599,39 @@ class NoteView(Gtk.Box):
         self._text_view.set_vexpand(True)
 
         # The article container: a fixed-width column wrapping the
-        # text view. Production wires the char-width measurer to a
-        # Pango-layout closure against the text view.
+        # text view. Production wires the two measurers (M-width and
+        # line-height) to Pango-layout closures against the text view
+        # — see :func:`_build_font_measurers` for the single seam tests
+        # monkey-patch.
+        char_width_measurer, line_height_measurer = _build_font_measurers(
+            self._text_view,
+        )
         article_container = ArticleContainer(
-            char_width_measurer=_make_pango_char_width_measurer(self._text_view),
+            char_width_measurer=char_width_measurer,
+            line_height_measurer=line_height_measurer,
         )
         article_container.append(self._text_view)
+
+        # The four breathing-space margins on the rendered-view
+        # ``Gtk.TextView``. All four are font-relative — top / bottom
+        # are multiples of the measured line height, left / right are
+        # multiples of the measured "M" width. Reading the cached
+        # values back from ``article_container`` (rather than calling
+        # the measurer callables directly) ensures the column width
+        # and the inner padding are derived from the same M-width
+        # measurement — they cannot drift.
+        self._text_view.set_left_margin(
+            ARTICLE_INNER_HPADDING_CHARS * article_container.char_width_px(),
+        )
+        self._text_view.set_right_margin(
+            ARTICLE_INNER_HPADDING_CHARS * article_container.char_width_px(),
+        )
+        self._text_view.set_top_margin(
+            ARTICLE_TOP_MARGIN_LINES * article_container.line_height_px(),
+        )
+        self._text_view.set_bottom_margin(
+            ARTICLE_BOTTOM_MARGIN_LINES * article_container.line_height_px(),
+        )
 
         # The scroller: AUTOMATIC on both axes. Vertical scrolling is
         # the prose-reading direction; horizontal kicks in only when
@@ -518,10 +651,13 @@ class NoteView(Gtk.Box):
         # closes over ``self`` and reads the live ``_current_note_id``
         # / ``_attachments`` rather than a snapshot. The
         # ``column_width_px`` resolver is the container's bound method
-        # for the same reason.
+        # for the same reason — and is fed the *text* width (not the
+        # outer width including padding) because the renderer lays
+        # tables and images against the actual reading column, not the
+        # widget's outer footprint.
         self._renderer = TextBufferRenderer(
             image_bytes_for=self._resolve_image_bytes,
-            column_width_px=article_container.target_column_width,
+            column_width_px=article_container.text_column_width,
             tag_table=tag_table,
         )
 
@@ -759,3 +895,39 @@ def _make_pango_char_width_measurer(widget: Gtk.Widget) -> CharWidthMeasurer:
         return int(log_rect.width)
 
     return measure
+
+
+def _make_pango_line_height_measurer(widget: Gtk.Widget) -> LineHeightMeasurer:
+    """Build a measurer that returns the pixel height of one line.
+
+    Sibling of :func:`_make_pango_char_width_measurer`. The closure
+    lays out the same reference glyph (:data:`_MEASUREMENT_GLYPH`)
+    with the widget's Pango context and returns ``log_rect.height`` —
+    the actual rendered line height for the body font, including the
+    font's leading. Sharing the reference glyph keeps the two
+    measurements coherent: a future change to the glyph is one edit.
+    """
+
+    def measure() -> int:
+        layout = widget.create_pango_layout(_MEASUREMENT_GLYPH)
+        _, log_rect = layout.get_pixel_extents()
+        return int(log_rect.height)
+
+    return measure
+
+
+def _build_font_measurers(
+    text_view: Gtk.TextView,
+) -> tuple[CharWidthMeasurer, LineHeightMeasurer]:
+    """Pair the two production Pango measurers for a ``Gtk.TextView``.
+
+    Returned as a 2-tuple ``(char_width_measurer, line_height_measurer)``
+    so :meth:`NoteView.__init__` can unpack and inject both into
+    :class:`ArticleContainer`. Lives as its own function so the test
+    suite can monkey-patch a single seam to supply stubbed measurers
+    without instantiating a real font context.
+    """
+    return (
+        _make_pango_char_width_measurer(text_view),
+        _make_pango_line_height_measurer(text_view),
+    )

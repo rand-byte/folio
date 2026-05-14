@@ -94,6 +94,7 @@ Layers may only import **downward**. Every arrow below points from caller to cal
 | Add a note-level user action | `controllers/note_controller.py` (mutate + emit signal) → caller in `ui/toolbar.py` or `ui/note_editor.py` | repository protocol if storage shape changes |
 | Add a notebook-level user action | `controllers/notebook_controller.py` → caller in `ui/sidebar.py` | `storage/notebook_repository.py` if storage shape changes |
 | Change rendered-view styling | `asciidoc/tag_table.py` (tag definitions) — every visual style lives in exactly one place, including block-level paragraph styling for admonitions / blockquotes / code blocks | rarely `asciidoc/textbuffer_renderer.py` for layout (only table sizing escapes to widget land) |
+| Tune article column margins | `config/defaults.py` (the three `ARTICLE_*` multipliers) | none — `ui/note_view.py` reads the constants once at `NoteView.__init__` and applies them to the inner `Gtk.TextView`'s four margins |
 | Change application chrome / CSS | `ui/css/app.css` | bumping `pyproject.toml` `package-data` if a new asset is added |
 | Change source-editor syntax highlight | `asciidoc/language_spec.lang` (GtkSourceView grammar) | nothing else; the file is data |
 | Tune a constant (sizes, quotas) | `config/defaults.py` | none — that is the point of this module |
@@ -122,7 +123,7 @@ Test files (`test_*.py`) sit next to their subject — `test_M.py` covers `M.py`
 
 | File | LOC | One-line summary |
 | --- | ---: | --- |
-| `defaults.py` | 157 | Tunable constants (`MAX_ATTACHMENT_BYTES`, `TARGET_CHARS_PER_LINE`) and the seed `SEED_NOTEBOOKS` / `SEED_WELCOME_NOTE_SOURCE` written by the v1 migration. |
+| `defaults.py` | 187 | Tunable constants (`MAX_ATTACHMENT_BYTES`, `TARGET_CHARS_PER_LINE`, and the three `ARTICLE_*` margin multipliers `ARTICLE_TOP_MARGIN_LINES` / `ARTICLE_BOTTOM_MARGIN_LINES` / `ARTICLE_INNER_HPADDING_CHARS`) and the seed `SEED_NOTEBOOKS` / `SEED_WELCOME_NOTE_SOURCE` written by the v1 migration. |
 | `paths.py` | 76 | `data_directory()`, `database_path()` — XDG-aware filesystem resolution. Each call is pure; mkdir is the only side effect. |
 
 ### `notes_app/models/` — frozen dataclasses
@@ -210,7 +211,7 @@ This is the only layer that owns widget trees. Every widget is thin and unit-tes
 | `main_window.py` | 328 | `MainWindow` — the three-pane shell: sidebar │ note list │ `Gtk.Stack(view ↔ editor)`. Toolbar is set as the title bar. |
 | `sidebar.py` | 751 | Notebook tree on the left. Click → mutate `AppState.selection`. Expansion state is widget-local (intentional — different windows could disagree). |
 | `note_list.py` | 621 | Middle pane: header + sortable, filtered list. `compute_display_notes(...)` is a free function so tests don't need widgets. |
-| `note_view.py` | 755 | Read pane. `ArticleContainer` enforces the fixed-width text column. Calls `TextBufferRenderer.render_into` on every change. |
+| `note_view.py` | 933 | Read pane. `ArticleContainer` enforces the fixed-width text column. Calls `TextBufferRenderer.render_into` on every change. |
 | `note_editor.py` | 1260 | Source pane (`GtkSource.View` + `GtkSource.Buffer`). Debounced autosave (`AUTOSAVE_DEBOUNCE_MS`). Stateless w.r.t. notes — reloads from repo on selection change. |
 | `toolbar.py` | 702 | Top `Gtk.HeaderBar` — *New* button, search entry, breadcrumb, View/Source toggle, More menu (Duplicate/Delete). `resolve_target_notebook`, `compute_breadcrumb`, `format_breadcrumb` are extracted as free functions. |
 | `dialogs.py` | 363 | Shared modal dialogs — confirm-delete (a callable matching `ConfirmDialogPresenter`) and `IconPickerPopover`. Production wires `Gtk.AlertDialog`; tests drive callbacks synchronously. |

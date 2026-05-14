@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 import unittest
+from collections.abc import Callable
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from unittest import mock
 
 import gi
 
@@ -13,15 +15,24 @@ gi.require_version("Gtk", "4.0")
 # pylint: disable=wrong-import-position
 from gi.repository import Gdk, Gtk  # noqa: E402
 
-from notes_app.config.defaults import TARGET_CHARS_PER_LINE
+from notes_app.config.defaults import (
+    ARTICLE_BOTTOM_MARGIN_LINES,
+    ARTICLE_INNER_HPADDING_CHARS,
+    ARTICLE_TOP_MARGIN_LINES,
+    TARGET_CHARS_PER_LINE,
+)
 from notes_app.controllers.app_state import AppState
 from notes_app.enums import MimeKind, ParseErrorKind
 from notes_app.models.attachment import Attachment
 from notes_app.models.note import Note
+from notes_app.ui import note_view as note_view_module
 from notes_app.ui.note_view import (
     ArticleContainer,
+    CharWidthMeasurer,
+    LineHeightMeasurer,
     NoteView,
     _FALLBACK_CHAR_WIDTH_PX,
+    _FALLBACK_LINE_HEIGHT_PX,
     _message_for,
     _placeholder_image_bytes,
 )
@@ -39,6 +50,59 @@ def _display_available() -> bool:
     """True iff a GDK display can be opened — required for widget construction."""
     Gtk.init_check()
     return Gdk.Display.get_default() is not None
+
+
+def _fixed_measurer(value: int) -> CharWidthMeasurer:
+    """Return a measurer callable that always reports ``value``.
+
+    Used by the :class:`ArticleContainer` tests below so the two
+    measurer slots (M-width and line-height) can be filled with a
+    fixed integer without writing a lambda per call site. The return
+    type is :data:`CharWidthMeasurer`; :data:`LineHeightMeasurer` has
+    the same shape (``Callable[[], int]``) so the same factory plugs
+    into either slot.
+    """
+    return lambda: value
+
+
+def _make_test_article_container(
+    *,
+    char_w: int = 10,
+    line_h: int = 20,
+) -> ArticleContainer:
+    """Build an :class:`ArticleContainer` wired with fixed measurers.
+
+    Keeps the two-arg construction pattern out of every test that
+    doesn't care about the specific values, while still letting the
+    tests that do care override them.
+    """
+    return ArticleContainer(
+        char_width_measurer=_fixed_measurer(char_w),
+        line_height_measurer=_fixed_measurer(line_h),
+    )
+
+
+def _stub_font_measurers_factory(
+    *,
+    char_w: int,
+    line_h: int,
+) -> Callable[[Gtk.TextView], tuple[CharWidthMeasurer, LineHeightMeasurer]]:
+    """Build a stand-in for :func:`note_view._build_font_measurers`.
+
+    The returned callable matches the production helper's signature
+    so it can be monkey-patched in place, but ignores the live
+    :class:`Gtk.TextView` and returns fixed-value measurers instead.
+    Tests use this to drive :class:`NoteView` construction with
+    deterministic font dimensions, side-stepping the real Pango
+    layout.
+    """
+
+    def build(
+        _text_view: Gtk.TextView,
+    ) -> tuple[CharWidthMeasurer, LineHeightMeasurer]:
+        return (_fixed_measurer(char_w), _fixed_measurer(line_h))
+
+    return build
 
 
 def _make_note(
@@ -190,47 +254,120 @@ class PlaceholderImageBytesTests(unittest.TestCase):
 
 
 @unittest.skipUnless(_display_available(), "no GDK display")
-class ArticleContainerTargetWidthTests(unittest.TestCase):
-    def test_uses_target_chars_per_line_times_measured_glyph(self) -> None:
-        container = ArticleContainer(char_width_measurer=lambda: 12)
+class ArticleContainerWidthGettersTests(unittest.TestCase):
+    """The container exposes two width getters and two unit getters.
+
+    * ``text_column_width`` is the inner *text-area* width — the
+      66-character reading column the renderer lays tables and images
+      against.
+    * ``outer_column_width`` is the widget's actual width — the text
+      area plus the inner horizontal padding on both sides. Used by
+      :meth:`do_measure` and :meth:`do_size_allocate`.
+    * ``char_width_px`` and ``line_height_px`` are the cached measured
+      values that :class:`NoteView` reads when setting the four
+      TextView margins.
+    """
+
+    def test_text_column_width_is_target_chars_times_m_width(self) -> None:
+        container = _make_test_article_container(char_w=10, line_h=20)
         self.assertEqual(
-            container.target_column_width(),
-            TARGET_CHARS_PER_LINE * 12,
+            container.text_column_width(),
+            TARGET_CHARS_PER_LINE * 10,
         )
 
-    def test_measurer_invoked_only_once_across_calls(self) -> None:
-        calls: list[None] = []
+    def test_outer_column_width_includes_horizontal_padding_on_both_sides(
+        self,
+    ) -> None:
+        # outer = (66 + 2 × 8) × 10 = 820. The padding-aware width is
+        # what the size-allocation and measurement vfuncs use; the text
+        # area inside it remains 66 × char_w.
+        container = _make_test_article_container(char_w=10, line_h=20)
+        expected = (TARGET_CHARS_PER_LINE + 2 * ARTICLE_INNER_HPADDING_CHARS) * 10
+        self.assertEqual(container.outer_column_width(), expected)
 
-        def measure() -> int:
-            calls.append(None)
-            return 10
+    def test_outer_minus_text_is_exactly_two_sides_of_padding(self) -> None:
+        # The whole-point invariant of this change: the padding is
+        # absorbed by the column's outer width, so the 66-char text
+        # area is preserved. ``outer - text`` must be exactly
+        # ``2 × ARTICLE_INNER_HPADDING_CHARS × char_w``.
+        container = _make_test_article_container(char_w=10, line_h=20)
+        slack = container.outer_column_width() - container.text_column_width()
+        self.assertEqual(slack, 2 * ARTICLE_INNER_HPADDING_CHARS * 10)
 
-        container = ArticleContainer(char_width_measurer=measure)
-        first = container.target_column_width()
-        second = container.target_column_width()
-        third = container.target_column_width()
+    def test_line_height_px_returns_measured_value(self) -> None:
+        container = _make_test_article_container(char_w=10, line_h=20)
+        self.assertEqual(container.line_height_px(), 20)
 
-        self.assertEqual(first, second)
-        self.assertEqual(second, third)
-        self.assertEqual(len(calls), 1)
+    def test_char_width_px_returns_measured_value(self) -> None:
+        container = _make_test_article_container(char_w=10, line_h=20)
+        self.assertEqual(container.char_width_px(), 10)
 
-    def test_non_positive_measurement_uses_fallback(self) -> None:
+    def test_non_positive_char_width_uses_fallback(self) -> None:
         # A real font's "M" is never zero pixels wide; the fallback
         # exists for the corner case (measuring before the widget has
         # any font at all). A zero result must yield a usable
         # column, not a zero-pixel one.
-        container = ArticleContainer(char_width_measurer=lambda: 0)
+        container = ArticleContainer(
+            char_width_measurer=_fixed_measurer(0),
+            line_height_measurer=_fixed_measurer(20),
+        )
+        self.assertEqual(container.char_width_px(), _FALLBACK_CHAR_WIDTH_PX)
         self.assertEqual(
-            container.target_column_width(),
+            container.text_column_width(),
             TARGET_CHARS_PER_LINE * _FALLBACK_CHAR_WIDTH_PX,
         )
 
-    def test_negative_measurement_uses_fallback(self) -> None:
-        container = ArticleContainer(char_width_measurer=lambda: -3)
-        self.assertEqual(
-            container.target_column_width(),
-            TARGET_CHARS_PER_LINE * _FALLBACK_CHAR_WIDTH_PX,
+    def test_negative_char_width_uses_fallback(self) -> None:
+        container = ArticleContainer(
+            char_width_measurer=_fixed_measurer(-3),
+            line_height_measurer=_fixed_measurer(20),
         )
+        self.assertEqual(container.char_width_px(), _FALLBACK_CHAR_WIDTH_PX)
+
+    def test_non_positive_line_height_uses_fallback(self) -> None:
+        # Symmetric to char_width: a zero measurement must yield the
+        # fallback line height so the container's vertical metrics
+        # remain usable.
+        container = ArticleContainer(
+            char_width_measurer=_fixed_measurer(10),
+            line_height_measurer=_fixed_measurer(0),
+        )
+        self.assertEqual(container.line_height_px(), _FALLBACK_LINE_HEIGHT_PX)
+
+    def test_negative_line_height_uses_fallback(self) -> None:
+        container = ArticleContainer(
+            char_width_measurer=_fixed_measurer(10),
+            line_height_measurer=_fixed_measurer(-5),
+        )
+        self.assertEqual(container.line_height_px(), _FALLBACK_LINE_HEIGHT_PX)
+
+    def test_measurers_are_invoked_at_most_once(self) -> None:
+        # Locks in the caching invariant for both measurers. Calling
+        # every getter ten times must still result in exactly one
+        # invocation per measurer.
+        char_calls: list[None] = []
+        line_calls: list[None] = []
+
+        def char_measure() -> int:
+            char_calls.append(None)
+            return 10
+
+        def line_measure() -> int:
+            line_calls.append(None)
+            return 20
+
+        container = ArticleContainer(
+            char_width_measurer=char_measure,
+            line_height_measurer=line_measure,
+        )
+        for _ in range(10):
+            container.text_column_width()
+            container.outer_column_width()
+            container.char_width_px()
+            container.line_height_px()
+
+        self.assertEqual(len(char_calls), 1)
+        self.assertEqual(len(line_calls), 1)
 
 
 @unittest.skipUnless(_display_available(), "no GDK display")
@@ -241,37 +378,42 @@ class ArticleContainerSizeAllocateTests(unittest.TestCase):
     or exact allocation leaves both margins at 0 (the parent
     :class:`Gtk.ScrolledWindow` is responsible for the horizontal
     scrollbar in that case — the test does not assert on that).
+
+    Note that ``do_size_allocate`` centres against
+    :meth:`ArticleContainer.outer_column_width` (the widget's actual
+    width including inner padding), not against the bare text width —
+    the inner padding is part of the column from the layout's
+    perspective.
     """
 
     def test_wide_window_sets_equal_margins_absorbing_slack(self) -> None:
-        container = ArticleContainer(char_width_measurer=lambda: 10)
-        # target = TARGET_CHARS_PER_LINE * 10
-        target = TARGET_CHARS_PER_LINE * 10
-        allocated = target + 200  # 200 px of slack
+        container = _make_test_article_container(char_w=10, line_h=20)
+        outer = container.outer_column_width()
+        allocated = outer + 200  # 200 px of slack
         container.do_size_allocate(allocated, 600, -1)
 
-        expected_side = (allocated - target) // 2  # 100
+        expected_side = (allocated - outer) // 2  # 100
         self.assertEqual(container.get_margin_start(), expected_side)
         self.assertEqual(container.get_margin_end(), expected_side)
 
     def test_narrow_window_sets_zero_margins(self) -> None:
-        container = ArticleContainer(char_width_measurer=lambda: 10)
-        target = TARGET_CHARS_PER_LINE * 10
-        # Narrower than the target — column does not shrink; outer
-        # ScrolledWindow is responsible for the scrollbar (out of scope
-        # here).
-        container.do_size_allocate(target - 200, 600, -1)
+        container = _make_test_article_container(char_w=10, line_h=20)
+        outer = container.outer_column_width()
+        # Narrower than the outer target — column does not shrink;
+        # outer ScrolledWindow is responsible for the scrollbar (out
+        # of scope here).
+        container.do_size_allocate(outer - 200, 600, -1)
         self.assertEqual(container.get_margin_start(), 0)
         self.assertEqual(container.get_margin_end(), 0)
 
-    def test_exact_target_width_sets_zero_margins(self) -> None:
-        # The boundary: allocated == target → no slack to absorb. The
+    def test_exact_outer_width_sets_zero_margins(self) -> None:
+        # The boundary: allocated == outer → no slack to absorb. The
         # ``>`` (strict) check in the implementation is what produces
         # this; ``>=`` would produce a 0-margin allocation here too,
         # but the strict form makes the equality case explicit.
-        container = ArticleContainer(char_width_measurer=lambda: 10)
-        target = TARGET_CHARS_PER_LINE * 10
-        container.do_size_allocate(target, 600, -1)
+        container = _make_test_article_container(char_w=10, line_h=20)
+        outer = container.outer_column_width()
+        container.do_size_allocate(outer, 600, -1)
         self.assertEqual(container.get_margin_start(), 0)
         self.assertEqual(container.get_margin_end(), 0)
 
@@ -280,23 +422,23 @@ class ArticleContainerSizeAllocateTests(unittest.TestCase):
         # check so the ``queue_resize`` triggered by ``set_margin_*``
         # cannot oscillate. After a stable allocation, repeating it
         # leaves the margins in place.
-        container = ArticleContainer(char_width_measurer=lambda: 10)
-        target = TARGET_CHARS_PER_LINE * 10
-        allocated = target + 80
+        container = _make_test_article_container(char_w=10, line_h=20)
+        outer = container.outer_column_width()
+        allocated = outer + 80
         for _ in range(3):
             container.do_size_allocate(allocated, 400, -1)
-        expected_side = (allocated - target) // 2  # 40
+        expected_side = (allocated - outer) // 2  # 40
         self.assertEqual(container.get_margin_start(), expected_side)
         self.assertEqual(container.get_margin_end(), expected_side)
 
     def test_widening_then_narrowing_resets_margins_to_zero(self) -> None:
-        container = ArticleContainer(char_width_measurer=lambda: 10)
-        target = TARGET_CHARS_PER_LINE * 10
+        container = _make_test_article_container(char_w=10, line_h=20)
+        outer = container.outer_column_width()
         # Wide first.
-        container.do_size_allocate(target + 300, 600, -1)
+        container.do_size_allocate(outer + 300, 600, -1)
         self.assertGreater(container.get_margin_start(), 0)
         # Then narrow — margins must drop back to 0.
-        container.do_size_allocate(target - 100, 600, -1)
+        container.do_size_allocate(outer - 100, 600, -1)
         self.assertEqual(container.get_margin_start(), 0)
         self.assertEqual(container.get_margin_end(), 0)
 
@@ -307,35 +449,40 @@ class ArticleContainerMeasureTests(unittest.TestCase):
     not shrink: the parent ``ScrolledWindow``'s viewport never
     allocates us less than the reported minimum, so a narrow window
     triggers a horizontal scrollbar instead of a smaller column.
+
+    The reported width is :meth:`outer_column_width` (text + inner
+    padding), not the bare text width — the padding is part of the
+    column from the layout's perspective.
     """
 
-    def test_horizontal_minimum_and_natural_equal_target_column_width(
+    def test_horizontal_minimum_and_natural_equal_outer_column_width(
         self,
     ) -> None:
-        container = ArticleContainer(char_width_measurer=lambda: 10)
-        target = TARGET_CHARS_PER_LINE * 10
+        container = _make_test_article_container(char_w=10, line_h=20)
+        outer = container.outer_column_width()
         minimum, natural, _, _ = container.do_measure(
             Gtk.Orientation.HORIZONTAL, -1
         )
-        self.assertEqual(minimum, target)
-        self.assertEqual(natural, target)
+        self.assertEqual(minimum, outer)
+        self.assertEqual(natural, outer)
 
     def test_horizontal_measurement_is_independent_of_for_size(self) -> None:
         # The horizontal width is fixed by the column rule — it must
         # not vary with the cross-axis hint.
-        container = ArticleContainer(char_width_measurer=lambda: 10)
+        container = _make_test_article_container(char_w=10, line_h=20)
+        outer = container.outer_column_width()
         for for_size in (-1, 0, 100, 5000):
             minimum, natural, _, _ = container.do_measure(
                 Gtk.Orientation.HORIZONTAL, for_size,
             )
-            self.assertEqual(minimum, TARGET_CHARS_PER_LINE * 10)
-            self.assertEqual(natural, TARGET_CHARS_PER_LINE * 10)
+            self.assertEqual(minimum, outer)
+            self.assertEqual(natural, outer)
 
     def test_hexpand_is_set_so_wide_viewport_overshoots_natural(self) -> None:
         # ``hexpand`` is what tells a wide ``Viewport`` to allocate us
         # more than our natural width — the precondition for the
         # margin-absorbing branch in ``do_size_allocate``.
-        container = ArticleContainer(char_width_measurer=lambda: 10)
+        container = _make_test_article_container(char_w=10, line_h=20)
         self.assertTrue(container.get_hexpand())
 
 
@@ -428,13 +575,13 @@ class NoteViewSmokeTests(unittest.TestCase):
 # ---------------------------------------------------------------------------
 
 
-def _find_text_view_buffer(view: NoteView) -> Gtk.TextBuffer:
-    """Walk the widget tree and pull out the inner TextView's buffer.
+def _find_text_view(view: NoteView) -> Gtk.TextView:
+    """Walk the widget tree and pull out the inner :class:`Gtk.TextView`.
 
     The structure is ``NoteView → [Revealer →] ScrolledWindow →
     [Viewport →] ArticleContainer → TextView``. From step 16 onwards
     the parse-error banner sits in a :class:`Gtk.Revealer` *prepended*
-    to the vertical box, so the helper now walks past it. The
+    to the vertical box, so the helper walks past it. The
     ``ScrolledWindow`` is the box's *next* sibling.
     ``Gtk.ScrolledWindow`` wraps any non-:class:`Gtk.Scrollable`
     child in a :class:`Gtk.Viewport` automatically; since
@@ -444,7 +591,9 @@ def _find_text_view_buffer(view: NoteView) -> Gtk.TextBuffer:
 
     We walk ``get_first_child`` / ``get_next_sibling`` / ``get_child``
     rather than reaching into private attributes of :class:`NoteView`,
-    so the test stays agnostic to its internal field names.
+    so the test stays agnostic to its internal field names. Returning
+    the ``Gtk.TextView`` itself lets margin-wiring tests read the four
+    margin properties via the documented public API.
     """
     first = view.get_first_child()
     # The banner revealer (step 16+) is the very first child. Hop
@@ -469,7 +618,16 @@ def _find_text_view_buffer(view: NoteView) -> Gtk.TextBuffer:
     assert isinstance(text_view, Gtk.TextView), (
         f"article child should be a TextView, got {type(text_view).__name__}"
     )
-    return text_view.get_buffer()
+    return text_view
+
+
+def _find_text_view_buffer(view: NoteView) -> Gtk.TextBuffer:
+    """Return the rendered TextView's buffer.
+
+    Thin wrapper over :func:`_find_text_view` that exists because most
+    of the existing tests reach for the buffer rather than the widget.
+    """
+    return _find_text_view(view).get_buffer()
 
 
 # ---------------------------------------------------------------------------
@@ -637,6 +795,130 @@ class NoteViewAttachmentSmokeTests(unittest.TestCase):
         state = AppState()
         view = NoteView(note_repository=repo, app_state=state)
         self.assertEqual(view.image_bytes_resolver("any.png"), b"")
+
+
+# ---------------------------------------------------------------------------
+# NoteView margin wiring + renderer column-width wiring
+# ---------------------------------------------------------------------------
+
+
+@unittest.skipUnless(_display_available(), "no GDK display")
+class NoteViewMarginWiringTests(unittest.TestCase):
+    """Pin the four breathing-space margins on the rendered-view
+    ``Gtk.TextView``.
+
+    Stubbing :func:`note_view._build_font_measurers` (the single seam
+    that constructs the production Pango measurers) lets the tests
+    drive ``NoteView.__init__`` with deterministic font dimensions —
+    fixed integer char-width and line-height — so the resulting
+    margin values are exact rather than font-dependent.
+    """
+
+    def _build_view_with_stubbed_font(
+        self, *, char_w: int, line_h: int,
+    ) -> NoteView:
+        repo = _FakeNoteRepository()
+        state = AppState()
+        with mock.patch.object(
+            note_view_module,
+            "_build_font_measurers",
+            _stub_font_measurers_factory(char_w=char_w, line_h=line_h),
+        ):
+            return NoteView(note_repository=repo, app_state=state)
+
+    def test_textview_top_margin_is_four_line_heights(self) -> None:
+        view = self._build_view_with_stubbed_font(char_w=10, line_h=20)
+        text_view = _find_text_view(view)
+        self.assertEqual(
+            text_view.get_top_margin(),
+            ARTICLE_TOP_MARGIN_LINES * 20,
+        )
+
+    def test_textview_bottom_margin_is_four_line_heights(self) -> None:
+        view = self._build_view_with_stubbed_font(char_w=10, line_h=20)
+        text_view = _find_text_view(view)
+        self.assertEqual(
+            text_view.get_bottom_margin(),
+            ARTICLE_BOTTOM_MARGIN_LINES * 20,
+        )
+
+    def test_textview_left_margin_is_eight_char_widths(self) -> None:
+        view = self._build_view_with_stubbed_font(char_w=10, line_h=20)
+        text_view = _find_text_view(view)
+        self.assertEqual(
+            text_view.get_left_margin(),
+            ARTICLE_INNER_HPADDING_CHARS * 10,
+        )
+
+    def test_textview_right_margin_is_eight_char_widths(self) -> None:
+        view = self._build_view_with_stubbed_font(char_w=10, line_h=20)
+        text_view = _find_text_view(view)
+        self.assertEqual(
+            text_view.get_right_margin(),
+            ARTICLE_INNER_HPADDING_CHARS * 10,
+        )
+
+    def test_margins_scale_with_measured_font_dimensions(self) -> None:
+        # Doubling the measured font dimensions doubles every margin
+        # — the wiring reads cached measurements, not a constant.
+        view_small = self._build_view_with_stubbed_font(char_w=10, line_h=20)
+        view_large = self._build_view_with_stubbed_font(char_w=20, line_h=40)
+        tv_small = _find_text_view(view_small)
+        tv_large = _find_text_view(view_large)
+
+        self.assertEqual(tv_large.get_left_margin(), 2 * tv_small.get_left_margin())
+        self.assertEqual(tv_large.get_right_margin(), 2 * tv_small.get_right_margin())
+        self.assertEqual(tv_large.get_top_margin(), 2 * tv_small.get_top_margin())
+        self.assertEqual(tv_large.get_bottom_margin(), 2 * tv_small.get_bottom_margin())
+
+
+@unittest.skipUnless(_display_available(), "no GDK display")
+class NoteViewRendererWiringTests(unittest.TestCase):
+    """The renderer must be fed the *text* column width — not the
+    outer (padded) width — so tables and images continue to lay out
+    against the 66-character reading column the user actually sees,
+    independent of the inner horizontal padding.
+    """
+
+    def _build_view_with_stubbed_font(
+        self, *, char_w: int, line_h: int,
+    ) -> NoteView:
+        repo = _FakeNoteRepository()
+        state = AppState()
+        with mock.patch.object(
+            note_view_module,
+            "_build_font_measurers",
+            _stub_font_measurers_factory(char_w=char_w, line_h=line_h),
+        ):
+            return NoteView(note_repository=repo, app_state=state)
+
+    def test_renderer_receives_text_column_width_not_outer(self) -> None:
+        # char_w=10 → text width = 66 × 10 = 660; outer width =
+        # (66 + 2 × 8) × 10 = 820. The wired column-width resolver
+        # must report 660 — the text width, not the outer.
+        view = self._build_view_with_stubbed_font(char_w=10, line_h=20)
+        # Reading the renderer's private column-width callable is
+        # fine here — the test files have ``protected-access``
+        # disabled, and both attributes are typed on their respective
+        # classes so mypy is happy. There is no public introspection
+        # surface for the renderer's wiring.
+        column_width_callable = view._renderer._column_width_px
+        self.assertEqual(column_width_callable(), TARGET_CHARS_PER_LINE * 10)
+
+    def test_horizontal_padding_does_not_change_text_width(self) -> None:
+        # Two NoteViews with different char widths — the renderer's
+        # wired callable must scale linearly with char_w, and in
+        # particular must return exactly 66 × char_w in each (no
+        # contamination from the 2 × 8 padding term that bumps the
+        # outer width).
+        for char_w in (10, 20):
+            view = self._build_view_with_stubbed_font(char_w=char_w, line_h=20)
+            column_width_callable = view._renderer._column_width_px
+            with self.subTest(char_w=char_w):
+                self.assertEqual(
+                    column_width_callable(),
+                    TARGET_CHARS_PER_LINE * char_w,
+                )
 
 
 # ---------------------------------------------------------------------------

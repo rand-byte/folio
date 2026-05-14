@@ -15,6 +15,16 @@ Principles & invariants
   ``TARGET_CHARS_PER_LINE`` × measured glyph width and cached. Changing
   this value is a typography decision, not a runtime tuning knob, so it is
   intentionally not exposed in any settings panel in v1.
+* The three ``ARTICLE_*`` margin multipliers parameterise the four
+  breathing-space margins applied to the rendered-view ``Gtk.TextView``
+  (top / bottom above-and-below content, plus inner horizontal padding
+  between the article column's edge and the text). Values are expressed
+  in font-relative units: top / bottom are multiples of the body font's
+  measured line height, the inner horizontal padding is a multiple of
+  the body font's "M" glyph width. Like ``TARGET_CHARS_PER_LINE`` these
+  are typography decisions — the live measurement happens once per font
+  in the UI layer, the result is cached for the container's lifetime,
+  and the values are intentionally not exposed in any settings panel.
 * :data:`SEED_NOTEBOOKS` and :data:`SEED_WELCOME_NOTE_SOURCE` are written
   to a fresh database by the v1 migration. They are never re-applied: a
   user who deletes the welcome note must not see it reappear on the next
@@ -45,6 +55,26 @@ The 66-character target follows the typography literature's 45–75 range
 for comfortable prose reading. The :class:`ArticleContainer` widget uses
 this constant, multiplied by the measured glyph width of the current
 font, as the fixed pixel width of the article column.
+"""
+
+ARTICLE_TOP_MARGIN_LINES: int = 4
+"""Vertical breathing space above the first rendered content, expressed
+as a multiple of the body font's line height. Applied as
+``top-margin`` on the rendered-view ``Gtk.TextView``.
+"""
+
+ARTICLE_BOTTOM_MARGIN_LINES: int = 4
+"""Vertical breathing space below the last rendered content, same units
+as :data:`ARTICLE_TOP_MARGIN_LINES`. Kept symmetric so scrolling to the
+end of a note does not slam the final paragraph into the viewport edge.
+"""
+
+ARTICLE_INNER_HPADDING_CHARS: int = 8
+"""Inner horizontal padding between the article column's edge and the
+text, expressed as a multiple of the body font's ``"M"`` glyph width.
+Applied as ``left-margin`` / ``right-margin`` on the rendered-view
+``Gtk.TextView``. Doubled in the column's outer width calculation so the
+text area stays at :data:`TARGET_CHARS_PER_LINE` characters wide.
 """
 
 
