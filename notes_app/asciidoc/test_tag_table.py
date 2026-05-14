@@ -13,8 +13,33 @@ from gi.repository import Gtk, Pango  # noqa: E402
 
 from notes_app.asciidoc.tag_table import (
     TagName,
+    admonition_body_tag_name,
+    admonition_kind_tag_name,
+    admonition_label_tag_name,
     build_tag_table,
     heading_tag_name,
+)
+from notes_app.enums import AdmonitionKind
+
+
+# Tag names that carry a paragraph-background tint. The renderer applies
+# these as paragraph tags across the inserted range, so the
+# ``paragraph-background-rgba`` property must be set on each. Listed in
+# one place here so a future "new block kind with a tint" adds itself
+# to the list rather than tweaking every test that iterates it.
+_PARAGRAPH_BACKGROUND_TAGS: tuple[TagName, ...] = (
+    TagName.ADMONITION_NOTE_LABEL,
+    TagName.ADMONITION_TIP_LABEL,
+    TagName.ADMONITION_IMPORTANT_LABEL,
+    TagName.ADMONITION_WARNING_LABEL,
+    TagName.ADMONITION_CAUTION_LABEL,
+    TagName.ADMONITION_NOTE_BODY,
+    TagName.ADMONITION_TIP_BODY,
+    TagName.ADMONITION_IMPORTANT_BODY,
+    TagName.ADMONITION_WARNING_BODY,
+    TagName.ADMONITION_CAUTION_BODY,
+    TagName.BLOCKQUOTE_BODY,
+    TagName.CODE_BLOCK,
 )
 
 
@@ -30,6 +55,20 @@ class TagNameTests(unittest.TestCase):
         self.assertEqual(TagName.LINK.value, "link")
         self.assertEqual(TagName.HEADING_0.value, "heading_0")
         self.assertEqual(TagName.HEADING_6.value, "heading_6")
+        self.assertEqual(
+            TagName.ADMONITION_NOTE_LABEL.value, "admonition_note_label"
+        )
+        self.assertEqual(
+            TagName.ADMONITION_NOTE_BODY.value, "admonition_note_body"
+        )
+        self.assertEqual(
+            TagName.ADMONITION_NOTE_KIND.value, "admonition_note_kind"
+        )
+        self.assertEqual(TagName.BLOCKQUOTE_BODY.value, "blockquote_body")
+        self.assertEqual(
+            TagName.BLOCKQUOTE_ATTRIBUTION.value, "blockquote_attribution"
+        )
+        self.assertEqual(TagName.CODE_BLOCK.value, "code_block")
 
     def test_no_heading_1_member(self) -> None:
         # The parser produces level-0 (Document.title) and 2..6
@@ -53,6 +92,24 @@ class TagNameTests(unittest.TestCase):
             "HEADING_4",
             "HEADING_5",
             "HEADING_6",
+            "ADMONITION_NOTE_LABEL",
+            "ADMONITION_TIP_LABEL",
+            "ADMONITION_IMPORTANT_LABEL",
+            "ADMONITION_WARNING_LABEL",
+            "ADMONITION_CAUTION_LABEL",
+            "ADMONITION_NOTE_BODY",
+            "ADMONITION_TIP_BODY",
+            "ADMONITION_IMPORTANT_BODY",
+            "ADMONITION_WARNING_BODY",
+            "ADMONITION_CAUTION_BODY",
+            "ADMONITION_NOTE_KIND",
+            "ADMONITION_TIP_KIND",
+            "ADMONITION_IMPORTANT_KIND",
+            "ADMONITION_WARNING_KIND",
+            "ADMONITION_CAUTION_KIND",
+            "BLOCKQUOTE_BODY",
+            "BLOCKQUOTE_ATTRIBUTION",
+            "CODE_BLOCK",
         }
         self.assertEqual(set(TagName.__members__), expected)
 
@@ -81,6 +138,46 @@ class HeadingTagNameTests(unittest.TestCase):
             with self.subTest(level=level):
                 with self.assertRaises(KeyError):
                     heading_tag_name(level)
+
+
+class AdmonitionTagNameLookupTests(unittest.TestCase):
+    """The (kind → label / body / kind-character tag) mappings are exhaustive.
+
+    Iterates :class:`AdmonitionKind` so adding a new admonition kind
+    without extending the per-kind tables in :mod:`tag_table` fails the
+    test rather than producing a silently-unstyled admonition.
+    """
+
+    def test_every_kind_resolves_to_a_label_tag_name(self) -> None:
+        for kind in AdmonitionKind:
+            with self.subTest(kind=kind):
+                self.assertIsInstance(admonition_label_tag_name(kind), TagName)
+
+    def test_every_kind_resolves_to_a_body_tag_name(self) -> None:
+        for kind in AdmonitionKind:
+            with self.subTest(kind=kind):
+                self.assertIsInstance(admonition_body_tag_name(kind), TagName)
+
+    def test_every_kind_resolves_to_a_kind_character_tag_name(self) -> None:
+        for kind in AdmonitionKind:
+            with self.subTest(kind=kind):
+                self.assertIsInstance(admonition_kind_tag_name(kind), TagName)
+
+    def test_label_and_body_tags_are_distinct_per_kind(self) -> None:
+        # The two paragraph roles must produce different names so the
+        # renderer can apply them to different lines.
+        for kind in AdmonitionKind:
+            with self.subTest(kind=kind):
+                self.assertNotEqual(
+                    admonition_label_tag_name(kind),
+                    admonition_body_tag_name(kind),
+                )
+
+    def test_kind_tags_are_distinct_across_kinds(self) -> None:
+        # The character tag for the kind label is per-kind so each
+        # admonition's foreground accent is independent.
+        names = {admonition_kind_tag_name(k) for k in AdmonitionKind}
+        self.assertEqual(len(names), len(list(AdmonitionKind)))
 
 
 class BuildTagTableStructureTests(unittest.TestCase):
@@ -236,6 +333,156 @@ class HeadingTagPropertyTests(unittest.TestCase):
         h0 = self.table.lookup(TagName.HEADING_0.value).get_property("scale")
         h2 = self.table.lookup(TagName.HEADING_2.value).get_property("scale")
         self.assertGreater(h0, h2)
+
+
+class ParagraphBackgroundPropertyTests(unittest.TestCase):
+    """Every paragraph-tinted tag carries the ``paragraph-background-rgba`` prop.
+
+    These tags are the renderer's only way to paint a tinted background
+    behind a block — the existence of the property is the structural
+    invariant. The exact RGBA values are deliberately not asserted; they
+    live as private constants in :mod:`tag_table` and are tweakable.
+    """
+
+    def setUp(self) -> None:
+        self.table = build_tag_table()
+
+    def test_every_paragraph_background_tag_has_the_property_set(self) -> None:
+        for name in _PARAGRAPH_BACKGROUND_TAGS:
+            with self.subTest(name=name):
+                tag = self.table.lookup(name.value)
+                self.assertTrue(
+                    tag.get_property("paragraph-background-set"),
+                    f"{name!r} missing paragraph-background",
+                )
+
+
+class AdmonitionTagPropertyTests(unittest.TestCase):
+    """Admonition tags carry the visual properties the layout requires."""
+
+    def setUp(self) -> None:
+        self.table = build_tag_table()
+
+    def test_every_label_paragraph_tag_has_left_and_right_margins(self) -> None:
+        for kind in AdmonitionKind:
+            with self.subTest(kind=kind):
+                tag = self.table.lookup(admonition_label_tag_name(kind).value)
+                self.assertGreater(tag.get_property("left-margin"), 0)
+                self.assertGreater(tag.get_property("right-margin"), 0)
+
+    def test_every_body_paragraph_tag_has_left_and_right_margins(self) -> None:
+        for kind in AdmonitionKind:
+            with self.subTest(kind=kind):
+                tag = self.table.lookup(admonition_body_tag_name(kind).value)
+                self.assertGreater(tag.get_property("left-margin"), 0)
+                self.assertGreater(tag.get_property("right-margin"), 0)
+
+    def test_label_paragraph_has_top_padding(self) -> None:
+        # The block's top margin lives on the label paragraph so the
+        # NOTE / TIP / … label has air above it.
+        for kind in AdmonitionKind:
+            with self.subTest(kind=kind):
+                tag = self.table.lookup(admonition_label_tag_name(kind).value)
+                self.assertGreater(tag.get_property("pixels-above-lines"), 0)
+
+    def test_body_paragraph_has_bottom_padding(self) -> None:
+        # The block's bottom margin lives on the body paragraph so the
+        # last body line has air below it.
+        for kind in AdmonitionKind:
+            with self.subTest(kind=kind):
+                tag = self.table.lookup(admonition_body_tag_name(kind).value)
+                self.assertGreater(tag.get_property("pixels-below-lines"), 0)
+
+    def test_every_kind_character_tag_is_bold(self) -> None:
+        for kind in AdmonitionKind:
+            with self.subTest(kind=kind):
+                tag = self.table.lookup(admonition_kind_tag_name(kind).value)
+                self.assertEqual(tag.get_property("weight"), Pango.Weight.BOLD)
+
+    def test_every_kind_character_tag_has_foreground_set(self) -> None:
+        for kind in AdmonitionKind:
+            with self.subTest(kind=kind):
+                tag = self.table.lookup(admonition_kind_tag_name(kind).value)
+                self.assertTrue(tag.get_property("foreground-set"))
+
+    def test_paragraph_tags_do_not_set_weight_or_family(self) -> None:
+        # The paragraph tags carry layout only; inline composition (bold
+        # / italic / monospace inside admonition bodies) must work via
+        # the existing inline tags, so the paragraph tags must not
+        # stamp those properties of their own.
+        for kind in AdmonitionKind:
+            with self.subTest(kind=kind):
+                for name in (
+                    admonition_label_tag_name(kind),
+                    admonition_body_tag_name(kind),
+                ):
+                    tag = self.table.lookup(name.value)
+                    self.assertFalse(tag.get_property("weight-set"))
+                    self.assertFalse(tag.get_property("family-set"))
+
+
+class BlockquoteTagPropertyTests(unittest.TestCase):
+    """Blockquote body and attribution tags."""
+
+    def setUp(self) -> None:
+        self.table = build_tag_table()
+
+    def test_body_has_left_margin_indent(self) -> None:
+        # The indent is what distinguishes a quote from running prose.
+        tag = self.table.lookup(TagName.BLOCKQUOTE_BODY.value)
+        self.assertGreater(tag.get_property("left-margin"), 0)
+
+    def test_body_does_not_set_italic_style(self) -> None:
+        # Italic composes via the shared ITALIC tag — the body tag must
+        # leave the style property alone so the composition is clean.
+        tag = self.table.lookup(TagName.BLOCKQUOTE_BODY.value)
+        self.assertFalse(tag.get_property("style-set"))
+
+    def test_attribution_has_left_margin_matching_body(self) -> None:
+        # The attribution sits flush with the body indent so the
+        # citation reads as part of the quote block.
+        body = self.table.lookup(TagName.BLOCKQUOTE_BODY.value)
+        attr = self.table.lookup(TagName.BLOCKQUOTE_ATTRIBUTION.value)
+        self.assertEqual(
+            attr.get_property("left-margin"),
+            body.get_property("left-margin"),
+        )
+
+    def test_attribution_is_right_justified(self) -> None:
+        tag = self.table.lookup(TagName.BLOCKQUOTE_ATTRIBUTION.value)
+        self.assertEqual(
+            tag.get_property("justification"),
+            Gtk.Justification.RIGHT,
+        )
+
+    def test_attribution_scale_is_less_than_one(self) -> None:
+        # Smaller scale so the citation reads as secondary metadata.
+        tag = self.table.lookup(TagName.BLOCKQUOTE_ATTRIBUTION.value)
+        self.assertTrue(tag.get_property("scale-set"))
+        self.assertLess(tag.get_property("scale"), 1.0)
+
+
+class CodeBlockTagPropertyTests(unittest.TestCase):
+    """Code-block tag carries layout but not the monospace family."""
+
+    def setUp(self) -> None:
+        self.table = build_tag_table()
+
+    def test_has_paragraph_background(self) -> None:
+        tag = self.table.lookup(TagName.CODE_BLOCK.value)
+        self.assertTrue(tag.get_property("paragraph-background-set"))
+
+    def test_has_left_and_right_margins(self) -> None:
+        tag = self.table.lookup(TagName.CODE_BLOCK.value)
+        self.assertGreater(tag.get_property("left-margin"), 0)
+        self.assertGreater(tag.get_property("right-margin"), 0)
+
+    def test_does_not_set_monospace_family(self) -> None:
+        # Monospace family comes from the shared MONOSPACE tag, layered
+        # on top by the renderer. Setting it here would conflict with
+        # that composition strategy.
+        tag = self.table.lookup(TagName.CODE_BLOCK.value)
+        self.assertFalse(tag.get_property("family-set"))
 
 
 if __name__ == "__main__":

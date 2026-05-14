@@ -12,29 +12,42 @@ Principles & invariants
   call. There is no incremental-update path: the source change → AST →
   buffer pipeline is short enough that "rebuild" is the cheapest
   consistent strategy.
-* Block embeds (images, code blocks) are inserted via
-  :class:`Gtk.TextChildAnchor`. The renderer creates the anchor on the
-  buffer and then constructs the corresponding child widget. Because a
-  child widget is only visible once it has been *attached* to the
-  parent :class:`Gtk.TextView` via
-  :meth:`Gtk.TextView.add_child_at_anchor`, the renderer accepts an
-  ``attach_widget`` callback as the testability seam: production wires
-  it to ``text_view.add_child_at_anchor``, tests pass a list-collector.
-* Image bytes are resolved through :data:`ImageBytesResolver`. Decode
-  failures (``GLib.Error`` from :meth:`Gdk.Texture.new_from_bytes`)
-  produce a tiny placeholder widget rather than aborting the whole
-  render. Any other resolver exception propagates — a missing
-  attachment is the resolver's contract violation, not the renderer's
-  to translate.
+* **Block-level constructs render as styled paragraphs in the buffer
+  wherever the styling primitive set allows; only tables escape to an
+  anchored widget.** Admonitions, blockquotes, and code blocks are
+  inserted directly into the buffer with paragraph tags that carry the
+  background tint, margins, and padding. Images are inserted via
+  :meth:`Gtk.TextBuffer.insert_paintable` so they participate in the
+  buffer's native selection model. Only tables remain as anchored
+  widgets, because :class:`Gtk.TextTag` has no grid primitive — and
+  because anchored children do not honour ``hexpand``, the table
+  widget is forced to fill the column width via an explicit
+  ``set_size_request`` (see :func:`_build_table_widget`).
+* The selection contract follows from the above: drag-select works
+  across all prose, headings, lists, admonitions, blockquotes, code
+  blocks, and images; ``Ctrl+A`` selects everything; ``Ctrl+C`` copies
+  the buffer text unchanged. The only break is the table boundary,
+  matching browser ``<table>`` selection behaviour.
+* Images use a private :class:`_ScaledImagePaintable` that wraps a
+  :class:`Gdk.Texture` and reports
+  ``min(texture_width, column_width_px)`` as its intrinsic width, with
+  height scaled proportionally. The texture is the actual drawing —
+  the wrapper exists only to constrain intrinsic dimensions so a
+  large image doesn't overflow the article column. Decode failures
+  (``GLib.Error`` from :meth:`Gdk.Texture.new_from_bytes`) produce a
+  :class:`_PlaceholderImagePaintable` instead — a tiny grey rectangle
+  that signals the missing image without aborting the whole render.
 * The :data:`ColumnWidthResolver` is read once per render (callers can
-  call :meth:`render_into` again after a column-width change). Step 14
-  introduced the first block that actually consults it: tables, whose
-  cell ``Gtk.Label``s use ``max-width-chars`` derived from the live
-  column width and the ``[cols="…"]`` proportions so the table fits
-  the article column without an internal scrollbar. Step 15 reuses the
-  same column-width-aware ``Gtk.Label`` strategy for admonition and
-  blockquote bodies — paragraphs are rendered as Pango-markup labels
-  that wrap at the column width, the same way table cells do.
+  call :meth:`render_into` again after a column-width change). It is
+  consulted by both the image and table paths: tables get their width
+  via ``set_size_request``, images via the
+  :class:`_ScaledImagePaintable` constructor.
+* Tables retain a child anchor + widget because no clean paragraph-tag
+  expression of a grid exists. The :class:`WidgetAttacher` callback is
+  still part of :meth:`render_into`'s surface for this reason — tests
+  may pass a no-op collector and admonition / blockquote / code-block /
+  image cases will still render correctly since they no longer require
+  the attacher.
 * Inline runs are emitted with a tag stack. A run of plain
   :class:`Text` records its start offset, inserts text, and applies
   every tag currently on the stack to the inserted range. This makes
@@ -65,8 +78,8 @@ Principles & invariants
 # The module's size reflects the breadth of block kinds the renderer
 # handles end-to-end: heading, paragraph, ordered/unordered lists,
 # code block, image, table, admonition, and blockquote — each with
-# its own widget-builder helper, plus the inline-tag application
-# code, the Pango-markup helper, and the cross-cutting column-width
+# its own emit helper, plus the inline-tag application code, the
+# Pango-markup helper (for table cells), and the column-width
 # arithmetic. Splitting solely to satisfy the line counter would
 # scatter helpers that share private constants and conventions.
 # pylint: disable=too-many-lines
@@ -79,8 +92,9 @@ import gi
 
 gi.require_version("Gtk", "4.0")
 gi.require_version("Gdk", "4.0")
+gi.require_version("Graphene", "1.0")
 # pylint: disable=wrong-import-position
-from gi.repository import Gdk, GLib, Gtk  # noqa: E402
+from gi.repository import Gdk, GLib, GObject, Graphene, Gtk  # noqa: E402
 
 from notes_app.asciidoc.ast import (
     Admonition,
@@ -104,7 +118,13 @@ from notes_app.asciidoc.ast import (
     UnorderedList,
 )
 from notes_app.asciidoc.parser import parse
-from notes_app.asciidoc.tag_table import TagName, heading_tag_name
+from notes_app.asciidoc.tag_table import (
+    TagName,
+    admonition_body_tag_name,
+    admonition_kind_tag_name,
+    admonition_label_tag_name,
+    heading_tag_name,
+)
 from notes_app.config.defaults import TARGET_CHARS_PER_LINE
 from notes_app.storage.protocols import ColumnWidthResolver, ImageBytesResolver
 
@@ -119,7 +139,9 @@ type WidgetAttacher = Callable[[Gtk.TextChildAnchor, Gtk.Widget], None]
 Production wires this to :meth:`Gtk.TextView.add_child_at_anchor` of the
 note-view widget. Tests pass a list-collector that records every
 ``(anchor, widget)`` pair so assertions can introspect what would have
-been displayed without a live :class:`Gtk.TextView`.
+been displayed without a live :class:`Gtk.TextView`. After block-level
+constructs other than tables moved into the buffer, this callback is
+only invoked for tables.
 """
 
 
@@ -150,36 +172,26 @@ _TABLE_COLUMN_SPACING: int = 12
 _TABLE_ROW_SPACING: int = 4
 _TABLE_CELL_PADDING: int = 4
 
-# Spacing and padding inside a rendered admonition / blockquote.
-# Pixel values applied to the inner Gtk.Box that hosts the header
-# (admonition) or the body+attribution (blockquote). Kept as module
-# constants so visual tweaks are one edit; tests assert against these
-# specific values when introspecting widget layout.
-_ADMONITION_BODY_SPACING: int = 6
-_ADMONITION_BODY_PADDING: int = 8
-_BLOCKQUOTE_BODY_SPACING: int = 6
-_BLOCKQUOTE_BODY_PADDING: int = 8
-
-# CSS classes the admonition / blockquote widgets carry so an
-# application stylesheet can target them. The renderer adds these to
-# the produced widgets via ``Gtk.Widget.add_css_class``; the
-# stylesheet that styles them ships in :mod:`notes_app.ui.css.app_css`
-# from build step 12 onward. The names live here so they are imported
-# from one place by both the renderer and any future test that
-# verifies a particular class is set.
-_ADMONITION_FRAME_CSS_CLASS: str = "admonition"
-_ADMONITION_HEADER_CSS_CLASS: str = "admonition-header"
-_ADMONITION_BODY_CSS_CLASS: str = "admonition-body"
-_BLOCKQUOTE_FRAME_CSS_CLASS: str = "blockquote"
-_BLOCKQUOTE_BODY_CSS_CLASS: str = "blockquote-body"
-_BLOCKQUOTE_ATTRIBUTION_CSS_CLASS: str = "blockquote-attribution"
-
-# The bullet character that separates the attribution dash from the
-# author/source on a blockquote. An en-dash matches typographic
-# conventions for citations; using a Unicode literal keeps the source
-# readable and avoids HTML-escape gymnastics.
+# Prefix and separator for the blockquote attribution string. An en-dash
+# matches typographic conventions for citations; using Unicode literals
+# keeps the source readable and avoids HTML-escape gymnastics.
 _BLOCKQUOTE_ATTRIBUTION_PREFIX: str = "— "
 _BLOCKQUOTE_ATTRIBUTION_SEPARATOR: str = ", "
+
+# Intrinsic dimensions for the placeholder paintable shown when an
+# image fails to decode. Kept small and visually neutral so the
+# document remains readable around the failure.
+_PLACEHOLDER_PAINTABLE_WIDTH_PX: int = 48
+_PLACEHOLDER_PAINTABLE_HEIGHT_PX: int = 48
+
+# RGBA for the placeholder paintable's fill. Mid-grey at moderate
+# alpha so it shows on both light and dark themes without screaming.
+_PLACEHOLDER_PAINTABLE_RGBA: tuple[float, float, float, float] = (
+    0.6,
+    0.6,
+    0.6,
+    0.5,
+)
 
 
 class TextBufferRenderer:
@@ -187,7 +199,7 @@ class TextBufferRenderer:
 
     Construction-time dependencies (the two resolvers and the tag
     table) are injected. Tests swap in fakes; production wires them up
-    in the ``ui/note_view`` module from build step 8 onward.
+    in the ``ui/note_view`` module.
     """
 
     _image_bytes_for: ImageBytesResolver
@@ -225,22 +237,22 @@ class TextBufferRenderer:
         """Parse ``source`` and rebuild ``buffer`` to reflect the AST.
 
         ``note_id`` is part of the protocol surface so future caching
-        and diagnostics can key on it; step 6 does not yet use it.
+        and diagnostics can key on it; the current step does not yet
+        use it.
 
         ``attach_widget`` is an optional hook called once per child
-        anchor. When ``None``, anchors are still created but the
-        produced widgets are dropped on the floor — useful for
-        text/tag-only assertions that do not care about the embedded
-        widgets.
+        anchor (only used for tables in the current build). When
+        ``None``, anchors are still created but the produced widgets
+        are dropped on the floor — useful for text/tag-only assertions
+        that do not care about the embedded table widgets.
         """
         document = parse(source)  # may raise ParseError
         attacher = attach_widget if attach_widget is not None else _noop_attacher
         buffer.set_text("")
         if buffer.get_tag_table() is not self._tag_table:
             # The tag table is part of the buffer's identity in GTK 4.
-            # Step 6 leaves it the caller's job to build the buffer
-            # with the correct table; we sanity-check rather than
-            # mutate. A mismatch is a wiring bug, not a runtime fault.
+            # We sanity-check rather than mutate. A mismatch is a wiring
+            # bug, not a runtime fault.
             raise ValueError(
                 "buffer's tag table is not the renderer's tag table",
             )
@@ -321,15 +333,15 @@ class TextBufferRenderer:
         elif isinstance(block, OrderedList):
             self._emit_ordered_list(buffer, block)
         elif isinstance(block, CodeBlock):
-            self._emit_code_block(buffer, block, attacher)
+            self._emit_code_block(buffer, block)
         elif isinstance(block, Image):
-            self._emit_image(buffer, block, attacher)
+            self._emit_image(buffer, block)
         elif isinstance(block, Table):
             self._emit_table(buffer, block, attacher)
         elif isinstance(block, Admonition):
-            self._emit_admonition(buffer, block, attacher)
+            self._emit_admonition(buffer, block)
         elif isinstance(block, Blockquote):
-            self._emit_blockquote(buffer, block, attacher)
+            self._emit_blockquote(buffer, block)
         else:
             # Exhaustive over the current :data:`BlockNode` union. New
             # block kinds must extend this dispatch — the ``else`` makes
@@ -412,22 +424,74 @@ class TextBufferRenderer:
         self,
         buffer: Gtk.TextBuffer,
         code_block: CodeBlock,
-        attacher: WidgetAttacher,
     ) -> None:
-        anchor = buffer.create_child_anchor(buffer.get_end_iter())
-        widget = _build_code_block_widget(code_block.content)
-        attacher(anchor, widget)
-        buffer.insert(buffer.get_end_iter(), _BLOCK_SEPARATOR)
+        """Insert a code block as a tinted, monospace paragraph range.
+
+        The content is inserted verbatim. Two tags are layered across
+        the same range: :data:`TagName.CODE_BLOCK` for the paragraph
+        background tint and side margins, and :data:`TagName.MONOSPACE`
+        for the monospace family. The outer ``Gtk.TextView`` already
+        sets ``wrap-mode = WORD_CHAR``, so unwrappably-long lines
+        soft-wrap inside the column — no horizontal scrollbar, no wrap
+        indicator (deferred). Copy through the block yields the
+        original source unchanged.
+        """
+        if not code_block.content:
+            buffer.insert(buffer.get_end_iter(), _BLOCK_SEPARATOR)
+            return
+        start_offset = buffer.get_end_iter().get_offset()
+        buffer.insert(buffer.get_end_iter(), code_block.content)
+        # Terminate with a newline so the paragraph tag's
+        # paragraph-background-rgba paints to the line edge on the last
+        # source line of the block.
+        buffer.insert(buffer.get_end_iter(), "\n")
+        end_offset = buffer.get_end_iter().get_offset()
+        start_iter = buffer.get_iter_at_offset(start_offset)
+        end_iter = buffer.get_iter_at_offset(end_offset)
+        buffer.apply_tag(self._tag(TagName.CODE_BLOCK), start_iter, end_iter)
+        buffer.apply_tag(self._tag(TagName.MONOSPACE), start_iter, end_iter)
+        buffer.insert(buffer.get_end_iter(), "\n")
 
     def _emit_image(
         self,
         buffer: Gtk.TextBuffer,
         image: Image,
-        attacher: WidgetAttacher,
     ) -> None:
-        anchor = buffer.create_child_anchor(buffer.get_end_iter())
-        widget = self._build_image_widget(image.filename)
-        attacher(anchor, widget)
+        """Insert an image as an inline paintable.
+
+        Bytes are resolved through the injected
+        :data:`ImageBytesResolver`. On a successful decode, the
+        texture is wrapped in :class:`_ScaledImagePaintable` so its
+        intrinsic width is capped at the live column width — large
+        images therefore scale down to fit the article column rather
+        than overflowing it. On ``GLib.Error`` from
+        :meth:`Gdk.Texture.new_from_bytes` (corrupted bytes, unknown
+        format, empty payload, …) the renderer inserts a
+        :class:`_PlaceholderImagePaintable` instead so the document
+        remains readable. Any other resolver exception propagates —
+        a missing attachment is the resolver's contract violation,
+        not the renderer's to translate.
+
+        Paintables occupy exactly one buffer offset, so selection
+        across an image yields the surrounding text unchanged and the
+        image contributes no characters to a ``Ctrl+C`` copy.
+        """
+        column_width_px = self._column_width_px()
+        data = self._image_bytes_for(image.filename)
+        try:
+            # pylint trips on ``GLib.Bytes.new`` via gi-introspection
+            # when Graphene is loaded alongside GLib in the same module;
+            # the call is real, see PyGObject's GBytes binding.
+            # pylint: disable-next=no-member
+            texture = Gdk.Texture.new_from_bytes(GLib.Bytes.new(data))
+        except GLib.Error:
+            paintable: Gdk.Paintable = _PlaceholderImagePaintable()
+        else:
+            paintable = _ScaledImagePaintable(
+                texture=texture,
+                column_width_px=column_width_px,
+            )
+        buffer.insert_paintable(buffer.get_end_iter(), paintable)
         buffer.insert(buffer.get_end_iter(), _BLOCK_SEPARATOR)
 
     def _emit_table(
@@ -438,16 +502,19 @@ class TextBufferRenderer:
     ) -> None:
         """Insert a table widget at a child anchor.
 
-        The table is a :class:`Gtk.Grid` of :class:`Gtk.Label`s with
-        ``wrap = TRUE``. Each label's ``max-width-chars`` is derived
-        from the live column width (read once via the injected
-        :data:`ColumnWidthResolver`) and the ``[cols="…"]``
-        proportions, so wrapping tracks the user's window size and
-        the column proportions the source declared. The first row
-        carries bold weight to surface its header role visually.
+        Tables remain anchored widgets because :class:`Gtk.TextTag` has
+        no grid primitive. The table is a :class:`Gtk.Grid` of
+        :class:`Gtk.Label`s with ``wrap = TRUE``; each label's
+        ``max-width-chars`` is derived from the live column width
+        (read once via the injected :data:`ColumnWidthResolver`) and
+        the ``[cols="…"]`` proportions. Because anchored children do
+        not honour ``hexpand``, the table widget is sized to the
+        column width explicitly via ``set_size_request`` inside
+        :func:`_build_table_widget`.
 
-        The renderer never produces a per-table horizontal scrollbar:
-        cell content is inline-only in v1, so wrapping is always
+        The first row carries bold weight to surface its header role
+        visually. The renderer never produces a per-table horizontal
+        scrollbar: cell content is inline-only, so wrapping is always
         meaningful, and an internal scrollbar inside an article column
         would be visually noisy.
         """
@@ -460,59 +527,111 @@ class TextBufferRenderer:
         self,
         buffer: Gtk.TextBuffer,
         admonition: Admonition,
-        attacher: WidgetAttacher,
     ) -> None:
-        """Insert an admonition widget at a child anchor.
+        """Insert an admonition as a tinted label-plus-body paragraph block.
 
-        The admonition is a :class:`Gtk.Frame` containing a
-        :class:`Gtk.Box` (vertical) of: a header label carrying the
-        admonition's kind name (e.g. ``NOTE``), then one wrapping
-        :class:`Gtk.Label` per body paragraph. Pango markup on each
-        body label preserves the inline formatting parsed by the
-        inline parser. The frame and its parts carry CSS classes
-        (:data:`_ADMONITION_FRAME_CSS_CLASS`,
-        :data:`_ADMONITION_HEADER_CSS_CLASS`,
-        :data:`_ADMONITION_BODY_CSS_CLASS`, plus a per-kind class
-        like ``admonition-note``) so the application stylesheet can
-        differentiate the five kinds visually without the renderer
-        embedding colours of its own.
+        Two paragraph tags carry the per-kind tint:
+        :func:`admonition_label_tag_name` for the kind-label line and
+        :func:`admonition_body_tag_name` for each body paragraph. The
+        kind-label character tag (:func:`admonition_kind_tag_name`)
+        adds bold weight plus the accent foreground to the label
+        text itself. Inline formatting inside body paragraphs flows
+        through the existing :meth:`_emit_inline`, so bold / italic /
+        monospace / link spans compose normally.
 
-        Each body label uses ``max-width-chars`` derived from the
-        injected :data:`ColumnWidthResolver` (the same strategy as
-        table cells in step 14) so wrapping tracks the article
-        column. The renderer reads the column width once per
-        :meth:`render_into` call.
+        An empty body (zero paragraphs) is permitted by the parser —
+        only the label paragraph is emitted in that case.
         """
-        anchor = buffer.create_child_anchor(buffer.get_end_iter())
-        widget = _build_admonition_widget(admonition, self._column_width_px())
-        attacher(anchor, widget)
-        buffer.insert(buffer.get_end_iter(), _BLOCK_SEPARATOR)
+        kind = admonition.kind
+        label_paragraph_tag = self._tag(admonition_label_tag_name(kind))
+        body_paragraph_tag = self._tag(admonition_body_tag_name(kind))
+        kind_character_tag = self._tag(admonition_kind_tag_name(kind))
+
+        # Label paragraph: insert the kind text, then a newline so the
+        # paragraph tag's background paints to the line edge.
+        label_start = buffer.get_end_iter().get_offset()
+        buffer.insert(buffer.get_end_iter(), kind.value)
+        label_text_end = buffer.get_end_iter().get_offset()
+        buffer.insert(buffer.get_end_iter(), "\n")
+        label_end = buffer.get_end_iter().get_offset()
+        buffer.apply_tag(
+            label_paragraph_tag,
+            buffer.get_iter_at_offset(label_start),
+            buffer.get_iter_at_offset(label_end),
+        )
+        # Character tag covers just the label text (no newline) so the
+        # bold + accent styling doesn't bleed across paragraph breaks.
+        buffer.apply_tag(
+            kind_character_tag,
+            buffer.get_iter_at_offset(label_start),
+            buffer.get_iter_at_offset(label_text_end),
+        )
+
+        for paragraph in admonition.blocks:
+            body_start = buffer.get_end_iter().get_offset()
+            for inline in paragraph.inlines:
+                self._emit_inline(buffer, inline, [])
+            buffer.insert(buffer.get_end_iter(), "\n")
+            body_end = buffer.get_end_iter().get_offset()
+            buffer.apply_tag(
+                body_paragraph_tag,
+                buffer.get_iter_at_offset(body_start),
+                buffer.get_iter_at_offset(body_end),
+            )
+
+        # Single trailing newline = the inter-block gap. The last
+        # paragraph already contributed its own terminating newline.
+        buffer.insert(buffer.get_end_iter(), "\n")
 
     def _emit_blockquote(
         self,
         buffer: Gtk.TextBuffer,
         blockquote: Blockquote,
-        attacher: WidgetAttacher,
     ) -> None:
-        """Insert a blockquote widget at a child anchor.
+        """Insert a blockquote as italic body paragraphs plus optional attribution.
 
-        Layout mirrors :meth:`_emit_admonition`'s — a
-        :class:`Gtk.Frame` with a vertical :class:`Gtk.Box` of
-        wrapping :class:`Gtk.Label` paragraphs — plus an optional
-        attribution line (``— Author, Source`` form) when the
-        ``[quote, …]`` directive supplied attribution. The frame
-        carries the :data:`_BLOCKQUOTE_FRAME_CSS_CLASS` class so the
-        application stylesheet can render the design's
-        accent-bordered quote frame.
+        The :data:`TagName.BLOCKQUOTE_BODY` paragraph tag carries the
+        neutral tint and the indent. Italic style composes via the
+        shared :data:`TagName.ITALIC` tag, applied across each body
+        paragraph after the paragraph tag — keeping italic in one
+        place. Attribution, if present, is a follow-on paragraph
+        carrying :data:`TagName.BLOCKQUOTE_ATTRIBUTION` (smaller scale,
+        right-aligned).
 
-        Body labels use ``max-width-chars`` derived from the column
-        width resolver, the same way admonition bodies and table
-        cells do.
+        An empty body is permitted by the parser; in that case only
+        the (optional) attribution line is emitted.
         """
-        anchor = buffer.create_child_anchor(buffer.get_end_iter())
-        widget = _build_blockquote_widget(blockquote, self._column_width_px())
-        attacher(anchor, widget)
-        buffer.insert(buffer.get_end_iter(), _BLOCK_SEPARATOR)
+        body_paragraph_tag = self._tag(TagName.BLOCKQUOTE_BODY)
+        italic_tag = self._tag(TagName.ITALIC)
+
+        for paragraph in blockquote.blocks:
+            body_start = buffer.get_end_iter().get_offset()
+            for inline in paragraph.inlines:
+                self._emit_inline(buffer, inline, [])
+            buffer.insert(buffer.get_end_iter(), "\n")
+            body_end = buffer.get_end_iter().get_offset()
+            start_iter = buffer.get_iter_at_offset(body_start)
+            end_iter = buffer.get_iter_at_offset(body_end)
+            buffer.apply_tag(body_paragraph_tag, start_iter, end_iter)
+            buffer.apply_tag(italic_tag, start_iter, end_iter)
+
+        attribution_text = _build_attribution_text(
+            blockquote.author,
+            blockquote.source,
+        )
+        if attribution_text is not None:
+            attribution_paragraph_tag = self._tag(TagName.BLOCKQUOTE_ATTRIBUTION)
+            attribution_start = buffer.get_end_iter().get_offset()
+            buffer.insert(buffer.get_end_iter(), attribution_text)
+            buffer.insert(buffer.get_end_iter(), "\n")
+            attribution_end = buffer.get_end_iter().get_offset()
+            buffer.apply_tag(
+                attribution_paragraph_tag,
+                buffer.get_iter_at_offset(attribution_start),
+                buffer.get_iter_at_offset(attribution_end),
+            )
+
+        buffer.insert(buffer.get_end_iter(), "\n")
 
     # ------------------------------------------------------------------
     # Inline emission
@@ -633,26 +752,6 @@ class TextBufferRenderer:
             self._emit_inline(buffer, child, new_stack)
 
     # ------------------------------------------------------------------
-    # Image widget construction (and decode-failure fallback)
-    # ------------------------------------------------------------------
-
-    def _build_image_widget(self, filename: str) -> Gtk.Widget:
-        data = self._image_bytes_for(filename)
-        try:
-            texture = Gdk.Texture.new_from_bytes(GLib.Bytes.new(data))
-        except GLib.Error:
-            return _build_image_placeholder(filename)
-        picture = Gtk.Picture.new_for_paintable(texture)
-        picture.set_content_fit(Gtk.ContentFit.SCALE_DOWN)
-        # Track the natural pixel dimensions of the image so the picture
-        # never *upscales* a small image to fill the column. SCALE_DOWN
-        # keeps it from overflowing a narrow column; pinning the
-        # natural width via ``set_size_request`` keeps it at native size
-        # when the column is wider than the image.
-        picture.set_size_request(texture.get_width(), texture.get_height())
-        return picture
-
-    # ------------------------------------------------------------------
     # Helpers
     # ------------------------------------------------------------------
 
@@ -669,10 +768,10 @@ class TextBufferRenderer:
         """Drop any trailing newlines so the buffer doesn't end in blank
         lines.
 
-        Each block emitter terminates with ``\\n\\n``; the last block
-        therefore leaves a redundant blank line at the very end. Strip
-        until at most one terminating newline remains — but only if
-        the buffer has any content at all.
+        Each block emitter terminates with one or more newlines; the
+        last block therefore leaves a redundant blank line at the very
+        end. Strip until at most one terminating newline remains — but
+        only if the buffer has any content at all.
         """
         end = buffer.get_end_iter()
         while end.get_offset() > 0:
@@ -689,35 +788,112 @@ class TextBufferRenderer:
 
 
 # ---------------------------------------------------------------------------
-# Helper widget builders (module level; no renderer state required)
+# Image paintables
 # ---------------------------------------------------------------------------
 
 
-def _build_code_block_widget(content: str) -> Gtk.Widget:
-    """Build the read-only code-block widget displayed in the buffer.
+class _ScaledImagePaintable(GObject.GObject, Gdk.Paintable):
+    """A :class:`Gdk.Paintable` wrapper that scales an image to fit a column.
 
-    Layout: ``Gtk.Frame`` → ``Gtk.ScrolledWindow`` →
-    ``Gtk.TextView`` (read-only, ``wrap-mode = NONE``,
-    ``family = monospace``). The scrolled window's horizontal policy is
-    ``AUTOMATIC`` and vertical is ``NEVER`` — long unwrappable lines
-    scroll inside the code block; vertical scrolling is left to the
-    outer article container.
+    Wraps a :class:`Gdk.Texture` and reports its intrinsic width as
+    ``min(texture_width, column_width_px)`` with height scaled
+    proportionally. The actual drawing delegates to the wrapped
+    texture — :class:`Gtk.TextView` re-scales the snapshot to the
+    intrinsic dimensions reported here, so a 2000-pixel-wide image
+    paints into a 700-pixel-wide column without overflowing.
+
+    Intrinsic dimensions are computed once at construction. The
+    paintable is :data:`Gdk.PaintableFlags.STATIC_CONTENTS` and
+    :data:`Gdk.PaintableFlags.STATIC_SIZE` since both the texture
+    and the column width are captured at construction time.
     """
-    inner = Gtk.TextView.new()
-    inner.set_editable(False)
-    inner.set_cursor_visible(False)
-    inner.set_monospace(True)
-    inner.set_wrap_mode(Gtk.WrapMode.NONE)
-    inner.get_buffer().set_text(content)
 
-    scroll = Gtk.ScrolledWindow.new()
-    scroll.set_policy(Gtk.PolicyType.AUTOMATIC, Gtk.PolicyType.NEVER)
-    scroll.set_child(inner)
+    _texture: Gdk.Texture
+    _intrinsic_width: int
+    _intrinsic_height: int
 
-    frame = Gtk.Frame.new()
-    frame.set_hexpand(True)
-    frame.set_child(scroll)
-    return frame
+    def __init__(
+        self,
+        *,
+        texture: Gdk.Texture,
+        column_width_px: int,
+    ) -> None:
+        super().__init__()
+        self._texture = texture
+        tex_width = texture.get_width()
+        tex_height = texture.get_height()
+        if column_width_px <= 0 or tex_width <= column_width_px:
+            self._intrinsic_width = tex_width
+            self._intrinsic_height = tex_height
+        else:
+            ratio = column_width_px / tex_width
+            self._intrinsic_width = column_width_px
+            # ``max(1, …)`` so a sub-pixel scaled height never collapses
+            # to zero pixels for very small textures.
+            self._intrinsic_height = max(1, int(tex_height * ratio))
+
+    def do_get_intrinsic_width(self) -> int:  # noqa: D401
+        return self._intrinsic_width
+
+    def do_get_intrinsic_height(self) -> int:  # noqa: D401
+        return self._intrinsic_height
+
+    def do_get_intrinsic_aspect_ratio(self) -> float:  # noqa: D401
+        if self._intrinsic_height <= 0:
+            return 0.0
+        return self._intrinsic_width / self._intrinsic_height
+
+    def do_get_flags(self) -> Gdk.PaintableFlags:  # noqa: D401
+        return Gdk.PaintableFlags.CONTENTS | Gdk.PaintableFlags.SIZE
+
+    def do_snapshot(
+        self,
+        snapshot: Gtk.Snapshot,
+        width: float,
+        height: float,
+    ) -> None:  # noqa: D401
+        self._texture.snapshot(snapshot, width, height)
+
+
+class _PlaceholderImagePaintable(GObject.GObject, Gdk.Paintable):
+    """Constant placeholder :class:`Gdk.Paintable` inserted on decode failure.
+
+    A small grey rectangle: visible enough to flag a missing image,
+    quiet enough that surrounding text stays the focus. The constant
+    dimensions and fill colour are module-level so a future tweak is
+    one edit.
+    """
+
+    def do_get_intrinsic_width(self) -> int:  # noqa: D401
+        return _PLACEHOLDER_PAINTABLE_WIDTH_PX
+
+    def do_get_intrinsic_height(self) -> int:  # noqa: D401
+        return _PLACEHOLDER_PAINTABLE_HEIGHT_PX
+
+    def do_get_intrinsic_aspect_ratio(self) -> float:  # noqa: D401
+        return (
+            _PLACEHOLDER_PAINTABLE_WIDTH_PX / _PLACEHOLDER_PAINTABLE_HEIGHT_PX
+        )
+
+    def do_get_flags(self) -> Gdk.PaintableFlags:  # noqa: D401
+        return Gdk.PaintableFlags.CONTENTS | Gdk.PaintableFlags.SIZE
+
+    def do_snapshot(
+        self,
+        snapshot: Gtk.Snapshot,
+        width: float,
+        height: float,
+    ) -> None:  # noqa: D401
+        rgba = Gdk.RGBA()
+        rgba.red, rgba.green, rgba.blue, rgba.alpha = _PLACEHOLDER_PAINTABLE_RGBA
+        rect = Graphene.Rect.alloc()
+        rect.init(0, 0, width, height)
+        snapshot.append_color(rgba, rect)
+
+
+# ---------------------------------------------------------------------------
+# Helper widget builders for tables (the only remaining anchored widget)
+# ---------------------------------------------------------------------------
 
 
 def _build_table_widget(table: Table, column_width_px: int) -> Gtk.Widget:
@@ -729,26 +905,25 @@ def _build_table_widget(table: Table, column_width_px: int) -> Gtk.Widget:
     long cell content wraps within the column rather than overflowing.
 
     ``column_width_px`` is the live pixel width of the article column
-    (resolved at render time by :data:`ColumnWidthResolver`). It is
-    converted to characters via :data:`TARGET_CHARS_PER_LINE`: the
-    article column targets that many characters in body text, so the
-    average glyph width is ``column_width_px / TARGET_CHARS_PER_LINE``
-    pixels and dividing each table column's pixel slice by that gives
-    its ``max-width-chars``. When the table carries no ``[cols=…]``
-    directive, the budget is split equally; with a directive,
-    ``proportion[i] / sum(proportions)`` of the column's pixels go
-    to column ``i``. The math collapses algebraically (the
-    ``column_width_px`` factor cancels), but threading it through
-    keeps the contract honest — a future implementation that swaps
-    in a Pango-measured glyph width plugs in here without changing
-    the call site.
+    (resolved at render time by :data:`ColumnWidthResolver`). It feeds
+    two layout decisions:
+
+    * Per-cell ``max-width-chars`` derived from
+      :data:`TARGET_CHARS_PER_LINE` and the ``[cols="…"]`` proportions
+      (see :func:`_max_chars_per_column`).
+    * The whole frame's ``size-request`` is set to ``column_width_px``
+      so the table fills the column. This is the workaround for
+      :class:`Gtk.TextView` ignoring ``hexpand`` on anchored children:
+      reporting a size request is the only way to tell the text view
+      "allocate me this many pixels". Without it, the frame collapses
+      to its children's natural width and the table reads as a tight
+      block in the middle of the column.
 
     The header row (``rows[0]``) is rendered with a bold label to
     visually distinguish it from data rows. No per-table horizontal
     scrollbar — wrapping inside the column is the only fitting
-    strategy because cell content is inline-only in v1, and an
-    internal scrollbar inside an article column would be visually
-    noisy.
+    strategy because cell content is inline-only, and an internal
+    scrollbar inside an article column would be visually noisy.
     """
     grid = Gtk.Grid.new()
     grid.set_hexpand(True)
@@ -776,6 +951,12 @@ def _build_table_widget(table: Table, column_width_px: int) -> Gtk.Widget:
     frame = Gtk.Frame.new()
     frame.set_hexpand(True)
     frame.set_child(grid)
+    # Anchored children inside a Gtk.TextView ignore hexpand and get
+    # allocated their natural width. Forcing a horizontal size request
+    # equal to the article column is the only way to make the table
+    # fill the column. Height stays at -1 so the frame measures itself
+    # against the children's natural heights.
+    frame.set_size_request(column_width_px, -1)
     return frame
 
 
@@ -848,6 +1029,11 @@ def _max_chars_per_column(
     )
 
 
+# ---------------------------------------------------------------------------
+# Pango-markup conversion (used only by table cells)
+# ---------------------------------------------------------------------------
+
+
 def _inlines_to_pango_markup(
     inlines: tuple[InlineNode, ...],
     *,
@@ -856,11 +1042,10 @@ def _inlines_to_pango_markup(
     """Convert an inline-node tuple to a Pango markup string.
 
     Pango markup is the format :meth:`Gtk.Label.set_markup` consumes,
-    and it covers everything the v1 inline subset needs: ``<b>``,
-    ``<i>``, ``<s>``, ``<u>``, ``<tt>``, and ``<a href="…">``. Plain
-    text is escaped with :func:`GLib.markup_escape_text` so user
-    content with literal ``<`` or ``&`` never accidentally introduces
-    markup.
+    and it covers everything the inline subset needs: ``<b>``, ``<i>``,
+    ``<s>``, ``<u>``, ``<tt>``, and ``<a href="…">``. Plain text is
+    escaped with :func:`GLib.markup_escape_text` so user content with
+    literal ``<`` or ``&`` never accidentally introduces markup.
 
     ``bold`` wraps the whole result in a single ``<b>…</b>`` so header
     cells render with bold weight. This is preferable to setting the
@@ -913,157 +1098,9 @@ def _inline_to_pango_markup(node: InlineNode) -> str:
     raise TypeError(f"unknown inline node: {type(node).__name__}")
 
 
-def _build_admonition_widget(
-    admonition: Admonition,
-    column_width_px: int,
-) -> Gtk.Widget:
-    """Build the read-only admonition widget displayed in the buffer.
-
-    Layout: ``Gtk.Frame`` → ``Gtk.Box`` (vertical) of a header
-    :class:`Gtk.Label` (the kind name in upper case) followed by one
-    wrapping :class:`Gtk.Label` per body paragraph. Each body label
-    renders its inline content via Pango markup (same strategy as
-    table cells, sharing :func:`_inlines_to_pango_markup`) and uses
-    ``max-width-chars`` derived from ``column_width_px`` to wrap at
-    the article-column width. CSS classes are added to the frame
-    and its parts so the application stylesheet differentiates the
-    five admonition kinds.
-
-    An empty body (zero paragraphs) is permitted by the parser and
-    is rendered as just the header — the frame still appears so the
-    user sees that an admonition was opened.
-    """
-    box = Gtk.Box.new(Gtk.Orientation.VERTICAL, _ADMONITION_BODY_SPACING)
-    box.set_margin_start(_ADMONITION_BODY_PADDING)
-    box.set_margin_end(_ADMONITION_BODY_PADDING)
-    box.set_margin_top(_ADMONITION_BODY_PADDING)
-    box.set_margin_bottom(_ADMONITION_BODY_PADDING)
-
-    header = Gtk.Label.new(admonition.kind.value)
-    header.set_xalign(0.0)
-    header.add_css_class(_ADMONITION_HEADER_CSS_CLASS)
-    box.append(header)
-
-    max_width_chars = max(1, TARGET_CHARS_PER_LINE)
-    if column_width_px > 0:
-        # Mirror the table-cell math: average glyph width is
-        # ``column_width_px / TARGET_CHARS_PER_LINE``; the body label
-        # gets the full column. The two factors cancel — the result
-        # is just TARGET_CHARS_PER_LINE — but we thread column_width_px
-        # through anyway so a future Pango-measured implementation
-        # plugs in here without changing the call site.
-        max_width_chars = max(
-            1,
-            round(column_width_px / (column_width_px / TARGET_CHARS_PER_LINE)),
-        )
-
-    for paragraph in admonition.blocks:
-        body_label = _build_paragraph_label(
-            paragraph,
-            css_class=_ADMONITION_BODY_CSS_CLASS,
-            max_width_chars=max_width_chars,
-        )
-        box.append(body_label)
-
-    frame = Gtk.Frame.new()
-    frame.set_hexpand(True)
-    frame.add_css_class(_ADMONITION_FRAME_CSS_CLASS)
-    # Add a per-kind class (admonition-note, admonition-tip, …) so the
-    # stylesheet can colour each kind distinctly without the renderer
-    # embedding colour values. The :class:`AdmonitionKind`'s value is
-    # the canonical upper-case label; lower-casing it produces the
-    # CSS class suffix.
-    frame.add_css_class(
-        f"{_ADMONITION_FRAME_CSS_CLASS}-{admonition.kind.value.lower()}"
-    )
-    frame.set_child(box)
-    return frame
-
-
-def _build_blockquote_widget(
-    blockquote: Blockquote,
-    column_width_px: int,
-) -> Gtk.Widget:
-    """Build the read-only blockquote widget displayed in the buffer.
-
-    Layout mirrors :func:`_build_admonition_widget` but without the
-    header label and with an optional trailing attribution row when
-    the ``[quote, Author, Source]`` directive supplied attribution.
-    The frame and its parts carry CSS classes
-    (:data:`_BLOCKQUOTE_FRAME_CSS_CLASS`,
-    :data:`_BLOCKQUOTE_BODY_CSS_CLASS`,
-    :data:`_BLOCKQUOTE_ATTRIBUTION_CSS_CLASS`) so the application
-    stylesheet can render the design's left-border accent.
-
-    The attribution string is built by :func:`_build_attribution_text`:
-    ``"— Author"`` when only the author is set, ``"— Author, Source"``
-    when both are. The leading en-dash matches typographic conventions
-    for citations.
-    """
-    box = Gtk.Box.new(Gtk.Orientation.VERTICAL, _BLOCKQUOTE_BODY_SPACING)
-    box.set_margin_start(_BLOCKQUOTE_BODY_PADDING)
-    box.set_margin_end(_BLOCKQUOTE_BODY_PADDING)
-    box.set_margin_top(_BLOCKQUOTE_BODY_PADDING)
-    box.set_margin_bottom(_BLOCKQUOTE_BODY_PADDING)
-
-    max_width_chars = max(1, TARGET_CHARS_PER_LINE)
-    if column_width_px > 0:
-        max_width_chars = max(
-            1,
-            round(column_width_px / (column_width_px / TARGET_CHARS_PER_LINE)),
-        )
-
-    for paragraph in blockquote.blocks:
-        body_label = _build_paragraph_label(
-            paragraph,
-            css_class=_BLOCKQUOTE_BODY_CSS_CLASS,
-            max_width_chars=max_width_chars,
-        )
-        box.append(body_label)
-
-    attribution_text = _build_attribution_text(
-        blockquote.author,
-        blockquote.source,
-    )
-    if attribution_text is not None:
-        attribution_label = Gtk.Label.new(attribution_text)
-        attribution_label.set_wrap(True)
-        attribution_label.set_max_width_chars(max_width_chars)
-        attribution_label.set_xalign(0.0)
-        attribution_label.add_css_class(_BLOCKQUOTE_ATTRIBUTION_CSS_CLASS)
-        box.append(attribution_label)
-
-    frame = Gtk.Frame.new()
-    frame.set_hexpand(True)
-    frame.add_css_class(_BLOCKQUOTE_FRAME_CSS_CLASS)
-    frame.set_child(box)
-    return frame
-
-
-def _build_paragraph_label(
-    paragraph: Paragraph,
-    *,
-    css_class: str,
-    max_width_chars: int,
-) -> Gtk.Label:
-    """Build a single wrapping :class:`Gtk.Label` for a body paragraph.
-
-    Shared by admonition and blockquote body rendering. Renders the
-    paragraph's inline content via Pango markup so bold, italic,
-    monospace, and link spans inside the body are preserved. The
-    label is left-aligned, top-aligned, and configured to wrap at
-    ``max_width_chars`` characters so it tracks the article column.
-    """
-    markup = _inlines_to_pango_markup(paragraph.inlines)
-    label = Gtk.Label.new(None)
-    label.set_markup(markup)
-    label.set_wrap(True)
-    label.set_max_width_chars(max_width_chars)
-    label.set_xalign(0.0)
-    label.set_yalign(0.0)
-    label.set_hexpand(True)
-    label.add_css_class(css_class)
-    return label
+# ---------------------------------------------------------------------------
+# Blockquote attribution helper
+# ---------------------------------------------------------------------------
 
 
 def _build_attribution_text(
@@ -1091,18 +1128,6 @@ def _build_attribution_text(
         _BLOCKQUOTE_ATTRIBUTION_PREFIX
         + _BLOCKQUOTE_ATTRIBUTION_SEPARATOR.join(parts)
     )
-
-
-def _build_image_placeholder(filename: str) -> Gtk.Widget:
-    """Fallback widget shown when image bytes fail to decode.
-
-    A tiny labelled box rather than a blown-out broken-image icon — the
-    document stays readable, and the user gets the original filename
-    back as a hint at what is missing.
-    """
-    label = Gtk.Label.new(f"[Image: {filename}]")
-    label.set_xalign(0.0)
-    return label
 
 
 def _noop_attacher(_anchor: Gtk.TextChildAnchor, _widget: Gtk.Widget) -> None:

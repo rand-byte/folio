@@ -44,8 +44,10 @@ Principles & invariants
   metadata-then-bytes. Tests that don't care about images can
   construct :class:`NoteView` with ``attachments=None`` — the
   fallback :func:`_placeholder_image_bytes` resolver is wired and
-  every image renders as the small ``[Image: filename]`` placeholder
-  widget. Tests that *do* care wire a fake :class:`AttachmentStoreProtocol`.
+  every image renders as the renderer's small placeholder paintable
+  (a grey rectangle that signals the missing image without aborting
+  the document). Tests that *do* care wire a fake
+  :class:`AttachmentStoreProtocol`.
 * Filename-to-attachment lookup is intentionally O(N) per image
   (linear scan of the metadata list). For the v1 expectation of "a
   handful of images per note" this is dominated by the texture decode
@@ -253,7 +255,9 @@ def _placeholder_image_bytes(_filename: str) -> bytes:
 
     The renderer attempts ``Gdk.Texture.new_from_bytes`` on the result.
     Empty bytes raise ``GLib.Error``, which the renderer catches and
-    converts into its small ``[Image: filename]`` placeholder widget.
+    converts into its small placeholder paintable — a constant grey
+    rectangle that signals the missing image without aborting the
+    document.
 
     Production wires a real :class:`AttachmentStoreProtocol` so this
     function is bypassed; it remains as a graceful degradation for
@@ -654,8 +658,10 @@ class NoteView(Gtk.Box):
         looks up the matching attachment in
         :attr:`_attachments`. Returns the bytes if found; an empty
         ``bytes`` if not — which causes the renderer to fall back to
-        its ``[Image: filename]`` placeholder widget. This matches
-        the placeholder-bytes contract from build step 8.
+        its placeholder paintable (a small grey rectangle). This
+        matches the placeholder-bytes contract from build step 8;
+        the renderer's image path now inserts the placeholder via
+        ``insert_paintable`` rather than building an anchored widget.
 
         Lookup is a linear scan over
         :meth:`AttachmentStoreProtocol.list_for_note`. For v1's
@@ -676,7 +682,7 @@ class NoteView(Gtk.Box):
                 return self._attachments.get_bytes(attachment.id)
         # No match — the image macro references a filename that has
         # no attachment row. The renderer's decode-failure branch
-        # produces the placeholder widget on empty bytes, which is
+        # produces the placeholder paintable on empty bytes, which is
         # the right user-visible signal for "image not found".
         return _placeholder_image_bytes(filename)
 

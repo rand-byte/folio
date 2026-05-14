@@ -93,7 +93,7 @@ Layers may only import **downward**. Every arrow below points from caller to cal
 | Change DB schema | **new** `Migration` appended to `storage/migrations.py` `ALL_MIGRATIONS` — never edit a shipped one | the repository that reads/writes the new column |
 | Add a note-level user action | `controllers/note_controller.py` (mutate + emit signal) → caller in `ui/toolbar.py` or `ui/note_editor.py` | repository protocol if storage shape changes |
 | Add a notebook-level user action | `controllers/notebook_controller.py` → caller in `ui/sidebar.py` | `storage/notebook_repository.py` if storage shape changes |
-| Change rendered-view styling | `asciidoc/tag_table.py` (tag definitions) — every visual style lives in exactly one place | rarely `asciidoc/textbuffer_renderer.py` for layout |
+| Change rendered-view styling | `asciidoc/tag_table.py` (tag definitions) — every visual style lives in exactly one place, including block-level paragraph styling for admonitions / blockquotes / code blocks | rarely `asciidoc/textbuffer_renderer.py` for layout (only table sizing escapes to widget land) |
 | Change application chrome / CSS | `ui/css/app.css` | bumping `pyproject.toml` `package-data` if a new asset is added |
 | Change source-editor syntax highlight | `asciidoc/language_spec.lang` (GtkSourceView grammar) | nothing else; the file is data |
 | Tune a constant (sizes, quotas) | `config/defaults.py` | none — that is the point of this module |
@@ -144,8 +144,8 @@ The pipeline. Everything from `lexer` through `parser` is pure (no GTK, no I/O).
 | `inline_parser.py` | 790 | `parse_inline(line, line_no) -> tuple[InlineNode, ...]`. **Strict** — every formatting marker must be paired; otherwise raises `ParseErrorKind.BAD_INLINE_SPAN` (or `UNTERMINATED_MONOSPACE`). |
 | `parser.py` | 1353 | `parse(source) -> Document`. Recursive-descent, strict, exhaustive over tokens. Each syntactic failure maps to a specific `ParseErrorKind`. |
 | `ast.py` | 434 | Frozen dataclasses for every AST node (`Document`, `Section`, `Paragraph`, `OrderedList`, …, `Bold`, `Italic`, `Link`, …). Children are `tuple[...]` for true immutability. `BlockNode` and `InlineNode` are closed unions. |
-| `tag_table.py` | 223 | Builds the shared `Gtk.TextTagTable`. **Every visual style lives here, exactly once.** Tag names are exposed as `TagName` enum members. |
-| `textbuffer_renderer.py` | 1109 | `TextBufferRenderer.render_into(document, buffer, ...)`. Image bytes flow through an injected `ImageBytesResolver`. Rebuilds the buffer from scratch on each call. |
+| `tag_table.py` | 379 | Builds the shared `Gtk.TextTagTable`. **Every visual style lives here, exactly once.** Tag names are exposed as `TagName` enum members. Holds inline styles (bold / italic / strikethrough / underline / monospace / link), heading styles, **plus the paragraph-tag styling for admonitions (per-kind label and body tags + a kind-label character tag), blockquotes (body + attribution), and code blocks** — all the block-level styling that used to live in widget builders. |
+| `textbuffer_renderer.py` | 869 | `TextBufferRenderer.render_into(document, buffer, ...)`. Image bytes flow through an injected `ImageBytesResolver`. Rebuilds the buffer from scratch on each call. **Block-level constructs render as styled paragraphs in the buffer wherever the styling primitive set allows; only tables escape to an anchored widget** (which is sized via `set_size_request` because anchored children ignore `hexpand`). Images use the private `_ScaledImagePaintable` to cap intrinsic width at the column width; decode failures fall through to `_PlaceholderImagePaintable`. |
 | `language_spec.lang` | 353 | GtkSourceView 5 grammar that drives source-editor syntax highlighting. Pure data, loaded by `ui/note_editor.py`. |
 
 ### `notes_app/storage/` — SQLite persistence

@@ -15,7 +15,7 @@ gi.require_version("Gtk", "4.0")
 gi.require_version("Gdk", "4.0")
 gi.require_version("Pango", "1.0")
 # pylint: disable=wrong-import-position
-from gi.repository import Gdk, Gtk  # noqa: E402
+from gi.repository import Gdk, GLib, Gtk  # noqa: E402
 
 from notes_app.asciidoc.ast import (
     Bold,
@@ -27,14 +27,22 @@ from notes_app.asciidoc.ast import (
     Text,
 )
 from notes_app.asciidoc.parser import parse
-from notes_app.asciidoc.tag_table import TagName, build_tag_table
+from notes_app.asciidoc.tag_table import (
+    TagName,
+    admonition_body_tag_name,
+    admonition_kind_tag_name,
+    admonition_label_tag_name,
+    build_tag_table,
+)
 from notes_app.asciidoc.textbuffer_renderer import (
     TextBufferRenderer,
     _inlines_to_pango_markup,
     _max_chars_per_column,
+    _PlaceholderImagePaintable,
+    _ScaledImagePaintable,
 )
 from notes_app.config.defaults import TARGET_CHARS_PER_LINE
-from notes_app.enums import ParseErrorKind
+from notes_app.enums import AdmonitionKind, ParseErrorKind
 from notes_app.models.parse_error import ParseError
 
 
@@ -61,6 +69,34 @@ def _make_1x1_png() -> bytes:
 
 
 _PNG_1X1: bytes = _make_1x1_png()
+
+
+def _make_solid_png(width: int, height: int) -> bytes:
+    """Return a minimal RGBA PNG of the given dimensions, all-opaque-red.
+
+    Used to exercise the :class:`_ScaledImagePaintable` scaling path —
+    a texture wider than the column width must report a capped
+    intrinsic width and a proportionally scaled intrinsic height.
+    """
+    sig = b"\x89PNG\r\n\x1a\n"
+
+    def chunk(tag: bytes, data: bytes) -> bytes:
+        return (
+            struct.pack(">I", len(data))
+            + tag
+            + data
+            + struct.pack(">I", zlib.crc32(tag + data) & 0xFFFFFFFF)
+        )
+
+    ihdr = struct.pack(">IIBBBBB", width, height, 8, 6, 0, 0, 0)
+    # One filter byte (0 = None) per row, then RGBA pixels.
+    row = b"\x00" + (b"\xff\x00\x00\xff" * width)
+    raw = row * height
+    idat = zlib.compress(raw, 9)
+    return sig + chunk(b"IHDR", ihdr) + chunk(b"IDAT", idat) + chunk(b"IEND", b"")
+
+
+_PNG_200X100: bytes = _make_solid_png(200, 100)
 
 
 def _display_available() -> bool:
@@ -132,6 +168,28 @@ def _anchor_offsets(buffer: Gtk.TextBuffer) -> list[int]:
         if not iterator.forward_char():
             break
     return offsets
+
+
+def _paintables_at(
+    buffer: Gtk.TextBuffer,
+) -> list[tuple[int, Gdk.Paintable]]:
+    """Return ``(offset, paintable)`` pairs for every inline paintable.
+
+    Images are inserted via :meth:`Gtk.TextBuffer.insert_paintable`, so
+    they sit at a single buffer offset and are recoverable via
+    :meth:`Gtk.TextIter.get_paintable`. The renderer's new image path
+    relies on this — the test helper iterates the buffer once and
+    returns the lot in document order.
+    """
+    found: list[tuple[int, Gdk.Paintable]] = []
+    iterator = buffer.get_start_iter()
+    while True:
+        paintable = iterator.get_paintable()
+        if paintable is not None:
+            found.append((iterator.get_offset(), paintable))
+        if not iterator.forward_char():
+            break
+    return found
 
 
 def _build_renderer(
@@ -302,63 +360,55 @@ class ListRenderingTests(unittest.TestCase):
 
 @unittest.skipUnless(_display_available(), "no GDK display")
 class CodeBlockRenderingTests(unittest.TestCase):
-    def test_code_block_attaches_a_frame_widget(self) -> None:
+    """Code blocks render as a tinted, monospace paragraph range.
+
+    The plan moved code blocks out of an anchored frame-and-scroller
+    widget and into the buffer itself: the source content is inserted
+    verbatim with both :data:`TagName.CODE_BLOCK` (paragraph
+    background + side margins) and :data:`TagName.MONOSPACE` (font
+    family) applied across the range. Wrapping comes from the outer
+    :class:`Gtk.TextView`'s ``WORD_CHAR`` wrap mode — there is no
+    inner scrolled window any more.
+    """
+
+    def test_code_block_content_is_inserted_into_buffer(self) -> None:
         src = "= D\n\n----\nprint('hi')\n----\n"
         renderer, buffer, _ = _build_renderer()
         attached: list[tuple[Gtk.TextChildAnchor, Gtk.Widget]] = []
         renderer.render_into(
             src, buffer, note_id="n1", attach_widget=_collect(attached)
         )
-        self.assertEqual(len(attached), 1)
-        anchor, widget = attached[0]
-        self.assertIsInstance(anchor, Gtk.TextChildAnchor)
-        self.assertIsInstance(widget, Gtk.Frame)
+        # No child anchors: code blocks no longer escape to widget land.
+        self.assertEqual(attached, [])
+        self.assertEqual(_anchor_offsets(buffer), [])
+        self.assertIn("print('hi')", _full_text(buffer))
 
-    def test_code_block_inner_textview_has_wrap_none_and_monospace(self) -> None:
-        src = "= D\n\n----\nlong code here\n----\n"
+    def test_code_block_carries_code_block_and_monospace_tags(self) -> None:
+        # The two tags layer across the same range: CODE_BLOCK carries
+        # the paragraph background tint, MONOSPACE carries the font.
+        # Both must be present on every character of the content.
+        src = "= D\n\n----\nabc\n----\n"
         renderer, buffer, _ = _build_renderer()
-        attached: list[tuple[Gtk.TextChildAnchor, Gtk.Widget]] = []
-        renderer.render_into(
-            src, buffer, note_id="n1", attach_widget=_collect(attached)
-        )
-        frame = cast(Gtk.Frame, attached[0][1])
-        scroll = cast(Gtk.ScrolledWindow, frame.get_child())
-        self.assertIsInstance(scroll, Gtk.ScrolledWindow)
-        # Horizontal scrolling is automatic; vertical never (the outer
-        # article container handles vertical scrolling). GTK 4 returns
-        # the pair as a named tuple from ``get_policy``.
-        h_policy, v_policy = scroll.get_policy()
-        self.assertEqual(h_policy, Gtk.PolicyType.AUTOMATIC)
-        self.assertEqual(v_policy, Gtk.PolicyType.NEVER)
-        # The TextView lives inside the ScrolledWindow.
-        inner = cast(Gtk.TextView, scroll.get_child())
-        self.assertIsInstance(inner, Gtk.TextView)
-        self.assertEqual(inner.get_wrap_mode(), Gtk.WrapMode.NONE)
-        self.assertTrue(inner.get_monospace())
-        self.assertFalse(inner.get_editable())
+        renderer.render_into(src, buffer, note_id="n1")
+        text = _full_text(buffer)
+        start = text.index("abc")
+        for offset in range(start, start + 3):
+            tags = _tag_names_at(buffer, offset)
+            self.assertIn(TagName.CODE_BLOCK.value, tags)
+            self.assertIn(TagName.MONOSPACE.value, tags)
 
-    def test_code_block_widget_carries_verbatim_content(self) -> None:
+    def test_code_block_content_is_verbatim(self) -> None:
+        # No whitespace normalisation, no re-parsing of inline markers
+        # like ``*`` or ``_`` — code-block content is literal.
         code = "def f():\n    return 42"
         src = f"= D\n\n----\n{code}\n----\n"
         renderer, buffer, _ = _build_renderer()
-        attached: list[tuple[Gtk.TextChildAnchor, Gtk.Widget]] = []
-        renderer.render_into(
-            src, buffer, note_id="n1", attach_widget=_collect(attached)
-        )
-        frame = cast(Gtk.Frame, attached[0][1])
-        scroll = cast(Gtk.ScrolledWindow, frame.get_child())
-        inner = cast(Gtk.TextView, scroll.get_child())
-        inner_buffer = inner.get_buffer()
-        self.assertEqual(
-            inner_buffer.get_text(
-                inner_buffer.get_start_iter(),
-                inner_buffer.get_end_iter(),
-                True,
-            ),
-            code,
-        )
+        renderer.render_into(src, buffer, note_id="n1")
+        self.assertIn(code, _full_text(buffer))
 
-    def test_code_block_anchor_is_placed_in_outer_buffer(self) -> None:
+    def test_code_block_does_not_attach_a_widget(self) -> None:
+        # The whole point of the rewrite: no widgets for code blocks.
+        # The attach_widget callback must not fire even once.
         renderer, buffer, _ = _build_renderer()
         attached: list[tuple[Gtk.TextChildAnchor, Gtk.Widget]] = []
         renderer.render_into(
@@ -367,13 +417,7 @@ class CodeBlockRenderingTests(unittest.TestCase):
             note_id="n1",
             attach_widget=_collect(attached),
         )
-        anchor = attached[0][0]
-        # The very same anchor object can be located in the buffer by
-        # walking iterators — proving it lives at a real offset.
-        anchor_offsets = _anchor_offsets(buffer)
-        self.assertEqual(len(anchor_offsets), 1)
-        located = buffer.get_iter_at_offset(anchor_offsets[0]).get_child_anchor()
-        self.assertIs(located, anchor)
+        self.assertEqual(attached, [])
 
 
 @unittest.skipUnless(_display_available(), "no GDK display")
@@ -409,7 +453,56 @@ class ImageRenderingTests(unittest.TestCase):
         )
         self.assertEqual(calls, ["a.png", "a.png"])
 
-    def test_image_attaches_picture_with_scale_down(self) -> None:
+    def test_image_inserts_a_scaled_paintable(self) -> None:
+        # Images are now inserted via insert_paintable; the wrapper
+        # paintable scales the texture down to the column width if the
+        # texture is wider than the column. The 1×1 PNG produced by the
+        # default resolver is smaller than the column, so the
+        # intrinsic width equals the texture width (1).
+        renderer, buffer, _ = _build_renderer(column_width_px=lambda: 800)
+        renderer.render_into(
+            "= D\n\nimage::cat.png[]\n",
+            buffer,
+            note_id="n1",
+        )
+        paintables = _paintables_at(buffer)
+        self.assertEqual(len(paintables), 1)
+        offset, paintable = paintables[0]
+        self.assertIsInstance(paintable, _ScaledImagePaintable)
+        # The 1×1 PNG is below the column width — intrinsic width
+        # equals the texture's width.
+        self.assertEqual(paintable.get_intrinsic_width(), 1)
+        self.assertGreaterEqual(offset, 0)
+
+    def test_scaled_paintable_caps_intrinsic_width_at_column_width(self) -> None:
+        # Construct the wrapper directly with a synthetic texture to
+        # cover the scaling case without needing a large PNG fixture.
+        texture = Gdk.Texture.new_from_bytes(GLib.Bytes.new(_PNG_1X1))
+        wrapper = _ScaledImagePaintable(texture=texture, column_width_px=4)
+        # Texture is 1×1, column is 4 → texture fits without scaling.
+        self.assertEqual(wrapper.get_intrinsic_width(), 1)
+        self.assertEqual(wrapper.get_intrinsic_height(), 1)
+
+    def test_scaled_paintable_scales_wide_image_proportionally(self) -> None:
+        # 200×100 texture in a 50-pixel column → intrinsic width 50,
+        # intrinsic height proportionally scaled to 25.
+        texture = Gdk.Texture.new_from_bytes(GLib.Bytes.new(_PNG_200X100))
+        wrapper = _ScaledImagePaintable(texture=texture, column_width_px=50)
+        self.assertEqual(wrapper.get_intrinsic_width(), 50)
+        self.assertEqual(wrapper.get_intrinsic_height(), 25)
+
+    def test_scaled_paintable_zero_column_width_uses_natural_dims(self) -> None:
+        # Defensive: before the article container has been allocated
+        # the column-width resolver may return 0. The wrapper falls
+        # back to the texture's natural dimensions in that case so the
+        # paintable doesn't collapse to invisible.
+        texture = Gdk.Texture.new_from_bytes(GLib.Bytes.new(_PNG_200X100))
+        wrapper = _ScaledImagePaintable(texture=texture, column_width_px=0)
+        self.assertEqual(wrapper.get_intrinsic_width(), 200)
+        self.assertEqual(wrapper.get_intrinsic_height(), 100)
+
+    def test_image_does_not_attach_a_widget(self) -> None:
+        # Images are inline paintables now — no widget escape.
         renderer, buffer, _ = _build_renderer()
         attached: list[tuple[Gtk.TextChildAnchor, Gtk.Widget]] = []
         renderer.render_into(
@@ -418,29 +511,28 @@ class ImageRenderingTests(unittest.TestCase):
             note_id="n1",
             attach_widget=_collect(attached),
         )
-        self.assertEqual(len(attached), 1)
-        widget = attached[0][1]
-        self.assertIsInstance(widget, Gtk.Picture)
-        picture = cast(Gtk.Picture, widget)
-        self.assertEqual(picture.get_content_fit(), Gtk.ContentFit.SCALE_DOWN)
+        self.assertEqual(attached, [])
 
-    def test_decode_failure_produces_a_label_placeholder(self) -> None:
+    def test_decode_failure_produces_a_placeholder_paintable(self) -> None:
+        # On Gdk decode error the renderer inserts a placeholder
+        # paintable (a small grey rectangle) so the document remains
+        # readable even when an image is missing or corrupted.
         renderer, buffer, _ = _build_renderer(
             image_bytes_for=lambda _f: b"not a png"
         )
-        attached: list[tuple[Gtk.TextChildAnchor, Gtk.Widget]] = []
         renderer.render_into(
             "= D\n\nimage::broken.png[]\n",
             buffer,
             note_id="n1",
-            attach_widget=_collect(attached),
         )
-        self.assertEqual(len(attached), 1)
-        widget = attached[0][1]
-        self.assertIsInstance(widget, Gtk.Label)
-        # The filename appears in the placeholder so the user knows
-        # which image is missing.
-        self.assertIn("broken.png", cast(Gtk.Label, widget).get_label())
+        paintables = _paintables_at(buffer)
+        self.assertEqual(len(paintables), 1)
+        _, paintable = paintables[0]
+        self.assertIsInstance(paintable, _PlaceholderImagePaintable)
+        # Placeholder has nonzero intrinsic dimensions so it actually
+        # paints something visible.
+        self.assertGreater(paintable.get_intrinsic_width(), 0)
+        self.assertGreater(paintable.get_intrinsic_height(), 0)
 
     def test_resolver_exception_other_than_glib_propagates(self) -> None:
         # KeyError from a misconfigured resolver is *not* swallowed —
@@ -472,11 +564,12 @@ class ImageRenderingTests(unittest.TestCase):
 
 @unittest.skipUnless(_display_available(), "no GDK display")
 class ColumnWidthResolverTests(unittest.TestCase):
-    def test_resolver_is_not_called_for_step_4_blocks(self) -> None:
-        # Step 6 emits no widgets that depend on column width — the
-        # resolver is wired in for forward compatibility (tables in
-        # step 14) but should not be invoked yet by paragraph / list /
-        # heading / code / image rendering.
+    def test_resolver_is_not_called_for_text_only_blocks(self) -> None:
+        # The renderer only invokes the column-width resolver when a
+        # block actually needs a pixel width: tables (to set the
+        # frame's size request) and images (to construct the scaled
+        # paintable). Pure-prose blocks — headings, paragraphs, lists,
+        # admonitions, blockquotes, code blocks — never call it.
         calls = 0
 
         def column_width() -> int:
@@ -486,11 +579,48 @@ class ColumnWidthResolverTests(unittest.TestCase):
 
         renderer, buffer, _ = _build_renderer(column_width_px=column_width)
         renderer.render_into(
-            "= Welcome\n\nA *para* with formatting.\n\n* One\n* Two\n",
+            "= Welcome\n\n"
+            "A *para* with formatting.\n\n"
+            "* One\n* Two\n\n"
+            "NOTE: a note\n\n"
+            "____\nq\n____\n\n"
+            "----\ncode\n----\n",
             buffer,
             note_id="n1",
         )
         self.assertEqual(calls, 0)
+
+    def test_resolver_is_called_when_image_is_present(self) -> None:
+        # Images need the column width to construct the scaled
+        # paintable. The resolver is read once per image.
+        calls = 0
+
+        def column_width() -> int:
+            nonlocal calls
+            calls += 1
+            return 600
+
+        renderer, buffer, _ = _build_renderer(column_width_px=column_width)
+        renderer.render_into(
+            "= D\n\nimage::a.png[]\n", buffer, note_id="n1"
+        )
+        self.assertEqual(calls, 1)
+
+    def test_resolver_is_called_when_table_is_present(self) -> None:
+        # Tables need the column width for both the frame's size
+        # request and the cell-label max-width-chars arithmetic.
+        calls = 0
+
+        def column_width() -> int:
+            nonlocal calls
+            calls += 1
+            return 600
+
+        renderer, buffer, _ = _build_renderer(column_width_px=column_width)
+        renderer.render_into(
+            "|===\n|a|b\n|===\n", buffer, note_id="n1"
+        )
+        self.assertGreaterEqual(calls, 1)
 
 
 @unittest.skipUnless(_display_available(), "no GDK display")
@@ -504,18 +634,22 @@ class RebuildSemanticsTests(unittest.TestCase):
 
     def test_re_rendering_drops_previous_anchors(self) -> None:
         # Two render passes on the same buffer must not accumulate
-        # anchors — the second render starts from a clean buffer.
+        # anchors — the second render starts from a clean buffer. The
+        # source uses a table because tables are the one remaining
+        # block kind that produces a child anchor; the other former
+        # anchor-producers (admonition, blockquote, code block, image)
+        # now render inline.
         renderer, buffer, _ = _build_renderer()
         attached_first: list[tuple[Gtk.TextChildAnchor, Gtk.Widget]] = []
         renderer.render_into(
-            "= D\n\nimage::a.png[]\n",
+            "= D\n\n|===\n|a|b\n|===\n",
             buffer,
             note_id="n1",
             attach_widget=_collect(attached_first),
         )
         attached_second: list[tuple[Gtk.TextChildAnchor, Gtk.Widget]] = []
         renderer.render_into(
-            "= D\n\nNo image here.\n",
+            "= D\n\nNo table here.\n",
             buffer,
             note_id="n1",
             attach_widget=_collect(attached_second),
@@ -1183,6 +1317,26 @@ class TableRenderingTests(unittest.TestCase):
         self.assertEqual(label.get_xalign(), 0.0)
         self.assertEqual(label.get_yalign(), 0.0)
 
+    def test_frame_size_request_matches_column_width(self) -> None:
+        # Anchored children of Gtk.TextView ignore ``hexpand`` and get
+        # allocated their natural width, so the renderer forces the
+        # table frame's horizontal size-request to the live column
+        # width. Without this, the table collapses to the natural
+        # width of its cell labels instead of filling the column.
+        renderer, buffer, _ = _build_renderer(column_width_px=lambda: 712)
+        attached: list[tuple[Gtk.TextChildAnchor, Gtk.Widget]] = []
+        renderer.render_into(
+            "|===\n|a|b\n|===\n",
+            buffer,
+            note_id="n1",
+            attach_widget=_collect(attached),
+        )
+        frame = cast(Gtk.Frame, attached[0][1])
+        request_w, request_h = frame.get_size_request()
+        self.assertEqual(request_w, 712)
+        # Height is left to GTK's natural measurement.
+        self.assertEqual(request_h, -1)
+
 
 # ---------------------------------------------------------------------------
 # Admonitions (step 15)
@@ -1191,14 +1345,22 @@ class TableRenderingTests(unittest.TestCase):
 
 @unittest.skipUnless(_display_available(), "no GDK display")
 class AdmonitionRenderingTests(unittest.TestCase):
-    """Admonitions produce a :class:`Gtk.Frame` with header + body labels.
+    """Admonitions render as two tinted paragraphs (label + body).
+
+    The plan moved admonitions out of an anchored ``Gtk.Frame`` widget
+    and into the buffer itself. The kind name (``NOTE`` / ``TIP`` /
+    …) sits on its own line carrying the per-kind label paragraph
+    tag plus a character-level kind tag for the bold + accent
+    foreground. Each body paragraph carries the per-kind body
+    paragraph tag. Both paragraph tags share the same tint colour so
+    the block reads as one rectangle.
 
     Single-line and block forms converge in the AST, so the renderer
-    has one code path — these tests cover both source forms but the
-    structural assertions are identical.
+    has one code path — these tests cover both source forms.
     """
 
-    def test_single_line_admonition_attaches_a_frame_widget(self) -> None:
+    def test_single_line_admonition_does_not_attach_a_widget(self) -> None:
+        # No widgets for admonitions — the whole block is in-buffer.
         renderer, buffer, _ = _build_renderer()
         attached: list[tuple[Gtk.TextChildAnchor, Gtk.Widget]] = []
         renderer.render_into(
@@ -1207,194 +1369,150 @@ class AdmonitionRenderingTests(unittest.TestCase):
             note_id="n1",
             attach_widget=_collect(attached),
         )
-        self.assertEqual(len(attached), 1)
-        anchor, widget = attached[0]
-        self.assertIsInstance(anchor, Gtk.TextChildAnchor)
-        self.assertIsInstance(widget, Gtk.Frame)
+        self.assertEqual(attached, [])
+        self.assertEqual(_anchor_offsets(buffer), [])
 
-    def test_block_admonition_attaches_a_frame_widget(self) -> None:
-        src = "[NOTE]\n====\nbody\n====\n"
+    def test_single_line_admonition_buffer_contains_kind_and_body(self) -> None:
         renderer, buffer, _ = _build_renderer()
-        attached: list[tuple[Gtk.TextChildAnchor, Gtk.Widget]] = []
+        renderer.render_into("NOTE: hello\n", buffer, note_id="n1")
+        text = _full_text(buffer)
+        # Both the kind label and the body prose appear in the buffer.
+        self.assertIn("NOTE", text)
+        self.assertIn("hello", text)
+        # The kind label is on its own line, immediately preceding
+        # the body. Specifically, "NOTE\nhello" must appear as a
+        # substring — the label's terminating newline is what creates
+        # the paragraph break between the two parts.
+        self.assertIn("NOTE\nhello", text)
+
+    def test_block_admonition_buffer_contains_kind_and_body(self) -> None:
+        renderer, buffer, _ = _build_renderer()
         renderer.render_into(
-            src,
+            "[NOTE]\n====\nbody\n====\n",
             buffer,
             note_id="n1",
-            attach_widget=_collect(attached),
         )
-        self.assertEqual(len(attached), 1)
-        widget = attached[0][1]
-        self.assertIsInstance(widget, Gtk.Frame)
+        self.assertIn("NOTE\nbody", _full_text(buffer))
 
-    def test_frame_carries_admonition_css_classes(self) -> None:
-        renderer, buffer, _ = _build_renderer()
-        attached: list[tuple[Gtk.TextChildAnchor, Gtk.Widget]] = []
-        renderer.render_into(
-            "NOTE: x\n",
-            buffer,
-            note_id="n1",
-            attach_widget=_collect(attached),
-        )
-        frame = cast(Gtk.Frame, attached[0][1])
-        classes = frame.get_css_classes()
-        self.assertIn("admonition", classes)
-        self.assertIn("admonition-note", classes)
-
-    def test_per_kind_css_class_distinguishes_kinds(self) -> None:
-        cases: tuple[tuple[str, str], ...] = (
-            ("NOTE: x\n", "admonition-note"),
-            ("TIP: x\n", "admonition-tip"),
-            ("IMPORTANT: x\n", "admonition-important"),
-            ("WARNING: x\n", "admonition-warning"),
-            ("CAUTION: x\n", "admonition-caution"),
-        )
-        for source, expected_class in cases:
-            with self.subTest(source=source):
+    def test_label_paragraph_carries_per_kind_label_tag(self) -> None:
+        # Every per-kind label paragraph tag is exhaustive over
+        # AdmonitionKind. Iterate the kinds and assert the right tag
+        # is applied to the kind-label range.
+        for kind in AdmonitionKind:
+            with self.subTest(kind=kind):
                 renderer, buffer, _ = _build_renderer()
-                attached: list[
-                    tuple[Gtk.TextChildAnchor, Gtk.Widget]
-                ] = []
                 renderer.render_into(
-                    source,
+                    f"{kind.value}: hello\n",
                     buffer,
                     note_id="n1",
-                    attach_widget=_collect(attached),
                 )
-                frame = cast(Gtk.Frame, attached[0][1])
-                self.assertIn(expected_class, frame.get_css_classes())
+                text = _full_text(buffer)
+                start = text.index(kind.value)
+                tags_at_label = _tag_names_at(buffer, start)
+                self.assertIn(
+                    admonition_label_tag_name(kind).value,
+                    tags_at_label,
+                )
 
-    def test_frame_contains_a_box_with_header_and_body_labels(self) -> None:
+    def test_kind_text_carries_per_kind_kind_character_tag(self) -> None:
+        # The kind-character tag (bold + accent foreground) applies
+        # to the kind text itself but not to its terminating newline.
+        for kind in AdmonitionKind:
+            with self.subTest(kind=kind):
+                renderer, buffer, _ = _build_renderer()
+                renderer.render_into(
+                    f"{kind.value}: x\n",
+                    buffer,
+                    note_id="n1",
+                )
+                text = _full_text(buffer)
+                start = text.index(kind.value)
+                # Each character of the kind text bears the kind tag.
+                for offset in range(start, start + len(kind.value)):
+                    tags = _tag_names_at(buffer, offset)
+                    self.assertIn(
+                        admonition_kind_tag_name(kind).value,
+                        tags,
+                        f"kind tag missing at offset {offset} for {kind.value}",
+                    )
+
+    def test_body_paragraph_carries_per_kind_body_tag(self) -> None:
+        for kind in AdmonitionKind:
+            with self.subTest(kind=kind):
+                renderer, buffer, _ = _build_renderer()
+                renderer.render_into(
+                    f"{kind.value}: body text\n",
+                    buffer,
+                    note_id="n1",
+                )
+                text = _full_text(buffer)
+                start = text.index("body text")
+                tags_at_body = _tag_names_at(buffer, start)
+                self.assertIn(
+                    admonition_body_tag_name(kind).value,
+                    tags_at_body,
+                )
+
+    def test_body_does_not_carry_kind_character_tag(self) -> None:
+        # The character-level kind tag (bold + foreground) is scoped
+        # to the kind label only. Body prose composes its own
+        # inline formatting via the existing bold / italic / etc.
+        # tags.
         renderer, buffer, _ = _build_renderer()
-        attached: list[tuple[Gtk.TextChildAnchor, Gtk.Widget]] = []
-        renderer.render_into(
-            "NOTE: hello\n",
-            buffer,
-            note_id="n1",
-            attach_widget=_collect(attached),
-        )
-        frame = cast(Gtk.Frame, attached[0][1])
-        box = frame.get_child()
-        self.assertIsInstance(box, Gtk.Box)
-        # Walk the box's children — first one is the header label,
-        # subsequent ones are the body paragraph labels.
-        children: list[Gtk.Widget] = []
-        child = cast(Gtk.Box, box).get_first_child()
-        while child is not None:
-            children.append(child)
-            child = child.get_next_sibling()
-        self.assertGreaterEqual(len(children), 2)
-        self.assertIsInstance(children[0], Gtk.Label)
-        self.assertIsInstance(children[1], Gtk.Label)
+        renderer.render_into("NOTE: hello\n", buffer, note_id="n1")
+        text = _full_text(buffer)
+        body_offset = text.index("hello")
+        tags = _tag_names_at(buffer, body_offset)
+        self.assertNotIn(TagName.ADMONITION_NOTE_KIND.value, tags)
 
-    def test_header_label_carries_the_kind_text(self) -> None:
+    def test_body_inline_formatting_composes_with_body_tag(self) -> None:
+        # A bold span inside the body must keep its BOLD tag on top
+        # of the body paragraph tag — they layer cleanly.
         renderer, buffer, _ = _build_renderer()
-        attached: list[tuple[Gtk.TextChildAnchor, Gtk.Widget]] = []
-        renderer.render_into(
-            "TIP: x\n",
-            buffer,
-            note_id="n1",
-            attach_widget=_collect(attached),
-        )
-        frame = cast(Gtk.Frame, attached[0][1])
-        box = cast(Gtk.Box, frame.get_child())
-        header = cast(Gtk.Label, box.get_first_child())
-        self.assertEqual(header.get_text(), "TIP")
-        self.assertIn("admonition-header", header.get_css_classes())
-
-    def test_body_label_wraps_at_column_width(self) -> None:
-        # Body labels respect the article column — the column width
-        # is read once via the injected resolver.
-        renderer, buffer, _ = _build_renderer(
-            column_width_px=lambda: 800,
-        )
-        attached: list[tuple[Gtk.TextChildAnchor, Gtk.Widget]] = []
-        renderer.render_into(
-            "NOTE: a body line\n",
-            buffer,
-            note_id="n1",
-            attach_widget=_collect(attached),
-        )
-        frame = cast(Gtk.Frame, attached[0][1])
-        box = cast(Gtk.Box, frame.get_child())
-        # Header is the first child; the body label follows.
-        header = box.get_first_child()
-        assert header is not None
-        body_label = cast(Gtk.Label, header.get_next_sibling())
-        self.assertTrue(body_label.get_wrap())
-        self.assertEqual(
-            body_label.get_max_width_chars(),
-            TARGET_CHARS_PER_LINE,
-        )
-        self.assertIn("admonition-body", body_label.get_css_classes())
-
-    def test_body_label_uses_pango_markup_for_inline(self) -> None:
-        # Bold inside the body is preserved via Pango markup.
-        renderer, buffer, _ = _build_renderer()
-        attached: list[tuple[Gtk.TextChildAnchor, Gtk.Widget]] = []
         renderer.render_into(
             "NOTE: see *bold* text\n",
             buffer,
             note_id="n1",
-            attach_widget=_collect(attached),
         )
-        frame = cast(Gtk.Frame, attached[0][1])
-        box = cast(Gtk.Box, frame.get_child())
-        body_label = cast(Gtk.Label, box.get_first_child().get_next_sibling())
-        # Pango markup leaves the visible text unstyled by markup tags;
-        # the displayed text is the prose.
-        self.assertEqual(body_label.get_text(), "see bold text")
+        text = _full_text(buffer)
+        bold_offset = text.index("bold")
+        tags = _tag_names_at(buffer, bold_offset)
+        self.assertIn(TagName.BOLD.value, tags)
+        self.assertIn(TagName.ADMONITION_NOTE_BODY.value, tags)
 
-    def test_block_admonition_with_two_paragraphs_makes_two_body_labels(
-        self,
-    ) -> None:
+    def test_two_body_paragraphs_each_tagged(self) -> None:
+        # A two-paragraph admonition body produces two paragraph
+        # spans, each carrying the body tag.
         src = "[NOTE]\n====\nfirst\n\nsecond\n====\n"
         renderer, buffer, _ = _build_renderer()
-        attached: list[tuple[Gtk.TextChildAnchor, Gtk.Widget]] = []
-        renderer.render_into(
-            src,
-            buffer,
-            note_id="n1",
-            attach_widget=_collect(attached),
-        )
-        frame = cast(Gtk.Frame, attached[0][1])
-        box = cast(Gtk.Box, frame.get_child())
-        children: list[Gtk.Widget] = []
-        child = box.get_first_child()
-        while child is not None:
-            children.append(child)
-            child = child.get_next_sibling()
-        # Header + two body paragraphs = three children.
-        self.assertEqual(len(children), 3)
+        renderer.render_into(src, buffer, note_id="n1")
+        text = _full_text(buffer)
+        for substring in ("first", "second"):
+            with self.subTest(substring=substring):
+                offset = text.index(substring)
+                tags = _tag_names_at(buffer, offset)
+                self.assertIn(TagName.ADMONITION_NOTE_BODY.value, tags)
 
-    def test_empty_admonition_body_produces_only_header(self) -> None:
-        # ``[NOTE]\n====\n====\n`` — empty body, just the header.
+    def test_empty_admonition_body_emits_only_kind_label(self) -> None:
+        # ``[NOTE]\n====\n====\n`` parses to a kind-only admonition.
+        # The renderer emits just the label paragraph plus the
+        # block-separator newline — no body paragraph is created.
         src = "[NOTE]\n====\n====\n"
         renderer, buffer, _ = _build_renderer()
-        attached: list[tuple[Gtk.TextChildAnchor, Gtk.Widget]] = []
-        renderer.render_into(
-            src,
+        renderer.render_into(src, buffer, note_id="n1")
+        text = _full_text(buffer)
+        self.assertIn("NOTE", text)
+        # The label range carries the label tag.
+        label_offset = text.index("NOTE")
+        tags = _tag_names_at(buffer, label_offset)
+        self.assertIn(TagName.ADMONITION_NOTE_LABEL.value, tags)
+        # No range carries the BODY tag — the kind-only block has no
+        # body paragraph at all.
+        body_ranges = _ranges_with_tag(
             buffer,
-            note_id="n1",
-            attach_widget=_collect(attached),
+            TagName.ADMONITION_NOTE_BODY.value,
         )
-        frame = cast(Gtk.Frame, attached[0][1])
-        box = cast(Gtk.Box, frame.get_child())
-        first = box.get_first_child()
-        assert first is not None
-        # No second child — body is empty.
-        self.assertIsNone(first.get_next_sibling())
-
-    def test_admonition_anchor_is_inserted_in_buffer(self) -> None:
-        renderer, buffer, _ = _build_renderer()
-        attached: list[tuple[Gtk.TextChildAnchor, Gtk.Widget]] = []
-        renderer.render_into(
-            "NOTE: hello\n",
-            buffer,
-            note_id="n1",
-            attach_widget=_collect(attached),
-        )
-        anchors = _anchor_offsets(buffer)
-        self.assertEqual(len(anchors), 1)
+        self.assertEqual(body_ranges, [])
 
 
 # ---------------------------------------------------------------------------
@@ -1404,195 +1522,139 @@ class AdmonitionRenderingTests(unittest.TestCase):
 
 @unittest.skipUnless(_display_available(), "no GDK display")
 class BlockquoteRenderingTests(unittest.TestCase):
-    """Blockquotes produce a :class:`Gtk.Frame` with body + optional attribution."""
+    """Blockquotes render as italic indented paragraphs + optional attribution.
 
-    def test_unattributed_blockquote_attaches_a_frame_widget(self) -> None:
-        src = "____\nA quote.\n____\n"
+    Body paragraphs carry :data:`TagName.BLOCKQUOTE_BODY` (tint +
+    indent) plus :data:`TagName.ITALIC` for the italic style. An
+    optional attribution paragraph carries
+    :data:`TagName.BLOCKQUOTE_ATTRIBUTION` (right-aligned, smaller
+    scale).
+    """
+
+    def test_unattributed_blockquote_does_not_attach_a_widget(self) -> None:
+        # The whole block is in-buffer — no widget escape, no anchor.
         renderer, buffer, _ = _build_renderer()
         attached: list[tuple[Gtk.TextChildAnchor, Gtk.Widget]] = []
         renderer.render_into(
-            src,
+            "____\nA quote.\n____\n",
             buffer,
             note_id="n1",
             attach_widget=_collect(attached),
         )
-        self.assertEqual(len(attached), 1)
-        anchor, widget = attached[0]
-        self.assertIsInstance(anchor, Gtk.TextChildAnchor)
-        self.assertIsInstance(widget, Gtk.Frame)
+        self.assertEqual(attached, [])
+        self.assertEqual(_anchor_offsets(buffer), [])
 
-    def test_blockquote_frame_carries_blockquote_css_class(self) -> None:
+    def test_blockquote_body_text_is_in_buffer(self) -> None:
         renderer, buffer, _ = _build_renderer()
-        attached: list[tuple[Gtk.TextChildAnchor, Gtk.Widget]] = []
         renderer.render_into(
-            "____\nq\n____\n",
+            "____\nA quote.\n____\n",
             buffer,
             note_id="n1",
-            attach_widget=_collect(attached),
         )
-        frame = cast(Gtk.Frame, attached[0][1])
-        self.assertIn("blockquote", frame.get_css_classes())
+        self.assertIn("A quote.", _full_text(buffer))
 
-    def test_blockquote_body_has_blockquote_body_css_class(self) -> None:
+    def test_body_paragraph_carries_body_and_italic_tags(self) -> None:
+        # The italic style composes via the shared ITALIC tag, layered
+        # on top of the body paragraph tag — so every body char must
+        # bear both.
         renderer, buffer, _ = _build_renderer()
-        attached: list[tuple[Gtk.TextChildAnchor, Gtk.Widget]] = []
-        renderer.render_into(
-            "____\nthe quote\n____\n",
-            buffer,
-            note_id="n1",
-            attach_widget=_collect(attached),
-        )
-        frame = cast(Gtk.Frame, attached[0][1])
-        box = cast(Gtk.Box, frame.get_child())
-        body_label = cast(Gtk.Label, box.get_first_child())
-        self.assertIn("blockquote-body", body_label.get_css_classes())
-
-    def test_no_attribution_when_directive_absent(self) -> None:
-        renderer, buffer, _ = _build_renderer()
-        attached: list[tuple[Gtk.TextChildAnchor, Gtk.Widget]] = []
         renderer.render_into(
             "____\nthe quote\n____\n",
             buffer,
             note_id="n1",
-            attach_widget=_collect(attached),
         )
-        frame = cast(Gtk.Frame, attached[0][1])
-        box = cast(Gtk.Box, frame.get_child())
-        # Walk children: should be exactly one body label, no
-        # attribution.
-        children: list[Gtk.Widget] = []
-        child = box.get_first_child()
-        while child is not None:
-            children.append(child)
-            child = child.get_next_sibling()
-        self.assertEqual(len(children), 1)
-        # The single child is the body label, and carries the
-        # blockquote-body css class (not the attribution one).
-        only = children[0]
-        self.assertIn("blockquote-body", only.get_css_classes())
-        self.assertNotIn(
-            "blockquote-attribution", only.get_css_classes()
-        )
+        text = _full_text(buffer)
+        start = text.index("the quote")
+        for offset in range(start, start + len("the quote")):
+            tags = _tag_names_at(buffer, offset)
+            self.assertIn(TagName.BLOCKQUOTE_BODY.value, tags)
+            self.assertIn(TagName.ITALIC.value, tags)
 
-    def test_attribution_label_when_author_only(self) -> None:
+    def test_no_attribution_text_when_directive_absent(self) -> None:
+        # Without a ``[quote, …]`` directive there is no attribution
+        # paragraph; the attribution tag is therefore applied to no
+        # range at all.
+        renderer, buffer, _ = _build_renderer()
+        renderer.render_into(
+            "____\nthe quote\n____\n",
+            buffer,
+            note_id="n1",
+        )
+        attribution_ranges = _ranges_with_tag(
+            buffer,
+            TagName.BLOCKQUOTE_ATTRIBUTION.value,
+        )
+        self.assertEqual(attribution_ranges, [])
+
+    def test_attribution_text_when_author_only(self) -> None:
         src = "[quote, Mark Twain]\n____\nq\n____\n"
         renderer, buffer, _ = _build_renderer()
-        attached: list[tuple[Gtk.TextChildAnchor, Gtk.Widget]] = []
-        renderer.render_into(
-            src,
-            buffer,
-            note_id="n1",
-            attach_widget=_collect(attached),
-        )
-        frame = cast(Gtk.Frame, attached[0][1])
-        box = cast(Gtk.Box, frame.get_child())
-        # Last child is the attribution label.
-        last_child: Gtk.Widget | None = None
-        child = box.get_first_child()
-        while child is not None:
-            last_child = child
-            child = child.get_next_sibling()
-        assert last_child is not None
-        attribution = cast(Gtk.Label, last_child)
-        self.assertIn("blockquote-attribution", attribution.get_css_classes())
-        self.assertEqual(attribution.get_text(), "— Mark Twain")
+        renderer.render_into(src, buffer, note_id="n1")
+        text = _full_text(buffer)
+        self.assertIn("— Mark Twain", text)
+        # The attribution text bears the attribution paragraph tag.
+        start = text.index("— Mark Twain")
+        tags = _tag_names_at(buffer, start)
+        self.assertIn(TagName.BLOCKQUOTE_ATTRIBUTION.value, tags)
 
-    def test_attribution_label_when_author_and_source(self) -> None:
+    def test_attribution_text_when_author_and_source(self) -> None:
         src = "[quote, Mark Twain, Notebook]\n____\nq\n____\n"
         renderer, buffer, _ = _build_renderer()
-        attached: list[tuple[Gtk.TextChildAnchor, Gtk.Widget]] = []
-        renderer.render_into(
-            src,
-            buffer,
-            note_id="n1",
-            attach_widget=_collect(attached),
-        )
-        frame = cast(Gtk.Frame, attached[0][1])
-        box = cast(Gtk.Box, frame.get_child())
-        last_child: Gtk.Widget | None = None
-        child = box.get_first_child()
-        while child is not None:
-            last_child = child
-            child = child.get_next_sibling()
-        assert last_child is not None
-        attribution = cast(Gtk.Label, last_child)
-        self.assertEqual(attribution.get_text(), "— Mark Twain, Notebook")
+        renderer.render_into(src, buffer, note_id="n1")
+        text = _full_text(buffer)
+        self.assertIn("— Mark Twain, Notebook", text)
 
     def test_bare_quote_directive_yields_no_attribution(self) -> None:
-        # ``[quote]`` (no attribution) — same as no directive.
+        # ``[quote]`` (no attribution fields) — same as no directive.
         src = "[quote]\n____\nq\n____\n"
         renderer, buffer, _ = _build_renderer()
-        attached: list[tuple[Gtk.TextChildAnchor, Gtk.Widget]] = []
-        renderer.render_into(
-            src,
+        renderer.render_into(src, buffer, note_id="n1")
+        attribution_ranges = _ranges_with_tag(
             buffer,
-            note_id="n1",
-            attach_widget=_collect(attached),
+            TagName.BLOCKQUOTE_ATTRIBUTION.value,
         )
-        frame = cast(Gtk.Frame, attached[0][1])
-        box = cast(Gtk.Box, frame.get_child())
-        children: list[Gtk.Widget] = []
-        child = box.get_first_child()
-        while child is not None:
-            children.append(child)
-            child = child.get_next_sibling()
-        # Only the body label, no attribution row.
-        self.assertEqual(len(children), 1)
+        self.assertEqual(attribution_ranges, [])
 
-    def test_body_label_wraps_at_column_width(self) -> None:
-        renderer, buffer, _ = _build_renderer(
-            column_width_px=lambda: 800,
-        )
-        attached: list[tuple[Gtk.TextChildAnchor, Gtk.Widget]] = []
-        renderer.render_into(
-            "____\na quoted line\n____\n",
-            buffer,
-            note_id="n1",
-            attach_widget=_collect(attached),
-        )
-        frame = cast(Gtk.Frame, attached[0][1])
-        box = cast(Gtk.Box, frame.get_child())
-        body_label = cast(Gtk.Label, box.get_first_child())
-        self.assertTrue(body_label.get_wrap())
-        self.assertEqual(
-            body_label.get_max_width_chars(),
-            TARGET_CHARS_PER_LINE,
-        )
+    def test_attribution_does_not_carry_italic_tag(self) -> None:
+        # The body is italic; the attribution is not. The attribution
+        # paragraph tag must be applied without layering ITALIC on top.
+        src = "[quote, Mark Twain]\n____\nq\n____\n"
+        renderer, buffer, _ = _build_renderer()
+        renderer.render_into(src, buffer, note_id="n1")
+        text = _full_text(buffer)
+        attribution_start = text.index("— Mark Twain")
+        tags = _tag_names_at(buffer, attribution_start)
+        self.assertNotIn(TagName.ITALIC.value, tags)
+        self.assertNotIn(TagName.BLOCKQUOTE_BODY.value, tags)
 
-    def test_blockquote_with_two_paragraphs_makes_two_body_labels(
-        self,
-    ) -> None:
+    def test_two_body_paragraphs_each_tagged(self) -> None:
         src = "____\nfirst\n\nsecond\n____\n"
         renderer, buffer, _ = _build_renderer()
-        attached: list[tuple[Gtk.TextChildAnchor, Gtk.Widget]] = []
-        renderer.render_into(
-            src,
-            buffer,
-            note_id="n1",
-            attach_widget=_collect(attached),
-        )
-        frame = cast(Gtk.Frame, attached[0][1])
-        box = cast(Gtk.Box, frame.get_child())
-        children: list[Gtk.Widget] = []
-        child = box.get_first_child()
-        while child is not None:
-            children.append(child)
-            child = child.get_next_sibling()
-        self.assertEqual(len(children), 2)
+        renderer.render_into(src, buffer, note_id="n1")
+        text = _full_text(buffer)
+        for substring in ("first", "second"):
+            with self.subTest(substring=substring):
+                offset = text.index(substring)
+                tags = _tag_names_at(buffer, offset)
+                self.assertIn(TagName.BLOCKQUOTE_BODY.value, tags)
+                self.assertIn(TagName.ITALIC.value, tags)
 
-    def test_blockquote_body_pango_markup_preserves_inline(self) -> None:
+    def test_body_inline_formatting_composes_with_body_tag(self) -> None:
+        # A bold span inside the body must keep its BOLD tag on top
+        # of the body paragraph tag and the italic tag — three tags
+        # layered cleanly on the same range.
         renderer, buffer, _ = _build_renderer()
-        attached: list[tuple[Gtk.TextChildAnchor, Gtk.Widget]] = []
         renderer.render_into(
             "____\nuse *bold* text\n____\n",
             buffer,
             note_id="n1",
-            attach_widget=_collect(attached),
         )
-        frame = cast(Gtk.Frame, attached[0][1])
-        box = cast(Gtk.Box, frame.get_child())
-        body_label = cast(Gtk.Label, box.get_first_child())
-        self.assertEqual(body_label.get_text(), "use bold text")
+        text = _full_text(buffer)
+        bold_offset = text.index("bold")
+        tags = _tag_names_at(buffer, bold_offset)
+        self.assertIn(TagName.BOLD.value, tags)
+        self.assertIn(TagName.BLOCKQUOTE_BODY.value, tags)
+        self.assertIn(TagName.ITALIC.value, tags)
 
 
 # ---------------------------------------------------------------------------
@@ -1731,49 +1793,27 @@ class SourdoughFixtureRegressionTests(unittest.TestCase):
         text = _full_text(buffer)
         self.assertTrue(text)
         self.assertIn("Sourdough country loaf", text)
-        # The two NOTE / TIP admonition contents should land in the
-        # buffer (admonitions render as widgets attached at anchors,
-        # so the body text appears in the attached widget tree
-        # rather than in ``text``). At minimum the heading text and
-        # bullet items are visible.
+        # Admonition bodies now live in the buffer text (they used to
+        # be inside anchored widgets); section titles and bullet items
+        # were already there. Spot-check both flavours.
         self.assertIn("Notes", text)
         self.assertIn("Result", text)
         self.assertIn("Hydration", text)
 
     def test_elided_fixture_admonitions_carry_continuation_text(self) -> None:
         # §3.5: the multi-line NOTE / TIP admonitions in the fixture
-        # carry their full second-line text. The renderer puts
-        # admonition bodies in a Gtk.Label inside a Gtk.Frame; we
-        # walk the attached widgets to find the bodies and assert
-        # both lines are present.
+        # carry their full second-line text. After the refactor,
+        # admonition bodies are in-buffer text — walk the buffer
+        # rather than the widget tree.
         renderer, buffer, _ = _build_renderer()
-        attached: list[tuple[Gtk.TextChildAnchor, Gtk.Widget]] = []
         source = _elide_recipe_link_line(_read_sourdough_fixture())
-        renderer.render_into(
-            source,
-            buffer,
-            note_id="sourdough",
-            attach_widget=_collect(attached),
-        )
-        admonition_texts: list[str] = []
-        for _anchor, widget in attached:
-            if not isinstance(widget, Gtk.Frame):
-                continue
-            box = widget.get_child()
-            if not isinstance(box, Gtk.Box):
-                continue
-            child = box.get_first_child()
-            while child is not None:
-                if isinstance(child, Gtk.Label):
-                    admonition_texts.append(child.get_text())
-                child = child.get_next_sibling()
+        renderer.render_into(source, buffer, note_id="sourdough")
+        text = _full_text(buffer)
         # Both NOTE and TIP bodies are wrapped over two source lines.
-        # The continuation text from each should appear in some
-        # collected label.
-        all_text = "\n".join(admonition_texts)
-        self.assertIn("hold back 20g", all_text)
-        self.assertIn("on the next bake", all_text)  # NOTE line 2
-        self.assertIn("predictably than a cross", all_text)  # TIP line 2
+        # The continuation text from each must appear in the buffer.
+        self.assertIn("hold back 20g", text)
+        self.assertIn("on the next bake", text)  # NOTE line 2
+        self.assertIn("predictably than a cross", text)  # TIP line 2
 
     def test_elided_fixture_table_has_correct_arity(self) -> None:
         # §3.2: ``[cols="3,1", options="header"]`` should be
