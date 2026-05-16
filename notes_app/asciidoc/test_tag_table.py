@@ -13,20 +13,34 @@ from gi.repository import Gtk, Pango  # noqa: E402
 
 from notes_app.asciidoc.tag_table import (
     TagName,
+    WashSpec,
     admonition_body_tag_name,
     admonition_kind_tag_name,
     admonition_label_tag_name,
     build_tag_table,
+    build_wash_specs,
     heading_tag_name,
 )
 from notes_app.enums import AdmonitionKind
 
 
-# Tag names that carry a paragraph-background tint. The renderer applies
-# these as paragraph tags across the inserted range, so the
-# ``paragraph-background-rgba`` property must be set on each. Listed in
-# one place here so a future "new block kind with a tint" adds itself
-# to the list rather than tweaking every test that iterates it.
+# Default M-width used by tests that don't care about the actual
+# value. ``build_tag_table`` requires ``char_width_px`` (no default)
+# so every call site supplies one — see the tag-table docstring for
+# why this is required rather than defaulted. The literal ``9`` is
+# arbitrary but typical (close to a real body font's M-width); what
+# matters is that it's a positive int.
+_TEST_CHAR_WIDTH_PX: int = 9
+
+
+# Tag names that *used* to carry ``paragraph-background-rgba`` directly
+# on the tag. The wash for these blocks is now painted at snapshot time
+# by :class:`_ArticleTextView` (see :func:`build_wash_specs`), so the
+# tags must *not* set ``paragraph-background-rgba`` — the inverted test
+# below (:class:`ParagraphBackgroundIsNotOnTagsTests`) pins that
+# invariant. Listed in one place here so a future "new block kind with
+# a tint" adds itself to the list rather than tweaking every test that
+# iterates it.
 _PARAGRAPH_BACKGROUND_TAGS: tuple[TagName, ...] = (
     TagName.ADMONITION_NOTE_LABEL,
     TagName.ADMONITION_TIP_LABEL,
@@ -188,7 +202,7 @@ class BuildTagTableStructureTests(unittest.TestCase):
     """
 
     def setUp(self) -> None:
-        self.table = build_tag_table()
+        self.table = build_tag_table(char_width_px=_TEST_CHAR_WIDTH_PX)
 
     def test_every_enum_member_has_a_tag(self) -> None:
         for name in TagName:
@@ -211,7 +225,7 @@ class BuildTagTableStructureTests(unittest.TestCase):
     def test_each_call_returns_a_fresh_table(self) -> None:
         # Per the module's invariant: a fresh table per call. This lets
         # tests construct independent buffers without aliasing.
-        another = build_tag_table()
+        another = build_tag_table(char_width_px=_TEST_CHAR_WIDTH_PX)
         self.assertIsNot(self.table, another)
         # The tags inside are also fresh — not aliased.
         self.assertIsNot(
@@ -235,7 +249,7 @@ class InlineTagPropertyTests(unittest.TestCase):
     """The four inline tags carry the visual properties they advertise."""
 
     def setUp(self) -> None:
-        self.table = build_tag_table()
+        self.table = build_tag_table(char_width_px=_TEST_CHAR_WIDTH_PX)
 
     def test_bold_tag_uses_bold_weight(self) -> None:
         tag = self.table.lookup(TagName.BOLD.value)
@@ -301,7 +315,7 @@ class HeadingTagPropertyTests(unittest.TestCase):
     """Heading tags are bold-weight + scale, in monotone-decreasing scale."""
 
     def setUp(self) -> None:
-        self.table = build_tag_table()
+        self.table = build_tag_table(char_width_px=_TEST_CHAR_WIDTH_PX)
 
     def test_every_heading_tag_is_bold(self) -> None:
         for level in (0, 2, 3, 4, 5, 6):
@@ -335,33 +349,54 @@ class HeadingTagPropertyTests(unittest.TestCase):
         self.assertGreater(h0, h2)
 
 
-class ParagraphBackgroundPropertyTests(unittest.TestCase):
-    """Every paragraph-tinted tag carries the ``paragraph-background-rgba`` prop.
+class ParagraphBackgroundIsNotOnTagsTests(unittest.TestCase):
+    """No block-level paragraph tag carries ``paragraph-background-rgba``.
 
-    These tags are the renderer's only way to paint a tinted background
-    behind a block — the existence of the property is the structural
-    invariant. The exact RGBA values are deliberately not asserted; they
-    live as private constants in :mod:`tag_table` and are tweakable.
+    The wash for admonition / blockquote / code-block paragraphs is
+    painted at snapshot time by the article TextView subclass in
+    :mod:`notes_app.ui.note_view`, *not* via the paragraph tag. This
+    is because GTK's ``paragraph-background-rgba`` paints exactly
+    between the paragraph's effective ``left-margin`` and
+    ``right-margin`` — there is no property that decouples wash
+    position from text position. The snapshot-time painter produces
+    the "padded card" effect (one M-width of tinted space between the
+    text and the box edge on each side) that the user actually wants.
+    See the module docstring for the long form.
+
+    This test pins the structural invariant of the new design: every
+    paragraph tag that previously carried a wash now has
+    ``paragraph-background-set = False``. If a future change adds a
+    wash directly to a tag, it will fire here — the message is that
+    the wash should be painted via :func:`build_wash_specs` and
+    :class:`_ArticleTextView` instead.
     """
 
     def setUp(self) -> None:
-        self.table = build_tag_table()
+        self.table = build_tag_table(char_width_px=_TEST_CHAR_WIDTH_PX)
 
-    def test_every_paragraph_background_tag_has_the_property_set(self) -> None:
+    def test_no_paragraph_tag_carries_a_paragraph_background_rgba(self) -> None:
         for name in _PARAGRAPH_BACKGROUND_TAGS:
             with self.subTest(name=name):
                 tag = self.table.lookup(name.value)
-                self.assertTrue(
+                self.assertFalse(
                     tag.get_property("paragraph-background-set"),
-                    f"{name!r} missing paragraph-background",
+                    f"{name!r} still carries paragraph-background-rgba; "
+                    f"the wash should live on build_wash_specs() instead",
                 )
+
+    def test_attribution_does_not_carry_a_paragraph_background(self) -> None:
+        # The attribution never had a tint, but pin the invariant
+        # alongside its body sibling so the rule "no paragraph
+        # backgrounds on block-level tags" is total.
+        tag = self.table.lookup(TagName.BLOCKQUOTE_ATTRIBUTION.value)
+        self.assertFalse(tag.get_property("paragraph-background-set"))
 
 
 class AdmonitionTagPropertyTests(unittest.TestCase):
     """Admonition tags carry the visual properties the layout requires."""
 
     def setUp(self) -> None:
-        self.table = build_tag_table()
+        self.table = build_tag_table(char_width_px=_TEST_CHAR_WIDTH_PX)
 
     def test_every_label_paragraph_tag_has_left_and_right_margins(self) -> None:
         for kind in AdmonitionKind:
@@ -420,12 +455,29 @@ class AdmonitionTagPropertyTests(unittest.TestCase):
                     self.assertFalse(tag.get_property("weight-set"))
                     self.assertFalse(tag.get_property("family-set"))
 
+    def test_paragraph_tag_uses_accumulative_margin(self) -> None:
+        # The wash painter relies on the text being positioned *inside*
+        # the box one M-width on each side. The textview's widget-level
+        # left/right margins set the column edge; the tag's
+        # ``left-margin`` / ``right-margin`` must *stack* on top of
+        # those (``accumulative-margin = True``) rather than
+        # *replacing* them, otherwise the admonition would escape the
+        # inner column.
+        for kind in AdmonitionKind:
+            with self.subTest(kind=kind):
+                for name in (
+                    admonition_label_tag_name(kind),
+                    admonition_body_tag_name(kind),
+                ):
+                    tag = self.table.lookup(name.value)
+                    self.assertTrue(tag.get_property("accumulative-margin"))
+
 
 class BlockquoteTagPropertyTests(unittest.TestCase):
     """Blockquote body and attribution tags."""
 
     def setUp(self) -> None:
-        self.table = build_tag_table()
+        self.table = build_tag_table(char_width_px=_TEST_CHAR_WIDTH_PX)
 
     def test_body_has_left_margin_indent(self) -> None:
         # The indent is what distinguishes a quote from running prose.
@@ -461,16 +513,27 @@ class BlockquoteTagPropertyTests(unittest.TestCase):
         self.assertTrue(tag.get_property("scale-set"))
         self.assertLess(tag.get_property("scale"), 1.0)
 
+    def test_body_paragraph_tag_uses_accumulative_margin(self) -> None:
+        # Same invariant as the admonition tags: the wash painter
+        # relies on the text being positioned *inside* the box; the
+        # tag's ``left-margin`` / ``right-margin`` must stack on top
+        # of the textview's widget-level margins rather than replace
+        # them, otherwise the blockquote escapes the inner column.
+        tag = self.table.lookup(TagName.BLOCKQUOTE_BODY.value)
+        self.assertTrue(tag.get_property("accumulative-margin"))
+
+    def test_attribution_tag_uses_accumulative_margin(self) -> None:
+        # The attribution sits flush with the body's text, so its
+        # margins must compose with the widget the same way.
+        tag = self.table.lookup(TagName.BLOCKQUOTE_ATTRIBUTION.value)
+        self.assertTrue(tag.get_property("accumulative-margin"))
+
 
 class CodeBlockTagPropertyTests(unittest.TestCase):
     """Code-block tag carries layout but not the monospace family."""
 
     def setUp(self) -> None:
-        self.table = build_tag_table()
-
-    def test_has_paragraph_background(self) -> None:
-        tag = self.table.lookup(TagName.CODE_BLOCK.value)
-        self.assertTrue(tag.get_property("paragraph-background-set"))
+        self.table = build_tag_table(char_width_px=_TEST_CHAR_WIDTH_PX)
 
     def test_has_left_and_right_margins(self) -> None:
         tag = self.table.lookup(TagName.CODE_BLOCK.value)
@@ -483,6 +546,94 @@ class CodeBlockTagPropertyTests(unittest.TestCase):
         # that composition strategy.
         tag = self.table.lookup(TagName.CODE_BLOCK.value)
         self.assertFalse(tag.get_property("family-set"))
+
+    def test_paragraph_tag_uses_accumulative_margin(self) -> None:
+        # The wash painter relies on the text being positioned *inside*
+        # the box one M-width on each side. The textview's widget-level
+        # left/right margins set the column edge; the tag's
+        # ``left-margin`` / ``right-margin`` must *stack* on top of
+        # those (``accumulative-margin = True``) rather than
+        # *replacing* them, otherwise a block-level paragraph would
+        # escape the inner column.
+        tag = self.table.lookup(TagName.CODE_BLOCK.value)
+        self.assertTrue(tag.get_property("accumulative-margin"))
+
+
+class WashSpecTests(unittest.TestCase):
+    """The :func:`build_wash_specs` map drives the snapshot-time wash painter.
+
+    Every key in the map must resolve on the tag table; every value
+    must be a structurally sound :class:`WashSpec`; and the
+    "attribution has no wash" invariant must hold (the painter
+    paints nothing behind a :data:`TagName.BLOCKQUOTE_ATTRIBUTION`
+    line). The admonition label and body for one kind must share an
+    identical spec so they read as one rectangle.
+    """
+
+    def setUp(self) -> None:
+        self.specs = build_wash_specs()
+        self.table = build_tag_table(char_width_px=_TEST_CHAR_WIDTH_PX)
+
+    def test_keys_are_tag_names(self) -> None:
+        for name in self.specs:
+            with self.subTest(name=name):
+                self.assertIsInstance(name, TagName)
+
+    def test_every_key_resolves_on_the_tag_table(self) -> None:
+        # The painter looks tags up by name from the buffer's tag
+        # table at construction time. A wash-spec key with no
+        # corresponding tag would be silently dropped, so any
+        # mismatch must fire here.
+        for name in self.specs:
+            with self.subTest(name=name):
+                self.assertIsNotNone(self.table.lookup(name.value))
+
+    def test_every_value_is_a_wash_spec_with_valid_fields(self) -> None:
+        for name, spec in self.specs.items():
+            with self.subTest(name=name):
+                self.assertIsInstance(spec, WashSpec)
+                # Tint is a 4-tuple of floats in [0, 1].
+                self.assertEqual(len(spec.tint), 4)
+                for component in spec.tint:
+                    self.assertIsInstance(component, float)
+                    self.assertGreaterEqual(component, 0.0)
+                    self.assertLessEqual(component, 1.0)
+                # Insets are non-negative ints.
+                self.assertIsInstance(spec.box_left_inset_px, int)
+                self.assertIsInstance(spec.box_right_inset_px, int)
+                self.assertGreaterEqual(spec.box_left_inset_px, 0)
+                self.assertGreaterEqual(spec.box_right_inset_px, 0)
+
+    def test_admonition_label_and_body_share_identical_spec(self) -> None:
+        # Label + body must form one rectangle visually, so the two
+        # paragraph tags must paint the same colour at the same
+        # horizontal extents — i.e. the *same* :class:`WashSpec`
+        # instance. ``assertIs`` (identity, not equality) makes the
+        # invariant tighter: a tweak to one tint would force the
+        # shared spec, not two near-duplicate ones.
+        for kind in AdmonitionKind:
+            with self.subTest(kind=kind):
+                label = self.specs[admonition_label_tag_name(kind)]
+                body = self.specs[admonition_body_tag_name(kind)]
+                self.assertIs(label, body)
+
+    def test_blockquote_attribution_has_no_wash_entry(self) -> None:
+        # The attribution must paint nothing behind it — its only
+        # styling is right-alignment and a smaller scale. The
+        # painter paints rects for entries it finds in the map; an
+        # absent entry produces no rect.
+        self.assertNotIn(TagName.BLOCKQUOTE_ATTRIBUTION, self.specs)
+
+    def test_every_paragraph_background_tag_has_a_wash_spec(self) -> None:
+        # The inverted complement of the test above: every tag that
+        # *used* to carry a paragraph background must now have a
+        # wash spec (so the snapshot painter restores its visual
+        # identity). Iterates the same shared listing
+        # :data:`_PARAGRAPH_BACKGROUND_TAGS` to keep the two invariants
+        # paired and prevent drift.
+        for name in _PARAGRAPH_BACKGROUND_TAGS:
+            with self.subTest(name=name):
+                self.assertIn(name, self.specs)
 
 
 if __name__ == "__main__":

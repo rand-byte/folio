@@ -199,7 +199,7 @@ def _build_renderer(
     tag_table: Gtk.TextTagTable | None = None,
 ) -> tuple[TextBufferRenderer, Gtk.TextBuffer, Gtk.TextTagTable]:
     """Construct a renderer and a buffer wired to a fresh tag table."""
-    table = tag_table if tag_table is not None else build_tag_table()
+    table = tag_table if tag_table is not None else build_tag_table(char_width_px=9)
     renderer = TextBufferRenderer(
         image_bytes_for=image_bytes_for if image_bytes_for is not None else (lambda _f: _PNG_1X1),
         column_width_px=column_width_px if column_width_px is not None else (lambda: 800),
@@ -670,8 +670,8 @@ class RebuildSemanticsTests(unittest.TestCase):
         # If the buffer was constructed with a different tag table,
         # the renderer raises rather than silently writing tags that
         # are missing from the buffer.
-        wrong_table = build_tag_table()
-        right_table = build_tag_table()
+        wrong_table = build_tag_table(char_width_px=9)
+        right_table = build_tag_table(char_width_px=9)
         renderer = TextBufferRenderer(
             image_bytes_for=lambda _f: _PNG_1X1,
             column_width_px=lambda: 800,

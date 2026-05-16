@@ -16,6 +16,13 @@ gi.require_version("Gsk", "4.0")
 # pylint: disable=wrong-import-position
 from gi.repository import Gdk, Gsk, Gtk  # noqa: E402
 
+from notes_app.asciidoc.tag_table import (
+    TagName,
+    WashSpec,
+    admonition_body_tag_name,
+    build_tag_table,
+    build_wash_specs,
+)
 from notes_app.config.defaults import (
     ARTICLE_BOTTOM_MARGIN_LINES,
     ARTICLE_INNER_HPADDING_CHARS,
@@ -23,7 +30,7 @@ from notes_app.config.defaults import (
     TARGET_CHARS_PER_LINE,
 )
 from notes_app.controllers.app_state import AppState
-from notes_app.enums import MimeKind, ParseErrorKind
+from notes_app.enums import AdmonitionKind, MimeKind, ParseErrorKind
 from notes_app.models.attachment import Attachment
 from notes_app.models.note import Note
 from notes_app.ui import note_view as note_view_module
@@ -32,10 +39,12 @@ from notes_app.ui.note_view import (
     CharWidthMeasurer,
     LineHeightMeasurer,
     NoteView,
+    _ArticleTextView,
     _FALLBACK_CHAR_WIDTH_PX,
     _FALLBACK_LINE_HEIGHT_PX,
     _message_for,
     _placeholder_image_bytes,
+    _rgba_from_tint,
 )
 
 
@@ -1347,6 +1356,211 @@ class NoteViewErrorBannerTests(unittest.TestCase):
         self.assertNotIn("Welcome", bad_text)
         # And the banner explains what happened.
         self.assertTrue(view.error_banner_visible)
+
+
+# ---------------------------------------------------------------------------
+# _ArticleTextView wash-painting tests
+# ---------------------------------------------------------------------------
+#
+# The :meth:`_ArticleTextView._compute_wash_rects` method is the test
+# seam: it returns the list of ``(colour, rect)`` pairs the snapshot
+# painter would append, without driving GTK's snapshot machinery. The
+# tests below exercise it directly. The plain :class:`Gtk.TextView`
+# methods this seam calls (``get_line_yrange``,
+# ``buffer_to_window_coords``, ``get_width``, ``get_left_margin``,
+# ``get_right_margin``) require a realised widget, so these tests are
+# display-gated like the rest of the widget tests in this module.
+
+
+def _build_article_text_view_with_buffer() -> tuple[
+    _ArticleTextView, Gtk.TextBuffer, Gtk.TextTagTable,
+]:
+    """Construct a wired :class:`_ArticleTextView` for direct testing.
+
+    Builds a tag table (with the same M-width fake used elsewhere in
+    this module, ``9``), attaches a buffer to a fresh
+    :class:`_ArticleTextView`, and installs the wash specs translated
+    to :class:`Gtk.TextTag` keys — the exact wiring
+    :class:`NoteView` performs. Returns the trio so individual tests
+    can populate the buffer with tagged content and probe the
+    painter.
+    """
+    table = build_tag_table(char_width_px=9)
+    text_view = _ArticleTextView()
+    buffer = Gtk.TextBuffer.new(table)
+    text_view.set_buffer(buffer)
+    specs_by_tag: dict[Gtk.TextTag, WashSpec] = {}
+    for tag_name, spec in build_wash_specs().items():
+        tag = table.lookup(tag_name.value)
+        if tag is not None:
+            specs_by_tag[tag] = spec
+    text_view.install_wash_specs(specs_by_tag)
+    return text_view, buffer, table
+
+
+def _apply_tag_across_line(
+    buffer: Gtk.TextBuffer, line_no: int, tag_name: str,
+) -> None:
+    """Apply a tag across the entire content of one logical line.
+
+    The painter walks logical lines and checks the first iter on each;
+    applying the tag from the line start to the next line's start (or
+    end-of-buffer) is the minimum needed for :func:`_spec_at_iter` to
+    find it on that line.
+    """
+    ok, start = buffer.get_iter_at_line(line_no)
+    assert ok, f"line {line_no} should exist"
+    if line_no + 1 < buffer.get_line_count():
+        ok_next, end = buffer.get_iter_at_line(line_no + 1)
+        assert ok_next, f"line {line_no + 1} should exist"
+    else:
+        end = buffer.get_end_iter()
+    buffer.apply_tag_by_name(tag_name, start, end)
+
+
+@unittest.skipUnless(_display_available(), "no GDK display")
+class ArticleTextViewWashRectTests(unittest.TestCase):
+    """Drive :meth:`_ArticleTextView._compute_wash_rects` directly.
+
+    Without wash-bearing tags applied, the painter must produce no
+    rects (empty buffer included). With one wash-bearing tag applied
+    to one logical line, exactly one rect appears, and it carries
+    the tag's tint. Two different wash-bearing tags on two different
+    lines produce two rects with two different tints. The
+    blockquote-attribution tag has no wash spec — applying it must
+    not produce a rect.
+
+    Geometric assertions are deliberately limited to invariants that
+    don't depend on real font rendering: the *count* of rects, the
+    *colour* of each, and the fact that the rect is non-empty. The
+    exact pixel positions depend on the live :class:`Gtk.TextView`'s
+    allocated width and font metrics, which vary by environment.
+    """
+
+    def test_empty_buffer_produces_no_rects(self) -> None:
+        text_view, _buffer, _table = _build_article_text_view_with_buffer()
+        self.assertEqual(text_view._compute_wash_rects(), [])
+
+    def test_buffer_with_no_wash_tags_produces_no_rects(self) -> None:
+        # The painter looks for wash-bearing tags only; plain text
+        # gets nothing painted behind it.
+        text_view, buffer, _table = _build_article_text_view_with_buffer()
+        buffer.set_text("just a plain paragraph with no tags\n")
+        self.assertEqual(text_view._compute_wash_rects(), [])
+
+    def test_one_admonition_body_paragraph_produces_one_rect(self) -> None:
+        text_view, buffer, _table = _build_article_text_view_with_buffer()
+        buffer.set_text("body of the admonition\n")
+        _apply_tag_across_line(
+            buffer, 0, admonition_body_tag_name(AdmonitionKind.NOTE).value,
+        )
+        rects = text_view._compute_wash_rects()
+        self.assertEqual(len(rects), 1)
+        # The colour must match the NOTE admonition's tint — the
+        # painter uses the spec's tint verbatim.
+        expected_color = _rgba_from_tint(
+            build_wash_specs()[
+                admonition_body_tag_name(AdmonitionKind.NOTE)
+            ].tint
+        )
+        color, _rect = rects[0]
+        self.assertEqual(color.red, expected_color.red)
+        self.assertEqual(color.green, expected_color.green)
+        self.assertEqual(color.blue, expected_color.blue)
+        self.assertEqual(color.alpha, expected_color.alpha)
+
+    def test_two_different_wash_tags_produce_rects_with_different_tints(
+        self,
+    ) -> None:
+        # An admonition on one line plus a blockquote on another must
+        # both be painted — and their tints must differ (they do, by
+        # design: admonitions are per-kind colours, blockquotes are
+        # grey).
+        text_view, buffer, _table = _build_article_text_view_with_buffer()
+        buffer.set_text("admonition body\nblockquote body\n")
+        _apply_tag_across_line(
+            buffer, 0, admonition_body_tag_name(AdmonitionKind.NOTE).value,
+        )
+        _apply_tag_across_line(buffer, 1, TagName.BLOCKQUOTE_BODY.value)
+        rects = text_view._compute_wash_rects()
+        self.assertEqual(len(rects), 2)
+        color_a, _rect_a = rects[0]
+        color_b, _rect_b = rects[1]
+        # At minimum the alpha or one of the RGB channels must
+        # differ — the two tints are not identical.
+        self.assertNotEqual(
+            (color_a.red, color_a.green, color_a.blue, color_a.alpha),
+            (color_b.red, color_b.green, color_b.blue, color_b.alpha),
+        )
+
+    def test_blockquote_attribution_line_produces_no_rect(self) -> None:
+        # The attribution paragraph carries a tag that the wash-spec
+        # map deliberately omits — the painter must paint nothing
+        # behind it.
+        text_view, buffer, _table = _build_article_text_view_with_buffer()
+        buffer.set_text("— Author, Source\n")
+        _apply_tag_across_line(buffer, 0, TagName.BLOCKQUOTE_ATTRIBUTION.value)
+        self.assertEqual(text_view._compute_wash_rects(), [])
+
+    def test_no_wash_specs_installed_produces_no_rects(self) -> None:
+        # The default state of :class:`_ArticleTextView` (before
+        # :meth:`install_wash_specs` is called) is "no specs", so the
+        # painter is a no-op. This is the right behaviour for tests
+        # that construct the subclass standalone, and for the brief
+        # window between constructor and wash-spec install.
+        table = build_tag_table(char_width_px=9)
+        text_view = _ArticleTextView()
+        buffer = Gtk.TextBuffer.new(table)
+        text_view.set_buffer(buffer)
+        buffer.set_text("anything\n")
+        _apply_tag_across_line(
+            buffer, 0, admonition_body_tag_name(AdmonitionKind.NOTE).value,
+        )
+        # No specs installed → painter never finds a matching tag.
+        self.assertEqual(text_view._compute_wash_rects(), [])
+
+
+@unittest.skipUnless(_display_available(), "no GDK display")
+class ArticleTextViewMutualExclusionTests(unittest.TestCase):
+    """Defensive: two wash-bearing tags on one iter must raise.
+
+    Block-level wash-bearing tags are mutually exclusive by parser
+    construction (admonition body, blockquote body, and code block
+    cannot apply to the same paragraph). If a future code path
+    violates that invariant, :meth:`_compute_wash_rects` raises
+    :class:`ValueError` rather than silently picking one of the
+    overlapping tags.
+    """
+
+    def test_two_wash_tags_on_one_iter_raises_value_error(self) -> None:
+        text_view, buffer, _table = _build_article_text_view_with_buffer()
+        buffer.set_text("overlapping tags\n")
+        _apply_tag_across_line(
+            buffer, 0, admonition_body_tag_name(AdmonitionKind.NOTE).value,
+        )
+        _apply_tag_across_line(buffer, 0, TagName.BLOCKQUOTE_BODY.value)
+        with self.assertRaises(ValueError):
+            text_view._compute_wash_rects()
+
+
+class RgbaFromTintTests(unittest.TestCase):
+    """The tint→Gdk.RGBA helper is pure and display-independent."""
+
+    def test_components_round_trip(self) -> None:
+        rgba = _rgba_from_tint((0.1, 0.2, 0.3, 0.4))
+        self.assertAlmostEqual(rgba.red, 0.1, places=6)
+        self.assertAlmostEqual(rgba.green, 0.2, places=6)
+        self.assertAlmostEqual(rgba.blue, 0.3, places=6)
+        self.assertAlmostEqual(rgba.alpha, 0.4, places=6)
+
+    def test_returns_a_fresh_instance_each_call(self) -> None:
+        # The painter appends one rect per logical line; sharing a
+        # single :class:`Gdk.RGBA` instance across snapshot nodes
+        # would risk one paint mutating the next. A fresh instance
+        # per call keeps the snapshot nodes independent.
+        a = _rgba_from_tint((0.5, 0.5, 0.5, 0.5))
+        b = _rgba_from_tint((0.5, 0.5, 0.5, 0.5))
+        self.assertIsNot(a, b)
 
 
 if __name__ == "__main__":

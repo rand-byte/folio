@@ -14,16 +14,25 @@ Principles & invariants
 * The current tag set covers, in addition to the inline subset (bold,
   italic, strikethrough, underline, monospace, link) and the heading
   levels the parser produces, the **block-level paragraph styling** for
-  admonitions, blockquotes, and code blocks. Block-level styling lives
-  on paragraph tags (``paragraph-background-rgba`` for the tint plus
-  ``left-margin`` / ``right-margin`` / ``pixels-above/below-lines`` for
-  the spacing). Tables remain the one exception — they are still drawn
-  by a child widget — because :class:`Gtk.TextTag` has no grid primitive.
+  admonitions, blockquotes, and code blocks. Block-level tags carry
+  only the *text position* (``accumulative-margin = True`` plus
+  ``left-margin`` / ``right-margin`` = inset + one M-width); the
+  matching *tinted wash* is painted by ``_ArticleTextView`` in
+  :mod:`notes_app.ui.note_view` using :func:`build_wash_specs` to look
+  up tint + inset per tag. This split exists because GTK's
+  ``paragraph-background-rgba`` paints exactly between the paragraph's
+  effective ``left-margin`` and ``right-margin`` — there is no
+  property that decouples "where the wash paints" from "where the
+  text starts", so a tinted box that is *wider* than the text on each
+  side must be painted at snapshot time. Tables remain the one
+  exception to "block styling lives on a paragraph tag" — they are
+  still drawn by a child widget — because :class:`Gtk.TextTag` has no
+  grid primitive.
 * Admonition paragraph tags come in two roles per kind. The *label*
   paragraph carries the kind name on its own line; the *body* paragraph
-  carries the prose. Both paragraphs share the per-kind tint so the
-  block reads as one rectangle. The *kind character* tag adds the bold
-  weight and the accent foreground colour to the kind text itself
+  carries the prose. Both paragraphs share the per-kind wash spec so
+  the block reads as one rectangle. The *kind character* tag adds the
+  bold weight and the accent foreground colour to the kind text itself
   (``NOTE``, ``TIP``, …). Putting the visual properties on separate
   paragraph tags rather than overloading one is what lets a future tweak
   ("more space above admonitions") be a one-line edit.
@@ -36,6 +45,15 @@ Principles & invariants
   every call. Tag tables can only be associated with one
   :class:`Gtk.TextBuffer` at a time in some situations, and a fresh
   instance per buffer avoids accidental cross-buffer aliasing in tests.
+  It requires the measured M-width of the body font as
+  ``char_width_px`` so the paragraph-tag margins encode "inset + one
+  M-width" — there is no sensible default, so the parameter is
+  required.
+* :func:`build_wash_specs` returns the per-tag :class:`WashSpec`
+  records the article TextView paints. Tag names that don't paint a
+  wash (e.g. :data:`TagName.BLOCKQUOTE_ATTRIBUTION`) are absent from
+  the returned dict on purpose — the painter must paint nothing
+  behind them.
 * This module imports ``gi`` because the tag table *is* a GTK object —
   there is no useful pure-Python representation of a tag. The renderer
   is the only other place in :mod:`notes_app.asciidoc` that imports
@@ -44,6 +62,7 @@ Principles & invariants
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from enum import StrEnum
 
 import gi
@@ -52,7 +71,7 @@ gi.require_version("Gtk", "4.0")
 gi.require_version("Gdk", "4.0")
 gi.require_version("Pango", "1.0")
 # pylint: disable=wrong-import-position
-from gi.repository import Gdk, Gtk, Pango  # noqa: E402
+from gi.repository import Gtk, Pango  # noqa: E402
 
 from notes_app.enums import AdmonitionKind
 
@@ -95,8 +114,8 @@ class TagName(StrEnum):
     paragraph tag.
 
     :data:`CODE_BLOCK` is the paragraph tag carrying the code-block's
-    tint and left/right paragraph margins; monospace family comes from
-    the shared :data:`MONOSPACE` tag, layered on top by the renderer.
+    left/right paragraph margins; monospace family comes from the
+    shared :data:`MONOSPACE` tag, layered on top by the renderer.
     """
 
     BOLD = "bold"
@@ -134,6 +153,25 @@ class TagName(StrEnum):
     BLOCKQUOTE_ATTRIBUTION = "blockquote_attribution"
     # Code-block paragraph tag.
     CODE_BLOCK = "code_block"
+
+
+@dataclass(frozen=True)
+class WashSpec:
+    """Wash-painting parameters for one block-level tinted paragraph tag.
+
+    ``tint`` is the RGBA tuple painted behind the paragraph.
+    ``box_left_inset_px`` is the distance from the textview's widget
+    ``left-margin`` to the box's left edge. ``box_right_inset_px`` is
+    the corresponding distance on the right. The text lives one
+    M-width inside both edges — that offset is encoded in the
+    paragraph tag (added to its ``left-margin`` / ``right-margin``),
+    not here, because the painter does not need M-width to paint: it
+    only needs the inset.
+    """
+
+    tint: tuple[float, float, float, float]
+    box_left_inset_px: int
+    box_right_inset_px: int
 
 
 # ---------------------------------------------------------------------------
@@ -272,22 +310,25 @@ _ADMONITION_KIND_FOREGROUNDS: dict[AdmonitionKind, str] = {
 }
 
 # Neutral grey tint for blockquote bodies and code blocks. Both share
-# the same wash so the visual weight is consistent; only blockquotes
+# a similar wash so the visual weight is consistent; only blockquotes
 # add an italic style (composed via :data:`TagName.ITALIC`) and a
 # left-margin indent on top.
 _BLOCKQUOTE_TINT: tuple[float, float, float, float] = (0.5, 0.5, 0.5, 0.12)
 _CODE_BLOCK_TINT: tuple[float, float, float, float] = (0.5, 0.5, 0.5, 0.08)
 
-# Paragraph metrics applied to admonition paragraph tags. Padding around
-# the tinted block reads as one visual rectangle when the same numbers
-# are used for the label paragraph's pixels-above and the body's
-# pixels-below — this mirrors the layout validated by option A.
+# Paragraph metrics applied to admonition paragraph tags. ``HMARGIN``
+# is the *box inset* from the textview's widget left/right margin to
+# the tinted box's edge. The text inside the box sits one M-width
+# inside the box on each side; that offset is added by the paragraph
+# tag builder, not stored here.
 _ADMONITION_HMARGIN_PX: int = 12
 _ADMONITION_VPADDING_PX: int = 8
 _ADMONITION_LINE_GAP_PX: int = 2
 
 # Paragraph metrics for blockquotes. The left-margin is the visual
-# indent that distinguishes a quote from running prose.
+# indent that distinguishes a quote from running prose; the same
+# split as admonitions applies — text sits one M-width inside the box
+# edge on each side.
 _BLOCKQUOTE_HMARGIN_PX: int = 30
 _BLOCKQUOTE_RIGHT_MARGIN_PX: int = 12
 _BLOCKQUOTE_VPADDING_PX: int = 6
@@ -304,8 +345,15 @@ _CODE_BLOCK_VPADDING_PX: int = 8
 _BLOCKQUOTE_ATTRIBUTION_SCALE: float = 0.9
 
 
-def build_tag_table() -> Gtk.TextTagTable:
+def build_tag_table(*, char_width_px: int) -> Gtk.TextTagTable:
     """Construct the rendered-view tag table for the current subset.
+
+    ``char_width_px`` is the measured M-width of the body font in
+    pixels. It is required (no default) because there is no sensible
+    default — a wrong default would silently mis-size the inner inset
+    on every block-level paragraph tag. Tests pass an explicit small
+    int (e.g. ``9``); production passes the result of
+    :meth:`notes_app.ui.note_view.ArticleContainer.char_width_px`.
 
     The returned table contains exactly one tag per :class:`TagName`
     member. Tag names are unique within a table, so callers that need
@@ -334,19 +382,19 @@ def build_tag_table() -> Gtk.TextTagTable:
     )
     for level, scale in _HEADING_SCALES.items():
         table.add(_make_heading_tag(_LEVEL_TO_TAG_NAME[level], scale=scale))
-    for kind, tint in _ADMONITION_TINTS.items():
+    for kind in _ADMONITION_TINTS:
         table.add(
             _make_admonition_paragraph_tag(
                 _ADMONITION_LABEL_TAG_NAMES[kind],
-                tint=tint,
                 is_label=True,
+                char_width_px=char_width_px,
             )
         )
         table.add(
             _make_admonition_paragraph_tag(
                 _ADMONITION_BODY_TAG_NAMES[kind],
-                tint=tint,
                 is_label=False,
+                char_width_px=char_width_px,
             )
         )
         table.add(
@@ -356,10 +404,57 @@ def build_tag_table() -> Gtk.TextTagTable:
                 foreground=_ADMONITION_KIND_FOREGROUNDS[kind],
             )
         )
-    table.add(_make_blockquote_body_tag(TagName.BLOCKQUOTE_BODY))
-    table.add(_make_blockquote_attribution_tag(TagName.BLOCKQUOTE_ATTRIBUTION))
-    table.add(_make_code_block_tag(TagName.CODE_BLOCK))
+    table.add(
+        _make_blockquote_body_tag(
+            TagName.BLOCKQUOTE_BODY, char_width_px=char_width_px,
+        )
+    )
+    table.add(
+        _make_blockquote_attribution_tag(
+            TagName.BLOCKQUOTE_ATTRIBUTION, char_width_px=char_width_px,
+        )
+    )
+    table.add(
+        _make_code_block_tag(TagName.CODE_BLOCK, char_width_px=char_width_px)
+    )
     return table
+
+
+def build_wash_specs() -> dict[TagName, WashSpec]:
+    """Return the per-tag wash spec the article TextView paints.
+
+    Keys are :class:`TagName` values for every paragraph tag that
+    carries a wash. Tag names that *don't* paint a wash (e.g.
+    :data:`TagName.BLOCKQUOTE_ATTRIBUTION`) are absent on purpose —
+    the painter must paint nothing behind them.
+
+    The admonition label and body for the same kind share an
+    *identical* :class:`WashSpec` instance by design so they read as
+    one rectangle: the painter walks logical lines independently, but
+    the two paragraphs end up painted with the same colour at the
+    same horizontal extents, so the two rectangles butt edge-to-edge
+    and the user sees one block.
+    """
+    specs: dict[TagName, WashSpec] = {}
+    for kind, tint in _ADMONITION_TINTS.items():
+        spec = WashSpec(
+            tint=tint,
+            box_left_inset_px=_ADMONITION_HMARGIN_PX,
+            box_right_inset_px=_ADMONITION_HMARGIN_PX,
+        )
+        specs[_ADMONITION_LABEL_TAG_NAMES[kind]] = spec
+        specs[_ADMONITION_BODY_TAG_NAMES[kind]] = spec
+    specs[TagName.BLOCKQUOTE_BODY] = WashSpec(
+        tint=_BLOCKQUOTE_TINT,
+        box_left_inset_px=_BLOCKQUOTE_HMARGIN_PX,
+        box_right_inset_px=_BLOCKQUOTE_RIGHT_MARGIN_PX,
+    )
+    specs[TagName.CODE_BLOCK] = WashSpec(
+        tint=_CODE_BLOCK_TINT,
+        box_left_inset_px=_CODE_BLOCK_HMARGIN_PX,
+        box_right_inset_px=_CODE_BLOCK_HMARGIN_PX,
+    )
+    return specs
 
 
 def _make_inline_tag(  # pylint: disable=too-many-arguments
@@ -414,23 +509,30 @@ def _make_heading_tag(name: TagName, *, scale: float) -> Gtk.TextTag:
 def _make_admonition_paragraph_tag(
     name: TagName,
     *,
-    tint: tuple[float, float, float, float],
     is_label: bool,
+    char_width_px: int,
 ) -> Gtk.TextTag:
     """Build an admonition paragraph tag (label or body role).
 
-    The tint applies to the whole paragraph. ``is_label`` toggles where
-    the block padding sits: the *label* paragraph gets padding above
-    so the block has an even top margin, and the *body* paragraph gets
-    padding below for a symmetric bottom margin. Side margins and the
-    in-wrap line spacing are shared.
+    The tag carries the *text position* only. Its ``left-margin`` and
+    ``right-margin`` are set to ``_ADMONITION_HMARGIN_PX + char_width_px``
+    so the text sits one M-width inside the tinted box's edge.
+    ``accumulative-margin = True`` makes those values *stack* on the
+    textview's widget-level ``left-margin`` / ``right-margin`` instead
+    of replacing them — without this flag a paragraph tag overrides
+    the widget's margins and the text escapes the inner column. The
+    matching tinted wash is painted separately by ``_ArticleTextView``
+    in :mod:`notes_app.ui.note_view` (see :func:`build_wash_specs`).
+
+    ``is_label`` toggles where the block padding sits: the *label*
+    paragraph gets padding above so the block has an even top margin,
+    and the *body* paragraph gets padding below for a symmetric bottom
+    margin. Side margins and the in-wrap line spacing are shared.
     """
     tag = Gtk.TextTag.new(name.value)
-    rgba = Gdk.RGBA()
-    rgba.red, rgba.green, rgba.blue, rgba.alpha = tint
-    tag.set_property("paragraph-background-rgba", rgba)
-    tag.set_property("left-margin", _ADMONITION_HMARGIN_PX)
-    tag.set_property("right-margin", _ADMONITION_HMARGIN_PX)
+    tag.set_property("accumulative-margin", True)
+    tag.set_property("left-margin", _ADMONITION_HMARGIN_PX + char_width_px)
+    tag.set_property("right-margin", _ADMONITION_HMARGIN_PX + char_width_px)
     tag.set_property(
         "pixels-above-lines",
         _ADMONITION_VPADDING_PX if is_label else 0,
@@ -443,57 +545,75 @@ def _make_admonition_paragraph_tag(
     return tag
 
 
-def _make_blockquote_body_tag(name: TagName) -> Gtk.TextTag:
+def _make_blockquote_body_tag(
+    name: TagName, *, char_width_px: int,
+) -> Gtk.TextTag:
     """Build the blockquote-body paragraph tag.
 
-    Carries the tint, the indent left-margin, and balanced top/bottom
-    padding so a multi-paragraph quote reads as one block. The italic
-    style is *not* set here — the renderer composes it by layering the
-    shared :data:`TagName.ITALIC` tag across the body range so a
-    future tweak to "what italic looks like" remains a one-line edit.
+    Carries the text position only: the left/right margins are the
+    box inset plus one M-width so the text sits one M-width inside
+    the tinted box. ``accumulative-margin = True`` makes those margins
+    stack on the textview's widget-level margins (see
+    :func:`_make_admonition_paragraph_tag` for why this matters). The
+    italic style is *not* set here — the renderer composes it by
+    layering the shared :data:`TagName.ITALIC` tag across the body
+    range so a future tweak to "what italic looks like" remains a
+    one-line edit. The tint is painted separately by
+    ``_ArticleTextView`` in :mod:`notes_app.ui.note_view`.
     """
     tag = Gtk.TextTag.new(name.value)
-    rgba = Gdk.RGBA()
-    rgba.red, rgba.green, rgba.blue, rgba.alpha = _BLOCKQUOTE_TINT
-    tag.set_property("paragraph-background-rgba", rgba)
-    tag.set_property("left-margin", _BLOCKQUOTE_HMARGIN_PX)
-    tag.set_property("right-margin", _BLOCKQUOTE_RIGHT_MARGIN_PX)
+    tag.set_property("accumulative-margin", True)
+    tag.set_property("left-margin", _BLOCKQUOTE_HMARGIN_PX + char_width_px)
+    tag.set_property(
+        "right-margin", _BLOCKQUOTE_RIGHT_MARGIN_PX + char_width_px,
+    )
     tag.set_property("pixels-above-lines", _BLOCKQUOTE_VPADDING_PX)
     tag.set_property("pixels-below-lines", _BLOCKQUOTE_VPADDING_PX)
     tag.set_property("pixels-inside-wrap", _BLOCKQUOTE_LINE_GAP_PX)
     return tag
 
 
-def _make_blockquote_attribution_tag(name: TagName) -> Gtk.TextTag:
+def _make_blockquote_attribution_tag(
+    name: TagName, *, char_width_px: int,
+) -> Gtk.TextTag:
     """Build the blockquote-attribution paragraph tag.
 
     Shares the body's left-margin so the attribution sits flush with
-    the quote, applies a smaller scale, and right-aligns the text so
-    a typical ``— Author, Source`` line reads as a citation under the
-    quote.
+    the quote body's *text* (one M-width inside the tinted box's
+    edge), applies a smaller scale, and right-aligns the text so a
+    typical ``— Author, Source`` line reads as a citation under the
+    quote. There is no tint to remove (the attribution never carried
+    one). ``accumulative-margin = True`` is set for the same reason
+    as the body tag — without it, the attribution paragraph would
+    escape the inner column.
     """
     tag = Gtk.TextTag.new(name.value)
-    tag.set_property("left-margin", _BLOCKQUOTE_HMARGIN_PX)
-    tag.set_property("right-margin", _BLOCKQUOTE_RIGHT_MARGIN_PX)
+    tag.set_property("accumulative-margin", True)
+    tag.set_property("left-margin", _BLOCKQUOTE_HMARGIN_PX + char_width_px)
+    tag.set_property(
+        "right-margin", _BLOCKQUOTE_RIGHT_MARGIN_PX + char_width_px,
+    )
     tag.set_property("scale", _BLOCKQUOTE_ATTRIBUTION_SCALE)
     tag.set_property("justification", Gtk.Justification.RIGHT)
     return tag
 
 
-def _make_code_block_tag(name: TagName) -> Gtk.TextTag:
+def _make_code_block_tag(name: TagName, *, char_width_px: int) -> Gtk.TextTag:
     """Build the code-block paragraph tag.
 
-    Carries the subtle background tint and balanced left/right margins
-    so the block is visually offset from running prose. The monospace
-    family comes from the shared :data:`TagName.MONOSPACE` tag, which
-    the renderer applies on top of this one across the same range.
+    Carries the text position only: the left/right margins are the
+    box inset plus one M-width so the monospace text sits one M-width
+    inside the tinted box. ``accumulative-margin = True`` makes those
+    margins stack on the textview's widget-level margins. The
+    monospace family comes from the shared :data:`TagName.MONOSPACE`
+    tag, which the renderer applies on top of this one across the
+    same range. The tint is painted separately by ``_ArticleTextView``
+    in :mod:`notes_app.ui.note_view`.
     """
     tag = Gtk.TextTag.new(name.value)
-    rgba = Gdk.RGBA()
-    rgba.red, rgba.green, rgba.blue, rgba.alpha = _CODE_BLOCK_TINT
-    tag.set_property("paragraph-background-rgba", rgba)
-    tag.set_property("left-margin", _CODE_BLOCK_HMARGIN_PX)
-    tag.set_property("right-margin", _CODE_BLOCK_HMARGIN_PX)
+    tag.set_property("accumulative-margin", True)
+    tag.set_property("left-margin", _CODE_BLOCK_HMARGIN_PX + char_width_px)
+    tag.set_property("right-margin", _CODE_BLOCK_HMARGIN_PX + char_width_px)
     tag.set_property("pixels-above-lines", _CODE_BLOCK_VPADDING_PX)
     tag.set_property("pixels-below-lines", _CODE_BLOCK_VPADDING_PX)
     return tag

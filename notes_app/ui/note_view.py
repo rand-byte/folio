@@ -59,6 +59,21 @@ Principles & invariants
   render — :meth:`NoteView.refresh` only rebuilds buffer contents, not
   chrome. (Same lifecycle invariant the rest of this docstring states
   for the widget tree.)
+* The article's :class:`Gtk.TextView` is a private subclass
+  :class:`_ArticleTextView` that paints tinted block backgrounds
+  (admonition, blockquote, code block) at snapshot time. The
+  paragraph tags from :mod:`notes_app.asciidoc.tag_table` deliberately
+  carry only the *text position* (``accumulative-margin = True`` plus
+  ``left-margin`` / ``right-margin`` = inset + one M-width); the
+  matching tinted *wash* is painted by this subclass via
+  :meth:`do_snapshot`. The wash extends one M-width beyond the text
+  on each side, producing the visual "padded card" effect that
+  ``paragraph-background-rgba`` cannot reproduce on its own — see
+  :class:`notes_app.asciidoc.tag_table.WashSpec` for the per-tag
+  parameters. The tag table is therefore built *after* M-width is
+  measured (``char_width_px`` is required), and the wash-spec map
+  passed to the subclass is keyed by :class:`Gtk.TextTag` objects
+  (not names) so per-snapshot tag-lookup work stays O(1).
 * The size-allocate vfunc — *not* the ``size-allocate`` signal, which is
   deprecated in GTK 4 — is the documented place to react to a fresh
   allocation. :meth:`ArticleContainer.do_size_allocate` builds a
@@ -107,9 +122,20 @@ Principles & invariants
   update here — caught by a unit test that iterates the enum.
 """
 
+# pylint: disable=too-many-lines
+# This step pushed the file past pylint's default 1000-line ceiling
+# because the snapshot-time wash painter (:class:`_ArticleTextView`)
+# adds the new subclass, its rect-computation seam, and the wash-spec
+# wiring inside :meth:`NoteView.__init__`. The new class is tightly
+# coupled to the existing :class:`ArticleContainer` / :class:`NoteView`
+# pair — they share the M-width measurement and the tag-table key
+# translation — so extracting it to its own module would scatter the
+# wiring without improving readability.
+
 from __future__ import annotations
 
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
+from dataclasses import dataclass
 
 import gi
 
@@ -117,10 +143,15 @@ gi.require_version("Gtk", "4.0")
 gi.require_version("Pango", "1.0")
 gi.require_version("Gsk", "4.0")
 gi.require_version("Graphene", "1.0")
+gi.require_version("Gdk", "4.0")
 # pylint: disable=wrong-import-position
-from gi.repository import Graphene, Gsk, Gtk  # noqa: E402
+from gi.repository import Gdk, Graphene, Gsk, Gtk  # noqa: E402
 
-from notes_app.asciidoc.tag_table import build_tag_table
+from notes_app.asciidoc.tag_table import (
+    WashSpec,
+    build_tag_table,
+    build_wash_specs,
+)
 from notes_app.asciidoc.textbuffer_renderer import TextBufferRenderer
 from notes_app.config.defaults import (
     ARTICLE_BOTTOM_MARGIN_LINES,
@@ -328,6 +359,207 @@ def _placeholder_image_bytes(_filename: str) -> bytes:
     """
     del _filename  # unused — the placeholder is filename-independent
     return b""
+
+
+@dataclass(frozen=True)
+class _WidgetXMetrics:
+    """Horizontal layout metrics for the article text view, captured once
+    per snapshot.
+
+    :class:`_ArticleTextView` reads three GTK getters
+    (:meth:`Gtk.Widget.get_width`, :meth:`Gtk.TextView.get_left_margin`,
+    :meth:`Gtk.TextView.get_right_margin`) on every paint. Bundling the
+    three into one frozen value lets the per-line rect computation
+    receive a single ``metrics`` argument instead of three separate
+    ints — and keeps the outer loop body slim enough to stay under
+    pylint's local-count ceiling. The values do not change between
+    iterations of the loop, which is the other reason for the
+    captured-once shape.
+    """
+
+    width: int
+    left_margin: int
+    right_margin: int
+
+
+class _ArticleTextView(Gtk.TextView):
+    """A :class:`Gtk.TextView` subclass that paints wider washes for tinted block paragraphs.
+
+    The paragraph tags in :mod:`notes_app.asciidoc.tag_table`
+    deliberately omit ``paragraph-background-rgba``; this subclass
+    paints the matching wash itself via :meth:`do_snapshot`. For every
+    visible logical line whose first iter carries a tag listed in the
+    wash-spec map, it appends a :class:`Gsk.ColorNode` to the snapshot
+    at a rect that extends one M-width beyond the text on each side,
+    then delegates to :meth:`Gtk.TextView.do_snapshot` so inline text
+    renders on top.
+
+    The wash-spec map is supplied post-construction via
+    :meth:`install_wash_specs`, keyed by :class:`Gtk.TextTag` objects
+    (rather than tag names) so the per-snapshot lookup stays O(1) and
+    avoids re-walking the tag table on every paint. Before
+    :meth:`install_wash_specs` is called the painter is a no-op —
+    that is the right behaviour for the brief window between
+    constructor and wash-spec install, and the right fallback for
+    test code that constructs the view without wiring the painter.
+
+    Splitting :meth:`_compute_wash_rects` out of :meth:`do_snapshot`
+    is the test seam: tests assert the list of rects directly without
+    driving GTK's snapshot machinery.
+    """
+
+    _wash_specs_by_tag: Mapping[Gtk.TextTag, WashSpec]
+
+    def __init__(self) -> None:
+        super().__init__()
+        # No wash specs installed yet — the painter is a no-op until
+        # :meth:`install_wash_specs` is called. Tests that construct
+        # the subclass directly get a plain :class:`Gtk.TextView` of
+        # behaviour, which matches the inert pre-install state.
+        self._wash_specs_by_tag = {}
+
+    def install_wash_specs(
+        self, specs_by_tag: Mapping[Gtk.TextTag, WashSpec],
+    ) -> None:
+        """Install the wash-spec map this view paints.
+
+        Keys are :class:`Gtk.TextTag` *objects* (not names) — the
+        constructor looks them up once by name from the buffer's tag
+        table, so the snapshot path can do a direct ``tag in map``
+        membership test rather than re-resolving the name on every
+        paint. Calling this replaces the previous map outright.
+        """
+        self._wash_specs_by_tag = specs_by_tag
+
+    def do_snapshot(  # pylint: disable=arguments-differ
+        self, snapshot: Gtk.Snapshot,
+    ) -> None:
+        """Paint the per-paragraph washes, then delegate to the parent.
+
+        The wash colour nodes are appended *before* the parent
+        snapshot, so the text renders on top. The order matters: GTK
+        snapshot nodes are stacked back-to-front in the order they
+        are appended.
+        """
+        for color, rect in self._compute_wash_rects():
+            snapshot.append_color(color, rect)
+        Gtk.TextView.do_snapshot(self, snapshot)
+
+    def _compute_wash_rects(
+        self,
+    ) -> list[tuple[Gdk.RGBA, Graphene.Rect]]:
+        """Return one ``(colour, rect)`` per wash-bearing logical line.
+
+        Walks the buffer one logical line at a time. For every line
+        whose first iter carries a tag in :attr:`_wash_specs_by_tag`,
+        records a coloured rect that spans the full vertical extent
+        of the logical line (i.e. all of its visual wraps, returned
+        by :meth:`Gtk.TextView.get_line_yrange`) and is one M-width
+        wider than the text column on each side.
+
+        Mutual exclusion: paragraph-level wash-bearing tags are
+        mutually exclusive by parser construction — admonition label,
+        admonition body, blockquote body, and code block are distinct
+        paragraph types and never overlap on the same iter. The
+        method enforces this defensively: if an iter carries more
+        than one wash-bearing tag it raises :class:`ValueError`
+        rather than silently picking one, so a future code path that
+        violates the invariant fails loudly.
+        """
+        rects: list[tuple[Gdk.RGBA, Graphene.Rect]] = []
+        if not self._wash_specs_by_tag:
+            return rects
+        buffer = self.get_buffer()
+        metrics = _WidgetXMetrics(
+            width=self.get_width(),
+            left_margin=self.get_left_margin(),
+            right_margin=self.get_right_margin(),
+        )
+        for line_no in range(buffer.get_line_count()):
+            rect_with_color = self._wash_rect_for_line(
+                buffer, line_no, metrics,
+            )
+            if rect_with_color is not None:
+                rects.append(rect_with_color)
+        return rects
+
+    def _wash_rect_for_line(
+        self,
+        buffer: Gtk.TextBuffer,
+        line_no: int,
+        metrics: _WidgetXMetrics,
+    ) -> tuple[Gdk.RGBA, Graphene.Rect] | None:
+        """Compute the wash rect for one logical line, or ``None`` if
+        the line carries no wash-bearing tag.
+
+        Extracted from :meth:`_compute_wash_rects` so the inner
+        per-line geometry lives in one place and the outer loop stays
+        slim. Reads the line's vertical extent via
+        :meth:`Gtk.TextView.get_line_yrange` and translates the
+        buffer-coordinate y into widget-coordinate y via
+        :meth:`Gtk.TextView.buffer_to_window_coords` — the same
+        translation a manual draw against the text window would
+        perform.
+        """
+        ok, line_iter = buffer.get_iter_at_line(line_no)
+        if not ok:
+            return None
+        spec = self._spec_at_iter(line_iter)
+        if spec is None:
+            return None
+        line_y_buffer, line_h = self.get_line_yrange(line_iter)
+        _, line_y_widget = self.buffer_to_window_coords(
+            Gtk.TextWindowType.TEXT, 0, line_y_buffer,
+        )
+        box_x = metrics.left_margin + spec.box_left_inset_px
+        box_w = (
+            metrics.width
+            - metrics.left_margin
+            - metrics.right_margin
+            - spec.box_left_inset_px
+            - spec.box_right_inset_px
+        )
+        rect = Graphene.Rect()
+        rect.init(
+            float(box_x), float(line_y_widget), float(box_w), float(line_h),
+        )
+        return _rgba_from_tint(spec.tint), rect
+
+    def _spec_at_iter(self, line_iter: Gtk.TextIter) -> WashSpec | None:
+        """Return the :class:`WashSpec` for the line's wash-bearing tag.
+
+        Returns ``None`` when the iter carries no wash-bearing tag.
+        Raises :class:`ValueError` when the iter carries more than
+        one wash-bearing tag — see :meth:`_compute_wash_rects` for
+        the mutual-exclusion contract.
+        """
+        matching: list[WashSpec] = []
+        for tag in line_iter.get_tags():
+            spec = self._wash_specs_by_tag.get(tag)
+            if spec is not None:
+                matching.append(spec)
+        if not matching:
+            return None
+        if len(matching) > 1:
+            raise ValueError(
+                "more than one wash-bearing tag on the same iter "
+                "violates the paragraph-tag mutual-exclusion invariant"
+            )
+        return matching[0]
+
+
+def _rgba_from_tint(tint: tuple[float, float, float, float]) -> Gdk.RGBA:
+    """Build a :class:`Gdk.RGBA` from a 4-tuple of floats in ``[0, 1]``.
+
+    Used by :class:`_ArticleTextView` to translate a
+    :class:`notes_app.asciidoc.tag_table.WashSpec`'s tint into the
+    colour type :meth:`Gtk.Snapshot.append_color` expects. A free
+    function (rather than a static method on the subclass) so the
+    test suite can call it directly when asserting on wash colours.
+    """
+    rgba = Gdk.RGBA()
+    rgba.red, rgba.green, rgba.blue, rgba.alpha = tint
+    return rgba
 
 
 class ArticleContainer(Gtk.Widget):
@@ -600,7 +832,7 @@ class NoteView(Gtk.Box):
     _attachments: AttachmentStoreProtocol | None
     _app_state: AppState
     _buffer: Gtk.TextBuffer
-    _text_view: Gtk.TextView
+    _text_view: _ArticleTextView
     _renderer: TextBufferRenderer
     _current_note_id: str | None
     _error_banner_revealer: Gtk.Revealer
@@ -645,17 +877,13 @@ class NoteView(Gtk.Box):
         self._error_banner_revealer.set_child(banner_box)
         self.append(self._error_banner_revealer)
 
-        # Build the text-buffer rendering substrate. The tag table is
-        # owned by the buffer in GTK 4; constructing the buffer with
-        # ``Gtk.TextBuffer.new(tag_table)`` is the only way to associate
-        # them.
-        tag_table = build_tag_table()
-        self._buffer = Gtk.TextBuffer.new(tag_table)
-
-        # The actual text-rendering widget. Read-only, hides the cursor,
-        # word-wraps long lines so prose flows naturally inside the
-        # column.
-        self._text_view = Gtk.TextView.new_with_buffer(self._buffer)
+        # Build the text-rendering widget *before* the tag table so we
+        # have a Pango context to measure the M-width against. The
+        # subclass :class:`_ArticleTextView` adds the snapshot-time
+        # wash painter on top of the standard :class:`Gtk.TextView`
+        # behaviour; everything below treats it as a regular text view
+        # because that is the type-correct view.
+        self._text_view = _ArticleTextView()
         self._text_view.set_editable(False)
         self._text_view.set_cursor_visible(False)
         self._text_view.set_wrap_mode(Gtk.WrapMode.WORD_CHAR)
@@ -664,14 +892,44 @@ class NoteView(Gtk.Box):
         self._text_view.set_hexpand(True)
         self._text_view.set_vexpand(True)
 
-        # The article container: a fixed-width column wrapping the
-        # text view. Production wires the two measurers (M-width and
-        # line-height) to Pango-layout closures against the text view
-        # — see :func:`_build_font_measurers` for the single seam tests
-        # monkey-patch.
+        # Measure the body font's M-width and line-height now — both
+        # the tag table (for paragraph margins) and the article
+        # container (for the column width) need it.
         char_width_measurer, line_height_measurer = _build_font_measurers(
             self._text_view,
         )
+
+        # Build the tag table parameterised by the measured M-width so
+        # the paragraph margins encode "inset + M-width" — see
+        # :class:`notes_app.asciidoc.tag_table.WashSpec` for the split
+        # between text position (tag margins) and wash position
+        # (paint-time, in :class:`_ArticleTextView`).
+        tag_table = build_tag_table(char_width_px=char_width_measurer())
+        self._buffer = Gtk.TextBuffer.new(tag_table)
+        self._text_view.set_buffer(self._buffer)
+
+        # Translate the wash-spec map (keyed by :class:`TagName`) to a
+        # map keyed by :class:`Gtk.TextTag` objects so the snapshot
+        # path can membership-test in O(1) without re-resolving tag
+        # names on every paint. ``lookup`` returns ``None`` only for
+        # an unknown tag name; every key in :func:`build_wash_specs`
+        # is registered in the table by :func:`build_tag_table`, so
+        # the lookups always succeed — but a defensive filter keeps
+        # the type narrow.
+        wash_specs_by_tag: dict[Gtk.TextTag, WashSpec] = {}
+        for tag_name, spec in build_wash_specs().items():
+            tag = tag_table.lookup(tag_name.value)
+            if tag is not None:
+                wash_specs_by_tag[tag] = spec
+        self._text_view.install_wash_specs(wash_specs_by_tag)
+
+        # The article container: a fixed-width column wrapping the
+        # text view. Production wires the two measurers (M-width and
+        # line-height) — see :func:`_build_font_measurers` for the
+        # single seam tests monkey-patch. We pass the *same*
+        # measurer callables that already ran above; their results
+        # are cached on first call inside the container, so this is
+        # not a double measurement.
         article_container = ArticleContainer(
             char_width_measurer=char_width_measurer,
             line_height_measurer=line_height_measurer,
