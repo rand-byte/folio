@@ -102,7 +102,7 @@ Layers may only import **downward**. Every arrow below points from caller to cal
 | Tune a constant (sizes, quotas) | `config/defaults.py` | none — that is the point of this module |
 | Change paths / XDG behaviour | `config/paths.py` | tests under `config/test_paths.py` |
 | Add a new sort key / smart filter | `enums.py` (`NoteSortKey` / `SmartFilter`) → `search/note_filter.py` → `ui/note_list.py` (dropdown) | tests in `search/test_note_filter.py` |
-| Change selection / view-mode plumbing | `controllers/app_state.py` (add a field + signal) | every UI widget that reacts to it |
+| Change selection / view-mode plumbing | `controllers/app_state.py` (add a field + signal). Every UI widget that reacts to it. **The MainWindow's `_on_view_mode_changed` handler is the single place that orchestrates editor-flush + view-refresh across the toggle — see the corresponding invariant in `ui/main_window.py`.** | every UI widget that reacts to it |
 | Add a new dialog | `ui/dialogs.py` | the controller or widget that opens it |
 | Change link/URL handling | `ui/link_handler.py`; allowlist in `enums.LinkScheme` | `asciidoc/inline_parser.py` for scheme validation |
 | Change image attachment rules | `storage/attachment_store.py`; size cap in `config/defaults.MAX_ATTACHMENT_BYTES`; MIME set in `enums.MimeKind` | `controllers/note_controller.py` for the toast wiring |

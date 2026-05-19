@@ -24,12 +24,16 @@ Principles & invariants
   matching the design's titlebar. ``set_titlebar`` is independent
   of ``set_child``, so the existing outer-paned-as-child invariant
   is preserved unchanged.
-* The window subscribes to a single :class:`AppState` signal —
-  ``view-mode-changed`` — and uses it to swap the stack's visible
-  child between the rendered view and the source editor. Every
-  other signal subscription belongs to the panes themselves; the
-  window's surface stays minimal, owning only the layout and the
-  view-mode dispatch.
+* The single signal subscription this widget owns is
+  ``view-mode-changed``. On every mode change the window flushes the
+  editor's pending autosave (so any just-typed edits hit disk under
+  the current note id) and asks the view to refresh from the
+  repository before the stack swap reveals it. Flush + refresh are
+  both idempotent, so doing them on every mode change — not just on
+  the EDIT→VIEW direction — keeps the dispatch branch-free without
+  paying any extra cost on the no-op path. Every other signal
+  subscription belongs to the panes themselves; the window's surface
+  stays minimal, owning only the layout and the view-mode dispatch.
 * :class:`NoteEditor` and :class:`NoteView` both stay constructed
   and live across mode switches. Tearing one down on every toggle
   would discard the editor's undo history and the view's child
@@ -310,19 +314,39 @@ class MainWindow(  # pylint: disable=too-many-instance-attributes
 
         self.set_child(outer_paned)
 
-        # The single signal subscription this widget owns: swap the
-        # stack's visible child whenever the mode changes. The
-        # editor's flush-before-load discipline means we don't need
-        # to do anything extra to preserve unsaved edits across the
-        # toggle — they hit disk before the rendered view re-reads
-        # the source.
+        # The single signal subscription this widget owns: on every
+        # ``view-mode-changed`` the handler flushes the editor's
+        # pending autosave (so any just-typed edits hit disk under the
+        # current note id), refreshes the view from the repository
+        # (so its buffer reflects the just-saved source), and then
+        # swaps the stack's visible child. Both flush and refresh are
+        # idempotent, so doing them unconditionally keeps the dispatch
+        # branch-free.
         self._app_state.connect(
             "view-mode-changed",
             self._on_view_mode_changed,
         )
 
     def _on_view_mode_changed(self, _app_state: AppState) -> None:
-        """Swap the right-pane stack's visible child."""
+        """Flush the editor, refresh the view, then swap the visible child.
+
+        The flush ensures any pending debounced autosave hits disk
+        under the current note id before the rendered view re-reads
+        from the repository. The refresh ensures the view's buffer
+        reflects the just-saved source (without it the view would
+        still show whatever was rendered at the last
+        ``selected-note-changed``). Both calls are idempotent:
+        :meth:`NoteEditor.flush_pending_save` is a no-op when no save
+        is pending; :meth:`NoteView.refresh` re-renders from the
+        repository whose state may or may not have changed. Doing
+        both unconditionally on every mode change is simpler and
+        cheaper than gating on the direction of the transition, and
+        keeps the path identical for VIEW→EDIT (where the flush is
+        needed if the user toggled back-and-forth quickly) and
+        EDIT→VIEW.
+        """
+        self._note_editor.flush_pending_save()
+        self._note_view.refresh()
         self._right_pane_stack.set_visible_child_name(
             _stack_name_for_mode(self._app_state.view_mode),
         )

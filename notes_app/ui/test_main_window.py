@@ -43,11 +43,11 @@ def _display_available() -> bool:
 
 class _FakeNoteRepository:
     notes: dict[str, Note]
-    last_update: tuple[str, str, datetime] | None
+    update_calls: list[tuple[str, str, datetime]]
 
     def __init__(self) -> None:
         self.notes = {}
-        self.last_update = None
+        self.update_calls = []
 
     def list_all(self) -> list[Note]:
         return list(self.notes.values())
@@ -73,9 +73,23 @@ class _FakeNoteRepository:
         source: str,
         modified_at: datetime,
     ) -> None:
-        # Record the call so the editor's auto-save flow can be
-        # asserted against this fake from the controller's tests.
-        self.last_update = (note_id, source, modified_at)
+        # Record the call (tests inspect ``update_calls`` to assert
+        # the editor's auto-save flow fired exactly once with the
+        # right payload) AND mutate the stored note so a subsequent
+        # ``get`` returns the just-saved source. The latter is what
+        # lets the view-refresh-on-mode-change tests observe the
+        # updated content after a flush.
+        self.update_calls.append((note_id, source, modified_at))
+        existing = self.notes[note_id]
+        self.notes[note_id] = Note(
+            id=existing.id,
+            title=existing.title,
+            notebook_id=existing.notebook_id,
+            source=source,
+            snippet=existing.snippet,
+            created_at=existing.created_at,
+            modified_at=modified_at,
+        )
 
     def update_notebook(self, _note_id: str, _notebook_id: str) -> None:
         raise NotImplementedError
@@ -310,6 +324,254 @@ class MainWindowViewModeStackTests(unittest.TestCase):
         self.assertEqual(
             window._right_pane_stack.get_visible_child_name(),
             "view",
+        )
+
+
+@unittest.skipUnless(_display_available(), "no GDK display")
+class MainWindowViewModeChangeFlushAndRefreshTests(unittest.TestCase):
+    """The view-mode-change handler must flush the editor's pending
+    autosave AND refresh the rendered view before swapping the stack.
+
+    These tests exercise the bug "view mode shows stale content after
+    editing": typing into the source editor and immediately clicking
+    View used to reveal the pre-edit content because (a) the editor's
+    300 ms debounced save had not yet flushed and (b) the view was
+    never asked to re-read from the repository on a mode change.
+    """
+
+    def _build_window_with_note(
+        self,
+        *,
+        view_mode: ViewMode,
+        note_id: str = "n1",
+        source: str = "= Hello\n\nbody.\n",
+    ) -> tuple[MainWindow, _FakeNoteRepository, AppState]:
+        """Build a window already pointing at a single seeded note.
+
+        The seeded note is inserted into the repository *and* the
+        :class:`AppState` is moved to point at it before
+        :class:`MainWindow` is constructed, so both :class:`NoteEditor`
+        and :class:`NoteView` pick it up in their respective
+        constructor-time loads. Returning the repository and the
+        :class:`AppState` together with the window lets the tests
+        assert against the autosave path and drive view-mode toggles
+        without reaching into private window state.
+        """
+        application = Gtk.Application.new(
+            "org.notes_app.NotesApp.test",
+            0,
+        )
+        application.register(None)
+        notes = _FakeNoteRepository()
+        notebooks = _FakeNotebookRepository()
+        notebooks.add(
+            Notebook(
+                id="nb-1",
+                name="Personal",
+                parent_id=None,
+                icon=NotebookIcon.HOME,
+            )
+        )
+        notes.notes[note_id] = Note(
+            id=note_id,
+            title="Hello",
+            notebook_id="nb-1",
+            source=source,
+            snippet="body.",
+            created_at=_FIXED_NOW,
+            modified_at=_FIXED_NOW,
+        )
+        state = AppState(initial_view_mode=view_mode)
+        # Set the selected note BEFORE constructing the window so the
+        # editor's and view's constructor-time loads both see it. (Were
+        # we to set it after construction, the same load would still
+        # run through ``selected-note-changed`` — but pre-setting keeps
+        # the test setup linear and avoids interleaving signal handlers
+        # with assertion setup.)
+        state.set_selected_note_id(note_id)
+        controller = NoteController(
+            repository=notes,
+            attachments=_FakeAttachmentStore(),
+            app_state=state,
+        )
+        window = MainWindow(
+            application=application,
+            note_repository=notes,
+            notebook_repository=notebooks,
+            note_controller=controller,
+            app_state=state,
+        )
+        return window, notes, state
+
+    def _view_buffer_text(self, window: MainWindow) -> str:
+        """Pull the rendered view's buffer text as a plain string."""
+        buffer = window._note_view._buffer
+        return buffer.get_text(
+            buffer.get_start_iter(),
+            buffer.get_end_iter(),
+            False,
+        )
+
+    def _editor_buffer_text(self, window: MainWindow) -> str:
+        """Pull the source editor's buffer text as a plain string."""
+        buffer = window._note_editor._buffer
+        return buffer.get_text(
+            buffer.get_start_iter(),
+            buffer.get_end_iter(),
+            False,
+        )
+
+    def test_view_mode_change_to_view_flushes_pending_editor_save(
+        self,
+    ) -> None:
+        """A debounced autosave armed while in EDIT must hit the
+        repository before the stack swaps to VIEW.
+
+        This is half of the original bug: without the flush, the
+        last-typed text sat only in the editor's in-memory buffer at
+        the moment the user clicked View, so View reads from disk
+        and shows the pre-edit content. The repository's recorded
+        ``update_calls`` is the witness — exactly one call carrying
+        the buffer's text after the toggle.
+
+        Note on timer mechanics: no GLib main loop runs during the
+        test, so the real 300 ms timer that ``_schedule_save``
+        registers never fires on its own. The single
+        ``update_calls`` entry can therefore only come from the
+        synchronous flush our handler performs.
+        """
+        window, repo, state = self._build_window_with_note(
+            view_mode=ViewMode.EDIT,
+        )
+        # Sanity-check setup: the editor loaded the seeded source and
+        # no save has happened yet.
+        self.assertEqual(self._editor_buffer_text(window), "= Hello\n\nbody.\n")
+        self.assertEqual(repo.update_calls, [])
+
+        # Simulate the user typing — programmatic insert produces
+        # the same ``changed`` signal sequence as keypress-driven
+        # input, which is what arms the debounced autosave.
+        editor_buffer = window._note_editor._buffer
+        editor_buffer.insert(editor_buffer.get_end_iter(), "XYZ")
+
+        # Toggle to View. Our handler must flush the pending save
+        # before the stack swaps.
+        state.set_view_mode(ViewMode.VIEW)
+
+        self.assertEqual(len(repo.update_calls), 1)
+        saved_note_id, saved_source, _ = repo.update_calls[0]
+        self.assertEqual(saved_note_id, "n1")
+        self.assertEqual(saved_source, "= Hello\n\nbody.\nXYZ")
+
+    def test_view_mode_change_to_view_refreshes_view_pane(self) -> None:
+        """A mode change to VIEW must re-read the source from the
+        repository so any disk-side change since the last render
+        becomes visible.
+
+        Even with the editor flush in place, the view would still
+        show stale content unless it is asked to refresh on every
+        mode change — its ``selected-note-changed`` subscription is
+        not enough on its own. We simulate "disk got updated"
+        without going through ``selected-note-changed`` by mutating
+        the fake repository directly; the toggle to EDIT and back
+        to VIEW is what must force the re-read.
+        """
+        window, repo, state = self._build_window_with_note(
+            view_mode=ViewMode.VIEW,
+            source="= old\n",
+        )
+        # The initial render already happened during construction.
+        self.assertIn("old", self._view_buffer_text(window))
+
+        # Mutate the underlying note out from under the view, without
+        # firing ``selected-note-changed`` (i.e. simulate that disk
+        # now holds different content).
+        existing = repo.notes["n1"]
+        repo.notes["n1"] = Note(
+            id=existing.id,
+            title=existing.title,
+            notebook_id=existing.notebook_id,
+            source="= new\n",
+            snippet=existing.snippet,
+            created_at=existing.created_at,
+            modified_at=existing.modified_at,
+        )
+
+        # The view still shows "old" because nothing has prompted it
+        # to re-read.
+        self.assertIn("old", self._view_buffer_text(window))
+        self.assertNotIn("new", self._view_buffer_text(window))
+
+        # Toggle VIEW → EDIT → VIEW. The second transition is where
+        # our handler asks the view to refresh.
+        state.set_view_mode(ViewMode.EDIT)
+        state.set_view_mode(ViewMode.VIEW)
+
+        rendered = self._view_buffer_text(window)
+        self.assertIn("new", rendered)
+        self.assertNotIn("old", rendered)
+
+    def test_view_mode_change_to_view_runs_flush_before_refresh(self) -> None:
+        """The order matters: flush must precede refresh.
+
+        If the refresh ran first, it would re-read the pre-edit
+        source from the repository and the just-typed text would
+        not appear in the rendered view (it would only land on disk
+        a moment later when the flush ran, by which point the
+        rendered buffer has already been re-populated with the old
+        content).
+
+        This is the end-to-end witness: type into the editor, toggle
+        to View, and read the rendered text — it must contain the
+        typed content.
+        """
+        window, _repo, state = self._build_window_with_note(
+            view_mode=ViewMode.EDIT,
+            source="= original\n",
+        )
+        editor_buffer = window._note_editor._buffer
+        editor_buffer.insert(editor_buffer.get_end_iter(), "MARKER")
+
+        # The view is still mid-construction-time text ("original");
+        # no refresh has happened since the typing.
+        self.assertNotIn("MARKER", self._view_buffer_text(window))
+
+        state.set_view_mode(ViewMode.VIEW)
+
+        # If flush ran AFTER refresh, the view would still show the
+        # pre-edit content and this assertion would fail.
+        rendered = self._view_buffer_text(window)
+        self.assertIn("MARKER", rendered)
+
+    def test_view_mode_change_to_edit_is_safe_when_nothing_pending(
+        self,
+    ) -> None:
+        """The no-op path: a VIEW → EDIT toggle with no pending save
+        must not produce a spurious repository write, and the editor
+        must hold the note's source ready for editing.
+
+        Both ``flush_pending_save`` (nothing pending) and
+        ``refresh`` (idempotent re-render) are no-ops in this
+        direction; the test pins that down so a future refactor
+        cannot accidentally introduce a write on every toggle.
+        """
+        window, repo, state = self._build_window_with_note(
+            view_mode=ViewMode.VIEW,
+            source="= Hello\n",
+        )
+        self.assertEqual(repo.update_calls, [])
+
+        state.set_view_mode(ViewMode.EDIT)
+
+        # No save should have happened — nothing was pending and
+        # nothing was typed.
+        self.assertEqual(repo.update_calls, [])
+        # And the editor's buffer correctly mirrors the note's source.
+        self.assertEqual(self._editor_buffer_text(window), "= Hello\n")
+        # The stack swap still happened.
+        self.assertEqual(
+            window._right_pane_stack.get_visible_child_name(),
+            "edit",
         )
 
 
