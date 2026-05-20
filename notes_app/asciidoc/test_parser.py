@@ -27,6 +27,7 @@ from notes_app.asciidoc.ast import (
     OrderedList,
     Paragraph,
     Section,
+    SoftBreak,
     Table,
     TableCell,
     TableRow,
@@ -198,7 +199,7 @@ class ParagraphTests(unittest.TestCase):
         self.assertEqual(para.inlines, (_t("hello", 1),))
         self.assertEqual(para.source_line, 1)
 
-    def test_multi_line_paragraph_joined_with_newlines(self) -> None:
+    def test_multi_line_paragraph_joined_with_soft_breaks(self) -> None:
         doc = parse("one\ntwo\nthree\n")
         self.assertEqual(len(doc.blocks), 1)
         para = doc.blocks[0]
@@ -207,9 +208,9 @@ class ParagraphTests(unittest.TestCase):
             para.inlines,
             (
                 _t("one", 1),
-                _t("\n", 2),
+                SoftBreak(source_line=2),
                 _t("two", 2),
-                _t("\n", 3),
+                SoftBreak(source_line=3),
                 _t("three", 3),
             ),
         )
@@ -1383,14 +1384,20 @@ class MultiLineSingleAdmonitionTests(unittest.TestCase):
         assert isinstance(admonition, Admonition)
         self.assertEqual(admonition.kind, AdmonitionKind.NOTE)
         self.assertEqual(len(admonition.blocks), 1)
-        # The paragraph contains: 'first line' + newline + 'second line'.
+        # The paragraph contains: 'first line' + soft break + 'second line'.
         paragraph = admonition.blocks[0]
         text_pieces = [
             n.content for n in paragraph.inlines if isinstance(n, Text)
         ]
         self.assertIn("first line", text_pieces)
         self.assertIn("second line", text_pieces)
-        self.assertIn("\n", text_pieces)
+        # The source-line boundary is recorded as exactly one SoftBreak,
+        # not a literal-newline Text run.
+        soft_breaks = [
+            n for n in paragraph.inlines if isinstance(n, SoftBreak)
+        ]
+        self.assertEqual(len(soft_breaks), 1)
+        self.assertNotIn("\n", text_pieces)
 
     def test_blank_line_terminates_continuation(self) -> None:
         # A blank line ends the admonition; the second paragraph is

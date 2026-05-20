@@ -110,6 +110,7 @@ from notes_app.asciidoc.ast import (
     OrderedList,
     Paragraph,
     Section,
+    SoftBreak,
     Strikethrough,
     Table,
     TableCell,
@@ -674,6 +675,14 @@ class TextBufferRenderer:
         if isinstance(inline, Link):
             self._emit_link(buffer, inline, tag_stack)
             return
+        if isinstance(inline, SoftBreak):
+            # A source-line boundary inside a paragraph: the AsciiDoc
+            # subset has no hard-break construct, so a soft break is a
+            # reflow point — render it as a single space. The joiner is
+            # always a top-level child of Paragraph.inlines, so tag_stack
+            # is empty here and a space carries no visible style anyway.
+            buffer.insert(buffer.get_end_iter(), " ")
+            return
         # Closed union; new inline kinds must extend this dispatch.
         raise TypeError(f"unknown inline node: {type(inline).__name__}")
 
@@ -1094,6 +1103,13 @@ def _inline_to_pango_markup(node: InlineNode) -> str:
         # markup-escaped to handle ``&`` characters in query strings.
         href = GLib.markup_escape_text(node.url)
         return f'<a href="{href}">{inner}</a>'
+    if isinstance(node, SoftBreak):
+        # Soft line break collapses to a single space (see _emit_inline).
+        # A SoftBreak cannot reach this markup path in practice — the
+        # joiner only appears as a direct child of Paragraph.inlines,
+        # never inside a table/header cell — but the dispatch must stay
+        # exhaustive over the (now wider) InlineNode union.
+        return " "
     # Closed union; new inline kinds must extend this dispatch.
     raise TypeError(f"unknown inline node: {type(node).__name__}")
 

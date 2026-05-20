@@ -88,7 +88,7 @@ Layers may only import **downward**. Every arrow below points from caller to cal
 | Change | Start here | Likely also touches |
 | --- | --- | --- |
 | Add a new enum value (icon, link scheme, etc.) | `notes_app/enums.py` | any consumer that pattern-matches the enum; for `StrEnum`s persisted to disk, also add a migration |
-| Add a new AsciiDoc construct | `asciidoc/ast.py` (new node) → `asciidoc/lexer.py` → `asciidoc/parser.py` → `asciidoc/textbuffer_renderer.py` → `asciidoc/tag_table.py` (new tag) → `asciidoc/language_spec.lang` (editor highlight) | `enums.py` (new `NodeKind`, possibly `ParseErrorKind`) |
+| Add a new AsciiDoc construct | `asciidoc/ast.py` (new node) → `asciidoc/lexer.py` → `asciidoc/parser.py` → `asciidoc/textbuffer_renderer.py` → `asciidoc/tag_table.py` (new tag) → `asciidoc/language_spec.lang` (editor highlight) (purely structural inline nodes — e.g. `SoftBreak`, the parser-emitted soft-line-break joiner — skip the lexer and `language_spec.lang` and need only the AST union plus both renderer dispatch ladders) | `enums.py` (new `NodeKind`, possibly `ParseErrorKind`) |
 | Add a parse error variant | `notes_app/enums.py` `ParseErrorKind` → the parser site that detects it → `parser.py` tests | gutter rendering in `ui/note_view.py` |
 | Change DB schema | **new** `Migration` appended to `storage/migrations.py` `ALL_MIGRATIONS` — never edit a shipped one | the repository that reads/writes the new column |
 | Add a note-level user action | `controllers/note_controller.py` (mutate + emit signal) → caller in `ui/toolbar.py` or `ui/note_editor.py` | repository protocol if storage shape changes |

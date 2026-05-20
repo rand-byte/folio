@@ -24,6 +24,7 @@ from notes_app.asciidoc.ast import (
     OrderedList,
     Paragraph,
     Section,
+    SoftBreak,
     Strikethrough,
     Table,
     TableCell,
@@ -59,6 +60,7 @@ class AstNodeShapeTests(unittest.TestCase):
             Italic,
             Strikethrough,
             Underline,
+            SoftBreak,
             Paragraph,
             Section,
             ListItem,
@@ -87,6 +89,7 @@ class AstNodeShapeTests(unittest.TestCase):
             (Italic, {"children", "source_line"}),
             (Strikethrough, {"children", "source_line"}),
             (Underline, {"children", "source_line"}),
+            (SoftBreak, {"source_line"}),
             (Paragraph, {"inlines", "source_line"}),
             (Section, {"level", "title", "blocks", "source_line"}),
             (ListItem, {"inlines", "source_line"}),
@@ -117,6 +120,11 @@ class AstFrozenTests(unittest.TestCase):
         node = _make_text()
         with self.assertRaises(FrozenInstanceError):
             node.content = "mutated"  # type: ignore[misc]
+
+    def test_soft_break_is_frozen(self) -> None:
+        node = SoftBreak(source_line=2)
+        with self.assertRaises(FrozenInstanceError):
+            node.source_line = 3  # type: ignore[misc]
 
     def test_section_is_frozen(self) -> None:
         section = Section(
@@ -167,6 +175,10 @@ class AstConstructionTests(unittest.TestCase):
         node = Text(content="hi", source_line=4)
         self.assertEqual(node.content, "hi")
         self.assertEqual(node.source_line, 4)
+
+    def test_soft_break(self) -> None:
+        node = SoftBreak(source_line=2)
+        self.assertEqual(node.source_line, 2)
 
     def test_bold_holds_children_as_tuple(self) -> None:
         node = Bold(

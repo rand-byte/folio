@@ -46,14 +46,32 @@ from notes_app.enums import AdmonitionKind, LinkScheme
 class Text:
     """A literal text run with no inline formatting applied.
 
-    ``content`` may include newline characters when a paragraph spans
-    multiple source lines — the parser inserts a ``Text("\\n", …)`` between
-    each source line's parsed inlines so the renderer can decide how to
-    treat soft line breaks. ``content`` is never empty: the inline parser
-    flushes its accumulator only when there is something to flush.
+    ``content`` is never empty: the inline parser flushes its
+    accumulator only when there is something to flush. Source-line
+    boundaries inside a multi-line paragraph are *not* recorded as
+    ``Text`` runs — they are :class:`SoftBreak` joiners (see
+    :class:`Paragraph`), so the renderer can decide how to treat soft
+    line breaks without sniffing ``content`` for a literal ``"\\n"``.
     """
 
     content: str
+    source_line: int
+
+
+@dataclass(frozen=True)
+class SoftBreak:
+    """A source-line boundary inside a paragraph (a *soft* line break).
+
+    The block parser inserts one of these between each source line's
+    parsed inlines when a paragraph spans multiple lines without a
+    blank line between them. Per the AsciiDoc subset (which has no
+    explicit hard-break construct) a soft break is presentation-only:
+    the renderer collapses it to a single space so the lines reflow as
+    one logical paragraph. The node carries ``source_line`` (the line
+    the break precedes) purely for provenance, consistent with every
+    other node.
+    """
+
     source_line: int
 
 
@@ -145,13 +163,17 @@ class Link:
 
 type InlineNode = (
     Text | Bold | Italic | Strikethrough | Underline | Monospace | Link
+    | SoftBreak
 )
 """The closed union of inline node kinds the parser produces.
 
 Step 4 produced :class:`Text`, :class:`Bold`, :class:`Italic`,
 :class:`Strikethrough`, and :class:`Underline`. Step 13 extends this
-union with :class:`Monospace` and :class:`Link`. Future build steps
-extend this further if new inline constructs are added.
+union with :class:`Monospace` and :class:`Link`. The soft-line-break
+fix extends it with :class:`SoftBreak` — the typed joiner the block
+parser emits between a multi-line paragraph's source lines (replacing
+the former ``Text("\\n", …)`` connector). Future build steps extend
+this further if new inline constructs are added.
 """
 
 
@@ -164,8 +186,9 @@ extend this further if new inline constructs are added.
 class Paragraph:
     """A run of inline content that belongs together as a block of prose.
 
-    Multi-source-line paragraphs have a ``Text("\\n", …)`` joiner between
-    each source line's parsed inlines.
+    Multi-source-line paragraphs have a :class:`SoftBreak` joiner
+    between each source line's parsed inlines; the renderer collapses
+    it to a single space.
     """
 
     inlines: tuple[InlineNode, ...]

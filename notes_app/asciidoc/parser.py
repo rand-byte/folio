@@ -47,7 +47,7 @@ Principles & invariants
   Inline formatting is parsed per source line so that
   :class:`ParseError.line` for an unmatched inline marker points at
   the exact source line, never at the first line of the paragraph.
-  Lines are joined in the AST with ``Text("\\n", line)`` connectors.
+  Lines are joined in the AST with :class:`SoftBreak` connectors.
 * Lists are flat in step 4: a single run of adjacent ``*`` or ``.``
   bullets terminated by anything else (blank, heading, fence, EOF).
   Multi-line items, nesting, and ``+`` continuations are deferred —
@@ -79,10 +79,10 @@ from notes_app.asciidoc.ast import (
     OrderedList,
     Paragraph,
     Section,
+    SoftBreak,
     Table,
     TableCell,
     TableRow,
-    Text,
     UnorderedList,
 )
 from notes_app.asciidoc.inline_parser import parse_inline
@@ -499,8 +499,8 @@ class _Parser:
 
         Inline content is parsed per-line so that error line numbers in
         :class:`ParseError`\\ s are exact. Lines are joined in the AST
-        with ``Text("\\n", source_line)`` connectors so the renderer
-        can decide whether to honour soft line breaks.
+        with :class:`SoftBreak` connectors so the renderer can decide
+        whether to honour soft line breaks.
         """
         first_line_token = self.tokens[self.pos]
         assert isinstance(first_line_token, LineToken), (
@@ -517,9 +517,7 @@ class _Parser:
             line_token = self.tokens[self.pos]
             assert isinstance(line_token, LineToken)
             if not is_first:
-                inlines.append(
-                    Text(content="\n", source_line=line_token.line)
-                )
+                inlines.append(SoftBreak(source_line=line_token.line))
             inlines.extend(parse_inline(line_token.text, line_token.line))
             is_first = False
             self.pos += 1
@@ -949,7 +947,7 @@ class _Parser:
         Because users routinely wrap admonition prose across multiple
         source lines without a blank between, the parser absorbs any
         immediately-following :class:`LineToken`\\ s into the same
-        paragraph — joined with ``Text("\\n", line)`` connectors,
+        paragraph — joined with :class:`SoftBreak` connectors,
         exactly as :meth:`_parse_paragraph` does. The run ends at the
         first :class:`BlankToken` or non-paragraph block-start token.
 
@@ -973,7 +971,7 @@ class _Parser:
         ):
             line_token = self.tokens[self.pos]
             assert isinstance(line_token, LineToken)
-            inlines.append(Text(content="\n", source_line=line_token.line))
+            inlines.append(SoftBreak(source_line=line_token.line))
             inlines.extend(parse_inline(line_token.text, line_token.line))
             self.pos += 1
         paragraph = Paragraph(inlines=tuple(inlines), source_line=token.line)

@@ -23,6 +23,7 @@ from notes_app.asciidoc.ast import (
     Monospace,
     Paragraph,
     Section,
+    SoftBreak,
     Table,
     Text,
 )
@@ -1830,6 +1831,43 @@ class SourdoughFixtureRegressionTests(unittest.TestCase):
         self.assertEqual(len(table.rows), 6)
         for row in table.rows:
             self.assertEqual(len(row.cells), 2)
+
+
+@unittest.skipUnless(_display_available(), "no GDK display")
+class SoftBreakRenderingTests(unittest.TestCase):
+    """An in-paragraph source newline renders as a single space, not a
+    hard break (the soft-line-break fix).
+    """
+
+    def test_soft_break_renders_as_single_space(self) -> None:
+        renderer, buffer, _ = _build_renderer()
+        renderer.render_into("= D\n\nalpha\nbeta\n", buffer, note_id="n1")
+        text = _full_text(buffer)
+        self.assertIn("alpha beta", text)
+        self.assertNotIn("alpha\nbeta", text)
+
+    def test_admonition_continuation_renders_on_one_logical_line(self) -> None:
+        renderer, buffer, _ = _build_renderer()
+        renderer.render_into(
+            "= D\n\nNOTE: first part\nsecond part\n",
+            buffer,
+            note_id="n1",
+        )
+        text = _full_text(buffer)
+        self.assertIn("first part second part", text)
+        self.assertNotIn("first part\nsecond part", text)
+
+
+class SoftBreakPangoMarkupTests(unittest.TestCase):
+    """The markup ladder (used for table/header-cell labels) maps a
+    SoftBreak to a single space. No display required.
+    """
+
+    def test_soft_break_pango_markup_is_space(self) -> None:
+        markup = _inlines_to_pango_markup(
+            (Text("a", 1), SoftBreak(source_line=2), Text("b", 2))
+        )
+        self.assertEqual(markup, "a b")
 
 
 if __name__ == "__main__":
