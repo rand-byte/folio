@@ -2,15 +2,17 @@
 
 from __future__ import annotations
 
+import importlib.resources
 import unittest
 from datetime import UTC, datetime, timedelta
 
 import gi
 
 gi.require_version("Gdk", "4.0")
+gi.require_version("Graphene", "1.0")
 gi.require_version("Gtk", "4.0")
 # pylint: disable=wrong-import-position
-from gi.repository import Gdk, Gtk  # noqa: E402
+from gi.repository import Gdk, GLib, Graphene, Gtk  # noqa: E402
 
 from notes_app.controllers.app_state import AppState
 from notes_app.enums import NotebookIcon, SmartFilter
@@ -23,13 +25,12 @@ from notes_app.search.note_filter import (
 )
 from notes_app.ui.sidebar import (
     Sidebar,
-    _NotebookRowPayload,
-    _SidebarRow,
-    _SmartRowPayload,
+    _build_notebook_items,
     _children_of,
     _count_notebook,
     _count_smart_filter,
     _icon_name_for_notebook,
+    _SidebarItem,
     _top_level_notebooks,
 )
 
@@ -299,6 +300,142 @@ class IconNameLookupTests(unittest.TestCase):
 
 
 # ---------------------------------------------------------------------------
+# Item-builder tests — pure, no display needed
+# ---------------------------------------------------------------------------
+
+
+class BuildNotebookItemsTests(unittest.TestCase):
+    """The pure tree-of-items builder underlying the notebook model.
+
+    These replace the old "the rightmost label in the row widget"
+    assertions: counts and hierarchy are read straight off the
+    :class:`_SidebarItem` tree, which is display-independent.
+    """
+
+    def _recipes_tree(self) -> tuple[list[Note], list[Notebook]]:
+        notebooks = [
+            _make_notebook("nb-personal", name="Personal"),
+            _make_notebook("nb-recipes", name="Recipes"),
+            _make_notebook("nb-baking", name="Baking", parent_id="nb-recipes"),
+            _make_notebook(
+                "nb-dinners",
+                name="Weeknight dinners",
+                parent_id="nb-recipes",
+            ),
+        ]
+        notes = [
+            _make_note("n1", notebook_id="nb-recipes"),
+            _make_note("n2", notebook_id="nb-baking"),
+            _make_note("n3", notebook_id="nb-dinners"),
+            _make_note("n4", notebook_id="nb-personal"),
+        ]
+        return notes, notebooks
+
+    def test_only_top_level_items_at_the_root(self) -> None:
+        notes, notebooks = self._recipes_tree()
+        items = _build_notebook_items(notebooks, notes)
+        self.assertEqual(
+            [item.label for item in items],
+            ["Personal", "Recipes"],
+        )
+
+    def test_children_hang_off_their_parent_item(self) -> None:
+        notes, notebooks = self._recipes_tree()
+        items = _build_notebook_items(notebooks, notes)
+        recipes = next(i for i in items if i.label == "Recipes")
+        self.assertEqual(
+            [child.label for child in recipes.children],
+            ["Baking", "Weeknight dinners"],
+        )
+
+    def test_leaf_items_have_no_children(self) -> None:
+        notes, notebooks = self._recipes_tree()
+        items = _build_notebook_items(notebooks, notes)
+        personal = next(i for i in items if i.label == "Personal")
+        self.assertEqual(personal.children, ())
+
+    def test_parent_count_includes_children(self) -> None:
+        notes, notebooks = self._recipes_tree()
+        items = _build_notebook_items(notebooks, notes)
+        recipes = next(i for i in items if i.label == "Recipes")
+        # nb-recipes (1) + nb-baking (1) + nb-dinners (1).
+        self.assertEqual(recipes.count, 3)
+
+    def test_leaf_count_is_its_own_notes_only(self) -> None:
+        notes, notebooks = self._recipes_tree()
+        items = _build_notebook_items(notebooks, notes)
+        personal = next(i for i in items if i.label == "Personal")
+        self.assertEqual(personal.count, 1)
+
+    def test_item_payload_is_a_notebook_selection(self) -> None:
+        notes, notebooks = self._recipes_tree()
+        items = _build_notebook_items(notebooks, notes)
+        recipes = next(i for i in items if i.label == "Recipes")
+        self.assertEqual(
+            recipes.payload,
+            NotebookSelection(notebook_id="nb-recipes"),
+        )
+        baking = recipes.children[0]
+        self.assertEqual(
+            baking.payload,
+            NotebookSelection(notebook_id="nb-baking"),
+        )
+
+
+# ---------------------------------------------------------------------------
+# Model-access helpers (test-local)
+# ---------------------------------------------------------------------------
+
+
+def _tree_rows(selection: Gtk.SingleSelection) -> list[Gtk.TreeListRow]:
+    """Every realised :class:`Gtk.TreeListRow` in a selection's model."""
+    model = selection.get_model()
+    rows: list[Gtk.TreeListRow] = []
+    for position in range(model.get_n_items()):
+        row = model.get_item(position)
+        assert isinstance(row, Gtk.TreeListRow)
+        rows.append(row)
+    return rows
+
+
+def _items(selection: Gtk.SingleSelection) -> list[_SidebarItem]:
+    """The :class:`_SidebarItem`\\s currently exposed by a selection."""
+    items: list[_SidebarItem] = []
+    for row in _tree_rows(selection):
+        item = row.get_item()
+        assert isinstance(item, _SidebarItem)
+        items.append(item)
+    return items
+
+
+def _row_for(
+    selection: Gtk.SingleSelection,
+    notebook_id: str,
+) -> Gtk.TreeListRow:
+    """The tree row whose item targets ``notebook_id``."""
+    for row in _tree_rows(selection):
+        item = row.get_item()
+        assert isinstance(item, _SidebarItem)
+        if item.payload == NotebookSelection(notebook_id=notebook_id):
+            return row
+    raise AssertionError(f"no row for {notebook_id!r}")
+
+
+def _expand(selection: Gtk.SingleSelection, notebook_id: str) -> None:
+    """Expand the row for ``notebook_id`` (drives the TreeExpander path)."""
+    _row_for(selection, notebook_id).set_expanded(True)
+
+
+def _notebook_ids(selection: Gtk.SingleSelection) -> set[str]:
+    """The set of notebook ids currently rendered in the notebook model."""
+    ids: set[str] = set()
+    for item in _items(selection):
+        if isinstance(item.payload, NotebookSelection):
+            ids.add(item.payload.notebook_id)
+    return ids
+
+
+# ---------------------------------------------------------------------------
 # Widget tests
 # ---------------------------------------------------------------------------
 
@@ -337,10 +474,10 @@ class SidebarConstructionTests(unittest.TestCase):
 
 
 @unittest.skipUnless(_display_available(), "no GDK display")
-class SmartFilterRowTests(unittest.TestCase):
-    """Smart-filter rows reflect the seeded note set."""
+class SmartFilterModelTests(unittest.TestCase):
+    """Smart-filter model items reflect the seeded note set."""
 
-    def test_initial_smart_filter_rows_have_correct_counts(self) -> None:
+    def test_initial_smart_filter_items_have_correct_counts(self) -> None:
         notes = _FakeNoteRepository()
         notes.notes["recent"] = _make_note("recent", modified_at=_FIXED_NOW)
         notes.notes["old"] = _make_note(
@@ -355,14 +492,22 @@ class SmartFilterRowTests(unittest.TestCase):
             clock=_fixed_clock,
         )
 
-        all_label = sidebar._smart_filter_count_labels[SmartFilter.ALL]
-        recent_label = sidebar._smart_filter_count_labels[SmartFilter.RECENT]
-        self.assertEqual(all_label.get_text(), "2")
-        self.assertEqual(recent_label.get_text(), "1")
+        counts = {
+            item.payload: item.count
+            for item in _items(sidebar._smart_selection)
+        }
+        self.assertEqual(
+            counts[SmartSelection(smart_filter=SmartFilter.ALL)],
+            2,
+        )
+        self.assertEqual(
+            counts[SmartSelection(smart_filter=SmartFilter.RECENT)],
+            1,
+        )
 
 
 @unittest.skipUnless(_display_available(), "no GDK display")
-class NotebookTreeTests(unittest.TestCase):
+class NotebookTreeModelTests(unittest.TestCase):
     def _make_recipes_tree(
         self,
     ) -> tuple[_FakeNoteRepository, _FakeNotebookRepository]:
@@ -382,49 +527,53 @@ class NotebookTreeTests(unittest.TestCase):
         )
         return notes, notebooks
 
-    def test_collapsed_tree_only_renders_top_level_rows(self) -> None:
+    def _sidebar(self) -> Sidebar:
         notes, notebooks = self._make_recipes_tree()
-        sidebar = Sidebar(
+        return Sidebar(
             note_repository=notes,
             notebook_repository=notebooks,
             app_state=AppState(),
             clock=_fixed_clock,
         )
-        # Only the two top-level notebooks have rows. Children are
-        # not rendered until the parent is expanded.
+
+    def test_collapsed_tree_only_exposes_top_level_rows(self) -> None:
+        sidebar = self._sidebar()
+        # Collapsed: the model exposes only the two top-level notebooks.
         self.assertEqual(
-            set(sidebar._notebook_rows.keys()),
+            _notebook_ids(sidebar._notebook_selection),
             {"nb-personal", "nb-recipes"},
         )
 
-    def test_expanding_a_parent_renders_its_children(self) -> None:
-        notes, notebooks = self._make_recipes_tree()
-        sidebar = Sidebar(
-            note_repository=notes,
-            notebook_repository=notebooks,
-            app_state=AppState(),
-            clock=_fixed_clock,
-        )
-        sidebar._toggle_expansion("nb-recipes")
-
+    def test_expanding_a_parent_exposes_its_children(self) -> None:
+        sidebar = self._sidebar()
+        _expand(sidebar._notebook_selection, "nb-recipes")
         self.assertEqual(
-            set(sidebar._notebook_rows.keys()),
+            _notebook_ids(sidebar._notebook_selection),
             {"nb-personal", "nb-recipes", "nb-baking", "nb-dinners"},
         )
-        self.assertIn("nb-recipes", sidebar._expanded_notebook_ids)
 
-    def test_collapsing_drops_children_from_the_render(self) -> None:
-        notes, notebooks = self._make_recipes_tree()
-        sidebar = Sidebar(
-            note_repository=notes,
-            notebook_repository=notebooks,
-            app_state=AppState(),
-            clock=_fixed_clock,
+    def test_collapsing_drops_children_from_the_model(self) -> None:
+        sidebar = self._sidebar()
+        row = _row_for(sidebar._notebook_selection, "nb-recipes")
+        row.set_expanded(True)
+        self.assertIn("nb-baking", _notebook_ids(sidebar._notebook_selection))
+        row.set_expanded(False)
+        self.assertNotIn(
+            "nb-baking", _notebook_ids(sidebar._notebook_selection)
         )
-        sidebar._toggle_expansion("nb-recipes")
-        self.assertIn("nb-baking", sidebar._notebook_rows)
-        sidebar._toggle_expansion("nb-recipes")
-        self.assertNotIn("nb-baking", sidebar._notebook_rows)
+
+    def test_parent_row_is_expandable_and_leaf_is_not(self) -> None:
+        sidebar = self._sidebar()
+        recipes = _row_for(sidebar._notebook_selection, "nb-recipes")
+        personal = _row_for(sidebar._notebook_selection, "nb-personal")
+        self.assertTrue(recipes.is_expandable())
+        self.assertFalse(personal.is_expandable())
+
+    def test_child_row_is_a_leaf(self) -> None:
+        sidebar = self._sidebar()
+        _expand(sidebar._notebook_selection, "nb-recipes")
+        baking = _row_for(sidebar._notebook_selection, "nb-baking")
+        self.assertFalse(baking.is_expandable())
 
     def test_parent_count_includes_children(self) -> None:
         notes, notebooks = self._make_recipes_tree()
@@ -439,94 +588,73 @@ class NotebookTreeTests(unittest.TestCase):
             app_state=AppState(),
             clock=_fixed_clock,
         )
-        # The recipes row's count widget is the rightmost label.
-        recipes_row = sidebar._notebook_rows["nb-recipes"]
-        count_label = _count_label_in_row(recipes_row)
-        self.assertEqual(count_label.get_text(), "3")
+        recipes = _row_for(sidebar._notebook_selection, "nb-recipes").get_item()
+        personal = _row_for(
+            sidebar._notebook_selection, "nb-personal"
+        ).get_item()
+        assert isinstance(recipes, _SidebarItem)
+        assert isinstance(personal, _SidebarItem)
+        self.assertEqual(recipes.count, 3)
+        self.assertEqual(personal.count, 1)
 
-        personal_row = sidebar._notebook_rows["nb-personal"]
-        self.assertEqual(_count_label_in_row(personal_row).get_text(), "1")
-
-    def test_top_level_row_with_children_carries_has_children_payload(
-        self,
-    ) -> None:
-        notes, notebooks = self._make_recipes_tree()
-        sidebar = Sidebar(
-            note_repository=notes,
-            notebook_repository=notebooks,
-            app_state=AppState(),
-            clock=_fixed_clock,
-        )
-        recipes_row = sidebar._notebook_rows["nb-recipes"]
-        assert isinstance(recipes_row.payload, _NotebookRowPayload)
-        self.assertTrue(recipes_row.payload.has_children)
-
-        personal_row = sidebar._notebook_rows["nb-personal"]
-        assert isinstance(personal_row.payload, _NotebookRowPayload)
-        self.assertFalse(personal_row.payload.has_children)
-
-    def test_child_row_carries_is_child_payload(self) -> None:
-        notes, notebooks = self._make_recipes_tree()
-        sidebar = Sidebar(
-            note_repository=notes,
-            notebook_repository=notebooks,
-            app_state=AppState(),
-            clock=_fixed_clock,
-        )
-        sidebar._toggle_expansion("nb-recipes")
-        baking_row = sidebar._notebook_rows["nb-baking"]
-        assert isinstance(baking_row.payload, _NotebookRowPayload)
-        self.assertTrue(baking_row.payload.is_child)
-        self.assertFalse(baking_row.payload.has_children)
-
-    def test_expansion_state_for_deleted_parent_is_pruned_on_refresh(
-        self,
-    ) -> None:
-        # Defends the "stale ids in _expanded_notebook_ids" branch
-        # in _build_notebook_rows: a notebook id that was once
-        # expanded but no longer exists must be removed from the
-        # set.
-        notes, notebooks = self._make_recipes_tree()
-        sidebar = Sidebar(
-            note_repository=notes,
-            notebook_repository=notebooks,
-            app_state=AppState(),
-            clock=_fixed_clock,
-        )
-        sidebar._toggle_expansion("nb-recipes")
-        self.assertIn("nb-recipes", sidebar._expanded_notebook_ids)
-
-        # Simulate the recipes notebook being deleted between
-        # refreshes (the repository drops the id; the sidebar
-        # rebuilds).
-        del notebooks.notebooks["nb-recipes"]
-        notebooks.insertion_order.remove("nb-recipes")
-        del notebooks.notebooks["nb-baking"]
-        notebooks.insertion_order.remove("nb-baking")
-        del notebooks.notebooks["nb-dinners"]
-        notebooks.insertion_order.remove("nb-dinners")
+    def test_expansion_is_preserved_across_refresh(self) -> None:
+        # The widget-local expansion snapshot must survive a model
+        # rebuild — a refresh should not collapse an open notebook.
+        sidebar = self._sidebar()
+        _expand(sidebar._notebook_selection, "nb-recipes")
+        self.assertIn("nb-baking", _notebook_ids(sidebar._notebook_selection))
 
         sidebar.refresh()
 
-        self.assertNotIn("nb-recipes", sidebar._expanded_notebook_ids)
+        self.assertIn("nb-baking", _notebook_ids(sidebar._notebook_selection))
+
+    def test_expansion_for_deleted_parent_is_dropped_on_refresh(self) -> None:
+        # Defends the stale-expansion path: a notebook expanded then
+        # deleted between refreshes must not reappear, and restoring
+        # the snapshot must find no matching row (no crash).
+        notes, notebooks = self._make_recipes_tree()
+        sidebar = Sidebar(
+            note_repository=notes,
+            notebook_repository=notebooks,
+            app_state=AppState(),
+            clock=_fixed_clock,
+        )
+        _expand(sidebar._notebook_selection, "nb-recipes")
+        self.assertEqual(
+            sidebar._snapshot_expanded_notebook_ids(), {"nb-recipes"}
+        )
+
+        # Recipes (and its children) are deleted between refreshes.
+        for nb_id in ("nb-recipes", "nb-baking", "nb-dinners"):
+            del notebooks.notebooks[nb_id]
+            notebooks.insertion_order.remove(nb_id)
+
+        sidebar.refresh()
+
+        self.assertEqual(
+            _notebook_ids(sidebar._notebook_selection),
+            {"nb-personal"},
+        )
+        self.assertEqual(sidebar._snapshot_expanded_notebook_ids(), set())
 
 
 @unittest.skipUnless(_display_available(), "no GDK display")
 class SidebarSelectionPlumbingTests(unittest.TestCase):
-    """Click input → :class:`AppState`; AppState → highlight."""
+    """Selection → :class:`AppState`; AppState → highlight."""
 
-    def test_smart_filter_row_activation_updates_selection(self) -> None:
+    def test_smart_filter_selection_updates_app_state(self) -> None:
         sidebar = _empty_sidebar()
-        sidebar._on_smart_filter_row_activated(
-            sidebar._smart_filter_listbox,
-            sidebar._smart_filter_rows[SmartFilter.RECENT],
+        recent_pos = _position_of(
+            sidebar._smart_selection,
+            SmartSelection(smart_filter=SmartFilter.RECENT),
         )
+        sidebar._smart_selection.set_selected(recent_pos)
         self.assertEqual(
             sidebar._app_state.selection,
             SmartSelection(smart_filter=SmartFilter.RECENT),
         )
 
-    def test_notebook_row_activation_updates_selection(self) -> None:
+    def test_notebook_selection_updates_app_state(self) -> None:
         notes = _FakeNoteRepository()
         notebooks = _FakeNotebookRepository()
         notebooks.add(_make_notebook("nb-1", name="One"))
@@ -536,16 +664,17 @@ class SidebarSelectionPlumbingTests(unittest.TestCase):
             app_state=AppState(),
             clock=_fixed_clock,
         )
-        sidebar._on_notebook_row_activated(
-            sidebar._notebook_listbox,
-            sidebar._notebook_rows["nb-1"],
+        nb_pos = _position_of(
+            sidebar._notebook_selection,
+            NotebookSelection(notebook_id="nb-1"),
         )
+        sidebar._notebook_selection.set_selected(nb_pos)
         self.assertEqual(
             sidebar._app_state.selection,
             NotebookSelection(notebook_id="nb-1"),
         )
 
-    def test_smart_selection_clears_notebook_listbox_selection(self) -> None:
+    def test_smart_selection_clears_notebook_section(self) -> None:
         notes = _FakeNoteRepository()
         notebooks = _FakeNotebookRepository()
         notebooks.add(_make_notebook("nb-1", name="One"))
@@ -558,23 +687,24 @@ class SidebarSelectionPlumbingTests(unittest.TestCase):
             app_state=app_state,
             clock=_fixed_clock,
         )
-        # The notebook listbox has the matching row selected.
-        self.assertIs(
-            sidebar._notebook_listbox.get_selected_row(),
-            sidebar._notebook_rows["nb-1"],
+        # The notebook section starts with the matching row selected.
+        self.assertEqual(
+            _selected_payload(sidebar._notebook_selection),
+            NotebookSelection(notebook_id="nb-1"),
         )
 
-        # Switching to a smart filter clears the notebook selection.
+        # Switching to a smart filter clears the notebook section.
         app_state.set_selection(SmartSelection(smart_filter=SmartFilter.ALL))
-        self.assertIsNone(sidebar._notebook_listbox.get_selected_row())
-        self.assertIs(
-            sidebar._smart_filter_listbox.get_selected_row(),
-            sidebar._smart_filter_rows[SmartFilter.ALL],
+        self.assertEqual(
+            sidebar._notebook_selection.get_selected(),
+            Gtk.INVALID_LIST_POSITION,
+        )
+        self.assertEqual(
+            _selected_payload(sidebar._smart_selection),
+            SmartSelection(smart_filter=SmartFilter.ALL),
         )
 
-    def test_notebook_selection_clears_smart_filter_listbox_selection(
-        self,
-    ) -> None:
+    def test_notebook_selection_clears_smart_filter_section(self) -> None:
         notes = _FakeNoteRepository()
         notebooks = _FakeNotebookRepository()
         notebooks.add(_make_notebook("nb-1", name="One"))
@@ -586,64 +716,101 @@ class SidebarSelectionPlumbingTests(unittest.TestCase):
             app_state=app_state,
             clock=_fixed_clock,
         )
-        self.assertIs(
-            sidebar._smart_filter_listbox.get_selected_row(),
-            sidebar._smart_filter_rows[SmartFilter.ALL],
+        self.assertEqual(
+            _selected_payload(sidebar._smart_selection),
+            SmartSelection(smart_filter=SmartFilter.ALL),
         )
 
         app_state.set_selection(NotebookSelection(notebook_id="nb-1"))
-        self.assertIsNone(sidebar._smart_filter_listbox.get_selected_row())
-        self.assertIs(
-            sidebar._notebook_listbox.get_selected_row(),
-            sidebar._notebook_rows["nb-1"],
+        self.assertEqual(
+            sidebar._smart_selection.get_selected(),
+            Gtk.INVALID_LIST_POSITION,
+        )
+        self.assertEqual(
+            _selected_payload(sidebar._notebook_selection),
+            NotebookSelection(notebook_id="nb-1"),
         )
 
-    def test_unknown_notebook_id_in_app_state_clears_both_listboxes(
-        self,
-    ) -> None:
+    def test_unknown_notebook_id_clears_both_sections(self) -> None:
         # A NotebookSelection whose id no longer exists must not
-        # crash the sidebar — both list-boxes simply unselect.
+        # crash the sidebar — both sections simply unselect.
         sidebar = _empty_sidebar()
         sidebar._app_state.set_selection(
             NotebookSelection(notebook_id="never-existed"),
         )
-        self.assertIsNone(sidebar._notebook_listbox.get_selected_row())
-        self.assertIsNone(sidebar._smart_filter_listbox.get_selected_row())
+        self.assertEqual(
+            sidebar._notebook_selection.get_selected(),
+            Gtk.INVALID_LIST_POSITION,
+        )
+        self.assertEqual(
+            sidebar._smart_selection.get_selected(),
+            Gtk.INVALID_LIST_POSITION,
+        )
 
-    def test_clicking_already_selected_smart_filter_is_a_noop(self) -> None:
-        # Clicking the row that is already the current selection
-        # must not flip a flag, double-emit, or change anything
-        # observable. AppState.set_selection short-circuits on
-        # equality; this test pins that contract end-to-end.
+    def test_reselecting_current_smart_filter_is_a_noop(self) -> None:
+        # Re-selecting the row that is already current must not
+        # re-emit. AppState.set_selection short-circuits on equality;
+        # this pins that contract through the SingleSelection path.
         sidebar = _empty_sidebar()
         events: list[None] = []
         sidebar._app_state.connect(
             "selection-changed",
             lambda _state: events.append(None),
         )
-        # Re-activate the All row (already selected because it's
-        # AppState's default).
-        sidebar._on_smart_filter_row_activated(
-            sidebar._smart_filter_listbox,
-            sidebar._smart_filter_rows[SmartFilter.ALL],
+        all_pos = _position_of(
+            sidebar._smart_selection,
+            SmartSelection(smart_filter=SmartFilter.ALL),
         )
+        # All is already selected (AppState's default).
+        sidebar._smart_selection.set_selected(all_pos)
         self.assertEqual(events, [])
+
+    def test_apply_highlight_does_not_loop_back_into_app_state(self) -> None:
+        # The re-entrancy fence: programmatic set_selected during
+        # _apply_highlight emits selection-changed, which must NOT
+        # push a fresh selection back into AppState.
+        notes = _FakeNoteRepository()
+        notebooks = _FakeNotebookRepository()
+        notebooks.add(_make_notebook("nb-1", name="One"))
+        app_state = AppState()
+        sidebar = Sidebar(
+            note_repository=notes,
+            notebook_repository=notebooks,
+            app_state=app_state,
+            clock=_fixed_clock,
+        )
+        events: list[None] = []
+        app_state.connect(
+            "selection-changed",
+            lambda _state: events.append(None),
+        )
+        app_state.set_selection(NotebookSelection(notebook_id="nb-1"))
+        # Exactly one emission — the deliberate one. The highlight's
+        # own programmatic selection did not bounce back.
+        self.assertEqual(len(events), 1)
+        # And the highlight did land: the notebook row is selected.
+        self.assertEqual(
+            _selected_payload(sidebar._notebook_selection),
+            NotebookSelection(notebook_id="nb-1"),
+        )
 
 
 @unittest.skipUnless(_display_available(), "no GDK display")
-class RowPayloadIntegrityTests(unittest.TestCase):
-    """Every row added to either list-box is a :class:`_SidebarRow`
-    with a typed payload — no bare :class:`Gtk.ListBoxRow` slips in."""
+class RowItemIntegrityTests(unittest.TestCase):
+    """Every row in either section is backed by a typed item/payload."""
 
-    def test_every_smart_filter_row_carries_a_smart_payload(self) -> None:
+    def test_every_smart_filter_item_carries_a_smart_payload(self) -> None:
         sidebar = _empty_sidebar()
-        for smart_filter in SmartFilter:
-            with self.subTest(smart_filter=smart_filter):
-                row = sidebar._smart_filter_rows[smart_filter]
-                self.assertIsInstance(row, _SidebarRow)
-                self.assertIsInstance(row.payload, _SmartRowPayload)
+        payloads = {item.payload for item in _items(sidebar._smart_selection)}
+        self.assertEqual(
+            payloads,
+            {
+                SmartSelection(smart_filter=SmartFilter.ALL),
+                SmartSelection(smart_filter=SmartFilter.RECENT),
+            },
+        )
 
-    def test_every_notebook_row_carries_a_notebook_payload(self) -> None:
+    def test_every_notebook_item_carries_a_notebook_payload(self) -> None:
         notes = _FakeNoteRepository()
         notebooks = _FakeNotebookRepository()
         notebooks.add(_make_notebook("nb-a", name="A"))
@@ -654,11 +821,78 @@ class RowPayloadIntegrityTests(unittest.TestCase):
             app_state=AppState(),
             clock=_fixed_clock,
         )
-        for nb_id in ("nb-a", "nb-b"):
-            with self.subTest(nb_id=nb_id):
-                row = sidebar._notebook_rows[nb_id]
-                self.assertIsInstance(row, _SidebarRow)
-                self.assertIsInstance(row.payload, _NotebookRowPayload)
+        for item in _items(sidebar._notebook_selection):
+            with self.subTest(label=item.label):
+                self.assertIsInstance(item, _SidebarItem)
+                self.assertIsInstance(item.payload, NotebookSelection)
+
+
+@unittest.skipUnless(_display_available(), "no GDK display")
+class IconColumnAlignmentTests(unittest.TestCase):
+    """Regression pin for §2.2/§2.3: one icon column across all rows.
+
+    Needs realised geometry, so it builds a seeded sidebar inside a
+    window, loads the application stylesheet (the alignment rule lives
+    in ``app.css``), pumps the main loop, and asserts every top-level
+    notebook row's icon shares one x-origin — parents (which own an
+    expander arrow) included. Without the
+    ``treeexpander indent { -gtk-icon-size: 16px }`` rule the parent
+    icon outdents its leaf siblings, so this test fails if that rule
+    silently regresses.
+    """
+
+    @staticmethod
+    def _install_application_css() -> None:
+        """Attach the bundled ``app.css`` to the default display.
+
+        Mirrors :func:`notes_app.ui.application._load_application_css`
+        so the alignment rule under test is the shipped one, not a
+        copy pasted into the test.
+        """
+        css_source = (
+            importlib.resources.files("notes_app.ui.css")
+            .joinpath("app.css")
+            .read_text(encoding="utf-8")
+        )
+        provider = Gtk.CssProvider.new()
+        provider.load_from_string(css_source)
+        Gtk.StyleContext.add_provider_for_display(
+            Gdk.Display.get_default(),
+            provider,
+            Gtk.STYLE_PROVIDER_PRIORITY_APPLICATION,
+        )
+
+    def test_top_level_icons_share_one_x_origin(self) -> None:
+        self._install_application_css()
+        notes = _FakeNoteRepository()
+        notebooks = _FakeNotebookRepository()
+        # A parent (expander arrow) and a childless leaf side by side.
+        notebooks.add(_make_notebook("nb-personal", name="Personal"))
+        notebooks.add(_make_notebook("nb-recipes", name="Recipes"))
+        notebooks.add(
+            _make_notebook("nb-baking", name="Baking", parent_id="nb-recipes")
+        )
+        sidebar = Sidebar(
+            note_repository=notes,
+            notebook_repository=notebooks,
+            app_state=AppState(),
+            clock=_fixed_clock,
+        )
+        window = Gtk.Window()
+        window.set_default_size(260, 500)
+        window.set_child(sidebar)
+        window.present()
+        self.addCleanup(window.destroy)
+        _pump_main_loop()
+
+        list_view = _section_list_views(sidebar)[1]  # notebook section
+        x_origins = _icon_x_origins(list_view)
+        self.assertGreaterEqual(len(x_origins), 2, "need ≥2 top-level rows")
+        self.assertEqual(
+            len(set(x_origins)),
+            1,
+            f"icons not in one column: {x_origins}",
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -676,21 +910,74 @@ def _empty_sidebar() -> Sidebar:
     )
 
 
-def _count_label_in_row(row: _SidebarRow) -> Gtk.Label:
-    """Walk a :class:`_SidebarRow` and return its rightmost
-    :class:`Gtk.Label` — the count column.
+def _position_of(
+    selection: Gtk.SingleSelection,
+    payload: SmartSelection | NotebookSelection,
+) -> int:
+    """Position of the row whose item carries ``payload``."""
+    for position, item in enumerate(_items(selection)):
+        if item.payload == payload:
+            return position
+    raise AssertionError(f"no row for {payload!r}")
 
-    Layout is ``[chevron|spacer] icon label count_label`` inside a
-    horizontal :class:`Gtk.Box`. The count label is always the last
-    child of the row's box.
-    """
-    box = row.get_child()
-    assert isinstance(box, Gtk.Box), "row child must be a Box"
-    last_child = box.get_last_child()
-    assert isinstance(last_child, Gtk.Label), (
-        f"last child should be a Label, got {type(last_child).__name__}"
-    )
-    return last_child
+
+def _selected_payload(
+    selection: Gtk.SingleSelection,
+) -> SmartSelection | NotebookSelection | None:
+    """The payload of the selected row, or None when nothing is selected."""
+    position = selection.get_selected()
+    if position == Gtk.INVALID_LIST_POSITION:
+        return None
+    row = selection.get_model().get_item(position)
+    assert isinstance(row, Gtk.TreeListRow)
+    item = row.get_item()
+    assert isinstance(item, _SidebarItem)
+    return item.payload
+
+
+def _pump_main_loop(iterations: int = 300) -> None:
+    """Drain pending GLib events so widget geometry is realised."""
+    context = GLib.MainContext.default()
+    for _ in range(iterations):
+        while context.pending():
+            context.iteration(False)
+
+
+def _section_list_views(sidebar: Sidebar) -> list[Gtk.ListView]:
+    """The two section :class:`Gtk.ListView`\\s, in sidebar order."""
+    views: list[Gtk.ListView] = []
+    child = sidebar.get_first_child()
+    while child is not None:
+        if isinstance(child, Gtk.ScrolledWindow):
+            inner = child.get_child()
+            assert isinstance(inner, Gtk.ListView)
+            views.append(inner)
+        child = child.get_next_sibling()
+    return views
+
+
+def _icon_x_origins(list_view: Gtk.ListView) -> list[float]:
+    """The x-origin (relative to ``list_view``) of every row icon."""
+    origins: list[float] = []
+    _collect_icon_x(list_view, list_view, origins)
+    return origins
+
+
+def _collect_icon_x(
+    widget: Gtk.Widget,
+    relative_to: Gtk.ListView,
+    origins: list[float],
+) -> None:
+    if isinstance(widget, Gtk.Image):
+        ok, point = widget.compute_point(
+            relative_to, Graphene.Point().init(0, 0)
+        )
+        if ok:
+            origins.append(round(point.x, 1))
+    child = widget.get_first_child()
+    while child is not None:
+        _collect_icon_x(child, relative_to, origins)
+        child = child.get_next_sibling()
 
 
 if __name__ == "__main__":

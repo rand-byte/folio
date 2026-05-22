@@ -211,7 +211,7 @@ This is the only layer that owns widget trees. Every widget is thin and unit-tes
 | --- | ---: | --- |
 | `application.py` | 286 | `NotesApplication(Gtk.Application)` — composes `Database`, repositories, `AttachmentStore`, `AppState`, controllers, then presents `MainWindow`. Single-instance via `FLAGS_NONE`. |
 | `main_window.py` | 328 | `MainWindow` — the three-pane shell: sidebar │ note list │ `Gtk.Stack(view ↔ editor)`. Toolbar is set as the title bar. |
-| `sidebar.py` | 751 | Notebook tree on the left. Click → mutate `AppState.selection`. Expansion state is widget-local (intentional — different windows could disagree). |
+| `sidebar.py` | 846 | Notebook tree on the left, rendered with `Gtk.ListView` + `Gtk.TreeListModel` + `Gtk.TreeExpander` (one `ListView`/`SingleSelection` per section). Click → mutate `AppState.selection`. Expansion state is widget-local (intentional — different windows could disagree), snapshotted across `refresh()`. Icon-column alignment depends on the `treeexpander indent` rule in `css/app.css` — the two are a matched pair. |
 | `note_list.py` | 621 | Middle pane: header + sortable, filtered list. `compute_display_notes(...)` is a free function so tests don't need widgets. |
 | `note_view.py` | 933 | Read pane. `ArticleContainer` enforces the fixed-width text column. Calls `TextBufferRenderer.render_into` on every change. `_ArticleTextView` paints the wider tinted wash behind admonition / blockquote / code-block paragraphs (see `tag_table.WashSpec`). |
 | `note_editor.py` | 1260 | Source pane (`GtkSource.View` + `GtkSource.Buffer`). Debounced autosave (`AUTOSAVE_DEBOUNCE_MS`). Stateless w.r.t. notes — reloads from repo on selection change. |
@@ -219,7 +219,7 @@ This is the only layer that owns widget trees. Every widget is thin and unit-tes
 | `dialogs.py` | 363 | Shared modal dialogs — confirm-delete (a callable matching `ConfirmDialogPresenter`) and `IconPickerPopover`. Production wires `Gtk.AlertDialog`; tests drive callbacks synchronously. |
 | `link_handler.py` | 386 | `LinkHandler.install(textview, ...)` — wires `EventControllerMotion` (cursor) + `GestureClick` (open on `released`). URI is launched via an injected `UriLauncherProtocol`; allowlist is `enums.LinkScheme`. |
 | `_image_picker.py` | 152 | `FileDialogOpener` callable + `default_file_dialog_opener` wrapping `Gtk.FileDialog.open`. MIME filters mirror `enums.MimeKind`. Module is private so `note_editor.py` stays under pylint's `max-module-lines`. |
-| `css/app.css` | 32 | Application stylesheet — loaded by `NotesApplication`. Asset is shipped via `pyproject.toml` `package-data`. |
+| `css/app.css` | 91 | Application stylesheet — loaded by `NotesApplication`. Styles the note-view parse-error banner and the library sidebar (inset rounded selection pill + icon-column alignment, palette-safe via geometry/opacity only). Asset is shipped via `pyproject.toml` `package-data`. |
 
 ---
 

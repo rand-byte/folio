@@ -10,25 +10,34 @@ Principles & invariants
   are not held — every shared piece of state flows through
   :class:`AppState`. This is the property that lets the three panes
   be swapped, tested, or replaced independently.
-* Hierarchy expansion (top-level → optional one layer of children, per
-  the plan's strict two-level rule) is rendered as a flat list with a
-  depth-first traversal of the notebook tree. Expand / collapse
-  toggles which child rows appear; the expansion state lives on the
-  widget (:attr:`_expanded_notebook_ids`) rather than in
-  :class:`AppState` because it is purely visual — different windows
-  could disagree on what is open without affecting any shared meaning.
+* Hierarchy (top-level → optional one layer of children, per the
+  plan's strict two-level rule) is expressed as **data**, not as
+  hand-rendered widgets: a root :class:`Gio.ListStore` of
+  :class:`_SidebarItem` objects wrapped in a :class:`Gtk.TreeListModel`
+  whose create-child-model callback returns a notebook's children
+  (or ``None`` for a leaf, which is what enforces the two-level rule).
+  Rows are built by a :class:`Gtk.SignalListItemFactory` and wrapped in
+  a :class:`Gtk.TreeExpander`, which draws the expand arrow, indents by
+  depth, and reserves the arrow gutter on non-expandable rows. This
+  replaces the former flat-list-with-depth-first-traversal rendering
+  and its hand-tuned chevron/spacer columns.
+* Expansion state is widget-local (intentional — different windows
+  could disagree on what is open without affecting any shared
+  meaning), now living on :meth:`Gtk.TreeListRow.set_expanded` and
+  driven by the user through the :class:`Gtk.TreeExpander` arrow.
   v1 has a single window so this is moot, but the boundary keeps
-  :class:`AppState` free of widget-local UI noise.
+  :class:`AppState` free of widget-local UI noise. Because
+  :meth:`refresh` rebuilds the model from scratch, the set of open
+  notebook ids is snapshotted before the rebuild and re-applied after
+  it, so a refresh does not silently collapse the tree.
 * CRUD on notebooks (rename, change icon, delete, create) is **not
   delivered in step 9**. Those flows depend on
   :mod:`notes_app.ui.dialogs` (the icon picker popover and the
   confirm-delete dialog), which arrives at step 12. Until then the
   sidebar is read-only and surfaces only the navigation gestures the
-  rest of the app already needs to react to. The two-level-hierarchy
-  *enforcement* the plan describes for the *Add child notebook*
-  action ships when that action does, again at step 12; the storage-
-  side trigger and the repository-side check remain as defence in
-  depth in the meantime.
+  rest of the app already needs to react to. The factory ``bind`` is
+  the natural place to attach a context-menu gesture when those
+  actions ship.
 * Counts are computed eagerly on every :meth:`refresh` from a single
   :meth:`NoteRepositoryProtocol.list_all` call. The counts are cheap
   (a per-row filter against the materialised list), and centralising
@@ -37,30 +46,40 @@ Principles & invariants
   a hot path, a future ``count_*`` query can be added to the
   repository protocol; the sidebar would change its callsite without
   touching its rendering code.
-* Highlighting follows :attr:`AppState.selection` rather than relying
-  solely on :class:`Gtk.ListBox`'s built-in selection. The two
-  list-boxes used here (smart filters / notebook tree) each manage
-  their own selection independently; cross-listbox coordination — at
-  most one row highlighted across both — is the sidebar's job. We
-  use ``row-activated`` (which only fires for *user* activation) for
-  input, so the programmatic selection updates this widget makes in
-  response to ``selection-changed`` cannot loop back into a second
-  signal emission.
+* Highlighting follows :attr:`AppState.selection`. The two sections
+  (smart filters / notebook tree) are rendered as two independent
+  :class:`Gtk.ListView`\\s, each driven by its own
+  :class:`Gtk.SingleSelection`; cross-section coordination — at most
+  one row highlighted across both — is the sidebar's job, performed in
+  :meth:`_apply_highlight`. Unlike the former ``row-activated`` input,
+  :class:`Gtk.SingleSelection` *does* emit ``selection-changed`` on a
+  programmatic change, so the programmatic updates this widget makes in
+  response to ``selection-changed`` are fenced behind a re-entrancy
+  flag (:attr:`_suppress_selection_events`) to stop them looping back
+  into a second :meth:`AppState.set_selection` call.
+* The icon-column alignment *between* the two sections (and between a
+  parent row and its childless siblings) is not automatic: GTK 4
+  halved the tree-indent placeholder, so an expandable row's arrow
+  outdents a leaf's placeholder. The residual gap is closed by the
+  ``.sidebar treeexpander indent { -gtk-icon-size: 16px }`` rule in
+  ``ui/css/app.css``. That CSS rule and the :class:`Gtk.TreeExpander`
+  construction here are a matched pair — change one and re-check the
+  other.
 * The clock used for the *Recent* smart-filter count is injected so
   tests can pin the result. Production wires :func:`datetime.now`
   through :func:`_default_clock`.
-* GTK 4.18 / 4.10 deprecations are avoided: :meth:`Gtk.Box.append`
-  rather than the removed ``pack_start``;
-  :meth:`Gtk.ListBox.connect` to ``row-activated`` rather than a
-  manually-wired :class:`Gtk.GestureClick`;
+* GTK 4.18 / 4.10 deprecations are avoided: the model-driven list
+  widgets (:class:`Gtk.ListView`, :class:`Gtk.TreeListModel`,
+  :class:`Gtk.TreeExpander`, :class:`Gtk.SingleSelection`) are the
+  framework's current tree primitives, replacing the GTK3-era
+  :class:`Gtk.TreeView` (deprecated since 4.10);
   :meth:`Gtk.Image.new_from_icon_name` rather than the deprecated
   ``Gtk.Image.new_from_stock``.
 """
 
 from __future__ import annotations
 
-from collections.abc import Callable
-from dataclasses import dataclass
+from collections.abc import Callable, Iterable
 from datetime import UTC, datetime, timedelta
 from typing import Final
 
@@ -69,7 +88,7 @@ import gi
 gi.require_version("Gtk", "4.0")
 gi.require_version("Pango", "1.0")
 # pylint: disable=wrong-import-position
-from gi.repository import Gtk, Pango  # noqa: E402
+from gi.repository import Gio, GObject, Gtk, Pango  # noqa: E402
 
 from notes_app.controllers.app_state import AppState
 from notes_app.enums import NotebookIcon, SmartFilter
@@ -78,6 +97,7 @@ from notes_app.models.notebook import Notebook
 from notes_app.search.note_filter import (
     RECENT_WINDOW_DAYS,
     NotebookSelection,
+    Selection,
     SmartSelection,
 )
 from notes_app.storage.protocols import (
@@ -165,19 +185,8 @@ _FALLBACK_NOTEBOOK_ICON_NAME: Final[str] = "folder-symbolic"
 :data:`_NOTEBOOK_ICON_NAMES` (e.g. a future enum addition that landed
 in storage before the icon mapping was updated)."""
 
-_CHEVRON_RIGHT_ICON: Final[str] = "pan-end-symbolic"
-_CHEVRON_DOWN_ICON: Final[str] = "pan-down-symbolic"
-
 _ROW_SPACING_PX: Final[int] = 6
 """Horizontal spacing inside a row, between icon, label, and count."""
-
-_CHILD_INDENT_PX: Final[int] = 16
-"""Left margin added to a child notebook row to mark hierarchy.
-
-Matches the design's ``paddingLeft: 10 + depth*12`` indent at depth
-1; the exact pixel value is tuned for the GTK default font size and
-will read correctly with the bundled CSS once that arrives.
-"""
 
 _SECTION_VERTICAL_SPACING_PX: Final[int] = 8
 """Padding above section headers (Library / Notebooks)."""
@@ -185,33 +194,14 @@ _SECTION_VERTICAL_SPACING_PX: Final[int] = 8
 _DEFAULT_PANE_WIDTH_PX: Final[int] = 220
 """Initial width hint for the sidebar pane."""
 
+_SIDEBAR_CSS_CLASS: Final[str] = "sidebar"
+"""Class on the :class:`Sidebar` box that the stylesheet keys off."""
 
-# ---------------------------------------------------------------------------
-# Row payloads
-# ---------------------------------------------------------------------------
+_SECTION_HEADER_CSS_CLASS: Final[str] = "sidebar-section-header"
+"""Class on each section-header label (font treatment + dim)."""
 
-
-@dataclass(frozen=True)
-class _SmartRowPayload:
-    """Marks a row that represents a smart filter."""
-
-    smart_filter: SmartFilter
-
-
-@dataclass(frozen=True)
-class _NotebookRowPayload:
-    """Marks a row that represents a single notebook in the tree.
-
-    Carries enough context for the click handler to update
-    :class:`AppState` without needing to look the notebook back up
-    again, and enough for :meth:`Sidebar._apply_highlight` to
-    discriminate parent rows (which have an expand control) from
-    child rows (which don't).
-    """
-
-    notebook_id: str
-    is_child: bool
-    has_children: bool
+_COUNT_CSS_CLASS: Final[str] = "sidebar-count"
+"""Class on each row's count label (dimmed when the row is unselected)."""
 
 
 # ---------------------------------------------------------------------------
@@ -287,31 +277,223 @@ def _top_level_notebooks(all_notebooks: list[Notebook]) -> list[Notebook]:
 
 
 # ---------------------------------------------------------------------------
-# Custom row class
+# Row item model object
 # ---------------------------------------------------------------------------
 
 
-class _SidebarRow(Gtk.ListBoxRow):
-    """A :class:`Gtk.ListBoxRow` that carries a typed payload.
+class _SidebarItem(GObject.Object):
+    """A sidebar entry backing the list model.
 
-    The payload is what the sidebar uses to translate a
-    ``row-activated`` signal back into an :class:`AppState` selection
-    update. Subclassing :class:`Gtk.ListBoxRow` lets us attach the
-    payload as a Python attribute without invoking the deprecated
-    ``Gtk.Widget.set_data`` API.
+    A plain :class:`GObject.Object` so :class:`Gio.ListStore` can hold
+    it. :attr:`payload` carries the typed selection target
+    (:class:`SmartSelection` or :class:`NotebookSelection`) so the
+    selection handler maps an activated row straight to an
+    :class:`AppState` update with no extra "row kind" enum and no
+    second lookup. :attr:`children` is read by the tree model's
+    create-child-model callback; an empty tuple marks a leaf (the
+    two-level rule means children always have an empty tuple).
     """
 
-    payload: _SmartRowPayload | _NotebookRowPayload
+    __gtype_name__ = "NotesSidebarItem"
 
-    def __init__(
+    icon_name: str
+    label: str
+    count: int
+    payload: Selection
+    children: tuple[_SidebarItem, ...]
+
+    def __init__(  # pylint: disable=too-many-arguments
         self,
         *,
-        payload: _SmartRowPayload | _NotebookRowPayload,
-        child: Gtk.Widget,
+        icon_name: str,
+        label: str,
+        count: int,
+        payload: Selection,
+        children: tuple[_SidebarItem, ...] = (),
     ) -> None:
         super().__init__()
+        self.icon_name = icon_name
+        self.label = label
+        self.count = count
         self.payload = payload
-        self.set_child(child)
+        self.children = children
+
+
+def _smart_filter_item(smart_filter: SmartFilter, count: int) -> _SidebarItem:
+    """Build the model item for a smart-filter row."""
+    return _SidebarItem(
+        icon_name=_SMART_FILTER_ICON_NAMES[smart_filter],
+        label=_SMART_FILTER_LABELS[smart_filter],
+        count=count,
+        payload=SmartSelection(smart_filter=smart_filter),
+    )
+
+
+def _notebook_item(
+    notebook: Notebook,
+    *,
+    count: int,
+    children: tuple[_SidebarItem, ...],
+) -> _SidebarItem:
+    """Build the model item for a single notebook row."""
+    return _SidebarItem(
+        icon_name=_icon_name_for_notebook(notebook.icon),
+        label=notebook.name,
+        count=count,
+        payload=NotebookSelection(notebook_id=notebook.id),
+        children=children,
+    )
+
+
+def _build_notebook_items(
+    notebooks: list[Notebook],
+    notes: list[Note],
+) -> list[_SidebarItem]:
+    """Build the top-level notebook items, each carrying its children.
+
+    Pure: turns the flat notebook list + note list into the tree of
+    :class:`_SidebarItem`\\s the model consumes. Counts are computed
+    eagerly here (parents include their children's notes).
+    """
+    items: list[_SidebarItem] = []
+    for top_notebook in _top_level_notebooks(notebooks):
+        children_notebooks = _children_of(top_notebook.id, notebooks)
+        child_items = tuple(
+            _notebook_item(
+                child,
+                count=_count_notebook(child.id, notes, []),
+                children=(),
+            )
+            for child in children_notebooks
+        )
+        count = _count_notebook(
+            top_notebook.id,
+            notes,
+            children_ids=[child.id for child in children_notebooks],
+        )
+        items.append(
+            _notebook_item(top_notebook, count=count, children=child_items)
+        )
+    return items
+
+
+def _create_child_model(item: GObject.Object) -> Gio.ListStore | None:
+    """Tree-model child callback: a :class:`Gio.ListStore` of children.
+
+    Returns ``None`` for a leaf (an item with no children). The
+    ``None`` return is what makes a row non-expandable — and, under
+    the two-level rule, every child item is a leaf.
+    """
+    if not isinstance(item, _SidebarItem) or not item.children:
+        return None
+    store = Gio.ListStore.new(_SidebarItem)
+    for child in item.children:
+        store.append(child)
+    return store
+
+
+# ---------------------------------------------------------------------------
+# Section header
+# ---------------------------------------------------------------------------
+
+
+def _make_section_header(text: str) -> Gtk.Label:
+    """Build a left-aligned section title (e.g. *Library*).
+
+    The visual treatment (font size, weight, letter-spacing, dim)
+    lives in ``app.css`` keyed off the :data:`_SECTION_HEADER_CSS_CLASS`
+    class; this helper only positions the label.
+    """
+    label = Gtk.Label.new(text)
+    label.set_halign(Gtk.Align.START)
+    label.set_margin_top(_SECTION_VERTICAL_SPACING_PX)
+    label.set_margin_bottom(_SECTION_VERTICAL_SPACING_PX // 2)
+    label.set_margin_start(_ROW_SPACING_PX)
+    label.add_css_class(_SECTION_HEADER_CSS_CLASS)
+    return label
+
+
+# ---------------------------------------------------------------------------
+# Row factory
+# ---------------------------------------------------------------------------
+
+
+def _make_row_factory() -> Gtk.SignalListItemFactory:
+    """Build the shared factory for both sections' rows.
+
+    ``setup`` builds ``Gtk.TreeExpander → Gtk.Box[icon, label, count]``
+    once per recycled row; ``bind`` wires the row to its
+    :class:`Gtk.TreeListRow` and fills the widgets from the item.
+    Both sections use the *same* factory so their icon columns share
+    the :class:`Gtk.TreeExpander` gutter and line up automatically
+    (the smart-filter section's items are leaves, so their expander
+    draws only the reserved gutter, no arrow).
+    """
+    factory = Gtk.SignalListItemFactory.new()
+    factory.connect("setup", _on_factory_setup)
+    factory.connect("bind", _on_factory_bind)
+    return factory
+
+
+def _on_factory_setup(
+    _factory: Gtk.SignalListItemFactory,
+    list_item: Gtk.ListItem,
+) -> None:
+    """Build the row's widget tree (reused across recycled rows)."""
+    expander = Gtk.TreeExpander.new()
+    box = Gtk.Box.new(Gtk.Orientation.HORIZONTAL, _ROW_SPACING_PX)
+
+    icon = Gtk.Image.new_from_icon_name(_FALLBACK_NOTEBOOK_ICON_NAME)
+    box.append(icon)
+
+    label = Gtk.Label.new("")
+    label.set_halign(Gtk.Align.START)
+    label.set_hexpand(True)
+    # Long notebook names ellipsise at the end so the count column on
+    # the right is never pushed out of view.
+    label.set_ellipsize(Pango.EllipsizeMode.END)
+    box.append(label)
+
+    count_label = Gtk.Label.new("")
+    count_label.set_halign(Gtk.Align.END)
+    count_label.add_css_class(_COUNT_CSS_CLASS)
+    box.append(count_label)
+
+    expander.set_child(box)
+    list_item.set_child(expander)
+
+
+def _on_factory_bind(
+    _factory: Gtk.SignalListItemFactory,
+    list_item: Gtk.ListItem,
+) -> None:
+    """Fill the row widgets from the bound :class:`_SidebarItem`."""
+    tree_row = list_item.get_item()
+    expander = list_item.get_child()
+    if not isinstance(tree_row, Gtk.TreeListRow) or not isinstance(
+        expander, Gtk.TreeExpander
+    ):
+        return  # defensive — the model only ever holds these types
+    expander.set_list_row(tree_row)
+
+    item = tree_row.get_item()
+    if not isinstance(item, _SidebarItem):
+        return
+    box = expander.get_child()
+    if not isinstance(box, Gtk.Box):
+        return
+
+    icon = box.get_first_child()
+    if isinstance(icon, Gtk.Image):
+        icon.set_from_icon_name(item.icon_name)
+
+    count_label = box.get_last_child()
+    if isinstance(count_label, Gtk.Label):
+        count_label.set_text(str(item.count))
+        # The label sits between the icon and the count.
+        label = count_label.get_prev_sibling()
+        if isinstance(label, Gtk.Label):
+            label.set_text(item.label)
 
 
 # ---------------------------------------------------------------------------
@@ -319,24 +501,20 @@ class _SidebarRow(Gtk.ListBoxRow):
 # ---------------------------------------------------------------------------
 
 
-class Sidebar(Gtk.Box):  # pylint: disable=too-many-instance-attributes
+class Sidebar(Gtk.Box):
     """The library navigation pane.
 
-    Composed of two list-boxes: the smart-filter row group at the top
+    Two model-driven sections: the smart-filter list at the top
     (``All notes``, ``Recent``) and the notebook tree below it.
-    Selection is mutually exclusive across both: clicking a row in
-    one clears the other and updates :class:`AppState`, and a
+    Selection is mutually exclusive across both: selecting a row in
+    one section clears the other and updates :class:`AppState`, and a
     selection change on :class:`AppState` is reflected in whichever
-    list-box owns the matching row.
+    section owns the matching row.
 
-    The instance-attribute count is above pylint's default of 7
-    because each list-box section needs three pieces of state — the
-    list-box widget itself, an id-keyed row index for highlight
-    application, and (for the smart-filter section) a count-label
-    index used by future incremental updates. Splitting this into a
-    helper "Section" object would shuffle the same data behind a
-    second class without removing it; the count is the right shape
-    for what the widget actually does.
+    Only the two :class:`Gtk.SingleSelection`\\s are held as
+    per-section state; the tree model and its backing
+    :class:`Gio.ListStore` are reached through the selection so the
+    widget keeps the minimum surface it needs.
     """
 
     _note_repository: NoteRepositoryProtocol
@@ -344,13 +522,9 @@ class Sidebar(Gtk.Box):  # pylint: disable=too-many-instance-attributes
     _app_state: AppState
     _clock: ClockFn
 
-    _smart_filter_listbox: Gtk.ListBox
-    _smart_filter_rows: dict[SmartFilter, _SidebarRow]
-    _smart_filter_count_labels: dict[SmartFilter, Gtk.Label]
-
-    _notebook_listbox: Gtk.ListBox
-    _notebook_rows: dict[str, _SidebarRow]
-    _expanded_notebook_ids: set[str]
+    _smart_selection: Gtk.SingleSelection
+    _notebook_selection: Gtk.SingleSelection
+    _suppress_selection_events: bool
 
     def __init__(
         self,
@@ -365,40 +539,31 @@ class Sidebar(Gtk.Box):  # pylint: disable=too-many-instance-attributes
         self._notebook_repository = notebook_repository
         self._app_state = app_state
         self._clock = clock
+        self._suppress_selection_events = False
 
-        self._smart_filter_rows = {}
-        self._smart_filter_count_labels = {}
-        self._notebook_rows = {}
-        self._expanded_notebook_ids = set()
+        self.add_css_class(_SIDEBAR_CSS_CLASS)
 
-        # Library section header.
+        factory = _make_row_factory()
+
+        # Library section header + smart-filter list.
         self.append(_make_section_header(_LIBRARY_HEADER_TEXT))
+        self._smart_selection = self._make_section_view(factory)
 
-        # Smart-filter list-box: the All / Recent rows.
-        self._smart_filter_listbox = Gtk.ListBox.new()
-        self._smart_filter_listbox.set_selection_mode(Gtk.SelectionMode.SINGLE)
-        self._smart_filter_listbox.connect(
-            "row-activated",
-            self._on_smart_filter_row_activated,
-        )
-        self.append(self._smart_filter_listbox)
-
-        # Notebooks section header.
+        # Notebooks section header + notebook tree.
         self.append(_make_section_header(_NOTEBOOKS_HEADER_TEXT))
-
-        # Notebook list-box: top-level rows + (optionally) one layer
-        # of children when the parent is expanded.
-        self._notebook_listbox = Gtk.ListBox.new()
-        self._notebook_listbox.set_selection_mode(Gtk.SelectionMode.SINGLE)
-        self._notebook_listbox.connect(
-            "row-activated",
-            self._on_notebook_row_activated,
-        )
-        self.append(self._notebook_listbox)
+        self._notebook_selection = self._make_section_view(factory)
 
         # Sidebar takes its preferred width hint from the constant.
         self.set_size_request(_DEFAULT_PANE_WIDTH_PX, -1)
 
+        self._smart_selection.connect(
+            "selection-changed",
+            self._on_section_selection_changed,
+        )
+        self._notebook_selection.connect(
+            "selection-changed",
+            self._on_section_selection_changed,
+        )
         self._app_state.connect(
             "selection-changed",
             self._on_app_state_selection_changed,
@@ -406,6 +571,45 @@ class Sidebar(Gtk.Box):  # pylint: disable=too-many-instance-attributes
 
         # Initial population.
         self.refresh()
+
+    # ------------------------------------------------------------------
+    # Construction helpers
+    # ------------------------------------------------------------------
+
+    def _make_section_view(
+        self,
+        factory: Gtk.SignalListItemFactory,
+    ) -> Gtk.SingleSelection:
+        """Build one section's ListView and append it to the sidebar.
+
+        Returns the section's :class:`Gtk.SingleSelection`. The
+        :class:`Gtk.ListView` is wrapped in a
+        :class:`Gtk.ScrolledWindow` with
+        ``set_propagate_natural_height(True)``: a bare ``ListView`` in
+        a vertical :class:`Gtk.Box` reports ~0 natural height and
+        renders blank.
+        """
+        root = Gio.ListStore.new(_SidebarItem)
+        tree_model = Gtk.TreeListModel.new(
+            root,
+            False,  # passthrough — items are GtkTreeListRow wrappers
+            False,  # autoexpand — expansion is user/snapshot driven
+            _create_child_model,
+        )
+        selection = Gtk.SingleSelection.new(tree_model)
+        # Full manual control of the highlight: do not auto-select the
+        # first row, and allow clearing to "nothing selected" so the
+        # non-owning section can be emptied.
+        selection.set_autoselect(False)
+        selection.set_can_unselect(True)
+        selection.set_selected(Gtk.INVALID_LIST_POSITION)
+
+        list_view = Gtk.ListView.new(selection, factory)
+        scroller = Gtk.ScrolledWindow()
+        scroller.set_propagate_natural_height(True)
+        scroller.set_child(list_view)
+        self.append(scroller)
+        return selection
 
     # ------------------------------------------------------------------
     # Public API
@@ -421,165 +625,108 @@ class Sidebar(Gtk.Box):  # pylint: disable=too-many-instance-attributes
         behaviour at the v1 library size; incremental updates are an
         optimisation we will reach for only if profiling shows it
         matters.
+
+        Open notebooks are snapshotted before the model is rebuilt and
+        re-expanded afterwards so a refresh does not collapse the tree.
         """
         notes = self._note_repository.list_all()
         notebooks = self._notebook_repository.list_all()
         now = self._clock()
 
-        self._build_smart_filter_rows(notes, now=now)
-        self._build_notebook_rows(notebooks, notes)
+        expanded_ids = self._snapshot_expanded_notebook_ids()
+
+        self._rebuild_smart_filters(notes, now=now)
+        self._rebuild_notebooks(notebooks, notes)
+
+        self._restore_expanded_notebook_ids(expanded_ids)
         self._apply_highlight()
 
     # ------------------------------------------------------------------
-    # Smart-filter rows
+    # Model rebuilds
     # ------------------------------------------------------------------
 
-    def _build_smart_filter_rows(
+    def _rebuild_smart_filters(
         self,
         notes: list[Note],
         *,
         now: datetime,
     ) -> None:
-        """(Re)build the smart-filter list-box's rows."""
-        self._smart_filter_listbox.remove_all()
-        self._smart_filter_rows = {}
-        self._smart_filter_count_labels = {}
-
+        """Repopulate the smart-filter section's root store."""
+        root = _root_store_of(self._smart_selection)
+        root.remove_all()
         for smart_filter in _SMART_FILTER_DISPLAY_ORDER:
             count = _count_smart_filter(smart_filter, notes, now=now)
-            row, count_label = _make_smart_filter_row(smart_filter, count)
-            self._smart_filter_rows[smart_filter] = row
-            self._smart_filter_count_labels[smart_filter] = count_label
-            self._smart_filter_listbox.append(row)
+            root.append(_smart_filter_item(smart_filter, count))
 
-    # ------------------------------------------------------------------
-    # Notebook rows
-    # ------------------------------------------------------------------
-
-    def _build_notebook_rows(
+    def _rebuild_notebooks(
         self,
         notebooks: list[Notebook],
         notes: list[Note],
     ) -> None:
-        """(Re)build the notebook list-box.
+        """Repopulate the notebook section's root store from the tree."""
+        root = _root_store_of(self._notebook_selection)
+        root.remove_all()
+        for item in _build_notebook_items(notebooks, notes):
+            root.append(item)
 
-        Walks the tree depth-first: each top-level notebook is added
-        first, immediately followed by its children when the
-        top-level row is expanded. The flat list this produces is
-        what :class:`Gtk.ListBox` consumes; hierarchy is purely
-        visual (chevron + indent).
+    # ------------------------------------------------------------------
+    # Expansion snapshot / restore
+    # ------------------------------------------------------------------
+
+    def _snapshot_expanded_notebook_ids(self) -> set[str]:
+        """Record the ids of currently-expanded top-level notebooks.
+
+        Expansion is widget-local and lives on the tree rows; a model
+        rebuild discards it, so it is captured here and re-applied by
+        :meth:`_restore_expanded_notebook_ids`. Stale ids (a notebook
+        deleted between refreshes) simply find no matching row on
+        restore and are dropped.
         """
-        self._notebook_listbox.remove_all()
-        self._notebook_rows = {}
+        expanded: set[str] = set()
+        model = _tree_model_of(self._notebook_selection)
+        for tree_row in _iter_tree_rows(model):
+            if not tree_row.get_expanded():
+                continue
+            item = tree_row.get_item()
+            if isinstance(item, _SidebarItem) and isinstance(
+                item.payload, NotebookSelection
+            ):
+                expanded.add(item.payload.notebook_id)
+        return expanded
 
-        # Drop any expansion state that points at a notebook that no
-        # longer exists. Keeping stale ids in the set wouldn't break
-        # rendering (they're just looked up against the live tree),
-        # but it would let the set grow unbounded across sessions if
-        # a future build wires this widget to a long-running app
-        # state.
-        live_ids = {nb.id for nb in notebooks}
-        self._expanded_notebook_ids &= live_ids
-
-        for top_notebook in _top_level_notebooks(notebooks):
-            children = _children_of(top_notebook.id, notebooks)
-            count = _count_notebook(
-                top_notebook.id,
-                notes,
-                children_ids=[child.id for child in children],
-            )
-            self._append_notebook_row(
-                top_notebook,
-                count=count,
-                is_child=False,
-                has_children=bool(children),
-            )
-
-            if children and top_notebook.id in self._expanded_notebook_ids:
-                for child in children:
-                    child_count = _count_notebook(
-                        child.id,
-                        notes,
-                        children_ids=[],
-                    )
-                    self._append_notebook_row(
-                        child,
-                        count=child_count,
-                        is_child=True,
-                        has_children=False,
-                    )
-
-    def _append_notebook_row(
-        self,
-        notebook: Notebook,
-        *,
-        count: int,
-        is_child: bool,
-        has_children: bool,
-    ) -> None:
-        """Build, register, and append a single notebook row."""
-        is_expanded = notebook.id in self._expanded_notebook_ids
-        row = _make_notebook_row(
-            notebook,
-            count=count,
-            is_child=is_child,
-            has_children=has_children,
-            is_expanded=is_expanded,
-            on_chevron_clicked=self._toggle_expansion,
-        )
-        self._notebook_rows[notebook.id] = row
-        self._notebook_listbox.append(row)
-
-    def _toggle_expansion(self, notebook_id: str) -> None:
-        """Flip a top-level notebook's expansion state and rebuild.
-
-        Wired into the chevron button on each parent row; child rows
-        never call this. The rebuild is a full re-walk of the tree —
-        cheap at v1 size and trivially correct.
-        """
-        if notebook_id in self._expanded_notebook_ids:
-            self._expanded_notebook_ids.remove(notebook_id)
-        else:
-            self._expanded_notebook_ids.add(notebook_id)
-
-        # Rebuild only the notebook list-box; smart-filter counts
-        # haven't changed.
-        notebooks = self._notebook_repository.list_all()
-        notes = self._note_repository.list_all()
-        self._build_notebook_rows(notebooks, notes)
-        self._apply_highlight()
+    def _restore_expanded_notebook_ids(self, expanded_ids: set[str]) -> None:
+        """Re-expand the rows whose notebook id is in ``expanded_ids``."""
+        if not expanded_ids:
+            return
+        model = _tree_model_of(self._notebook_selection)
+        for tree_row in _expandable_rows_matching(model, expanded_ids):
+            tree_row.set_expanded(True)
 
     # ------------------------------------------------------------------
     # Selection plumbing
     # ------------------------------------------------------------------
 
-    def _on_smart_filter_row_activated(
+    def _on_section_selection_changed(
         self,
-        _listbox: Gtk.ListBox,
-        row: Gtk.ListBoxRow,
+        selection: Gtk.SingleSelection,
+        _position: int,
+        _n_items: int,
     ) -> None:
-        """User clicked a smart-filter row. Update :class:`AppState`."""
-        if not isinstance(row, _SidebarRow):
-            return  # defensive — every row we add is a _SidebarRow
-        if not isinstance(row.payload, _SmartRowPayload):
-            return
-        self._app_state.set_selection(
-            SmartSelection(smart_filter=row.payload.smart_filter)
-        )
+        """A section's selection changed — push it into :class:`AppState`.
 
-    def _on_notebook_row_activated(
-        self,
-        _listbox: Gtk.ListBox,
-        row: Gtk.ListBoxRow,
-    ) -> None:
-        """User clicked a notebook row. Update :class:`AppState`."""
-        if not isinstance(row, _SidebarRow):
+        Skipped while :attr:`_suppress_selection_events` is set, which
+        is the case during :meth:`_apply_highlight`'s own programmatic
+        ``set_selected`` calls; that fence is what stops the
+        input→AppState→highlight cycle from looping. A change that
+        clears the section (no item selected) is ignored here — the
+        owning section's handler is the one that carries the payload.
+        """
+        if self._suppress_selection_events:
             return
-        if not isinstance(row.payload, _NotebookRowPayload):
+        item = _selected_item(selection)
+        if item is None:
             return
-        self._app_state.set_selection(
-            NotebookSelection(notebook_id=row.payload.notebook_id)
-        )
+        self._app_state.set_selection(item.payload)
 
     def _on_app_state_selection_changed(self, _state: AppState) -> None:
         """:class:`AppState` selection changed — re-apply the highlight."""
@@ -587,165 +734,113 @@ class Sidebar(Gtk.Box):  # pylint: disable=too-many-instance-attributes
 
     def _apply_highlight(self) -> None:
         """Highlight the row matching the current :class:`AppState`
-        selection in whichever of the two list-boxes owns it.
+        selection in whichever section owns it, clearing the other.
 
-        The other list-box is unselected. ``select_row`` /
-        ``unselect_all`` do not emit ``row-activated`` (only user
-        activation does), so this method cannot loop with the click
-        handlers above.
+        Programmatic ``set_selected`` on a :class:`Gtk.SingleSelection`
+        emits ``selection-changed``, so the work is fenced behind
+        :attr:`_suppress_selection_events` to avoid looping back into
+        :meth:`_on_section_selection_changed`.
         """
         selection = self._app_state.selection
-        match selection:
-            case SmartSelection(smart_filter=sf):
-                target = self._smart_filter_rows.get(sf)
-                self._notebook_listbox.unselect_all()
-                if target is not None:
-                    self._smart_filter_listbox.select_row(target)
-                else:
-                    self._smart_filter_listbox.unselect_all()
-            case NotebookSelection(notebook_id=nb_id):
-                target = self._notebook_rows.get(nb_id)
-                self._smart_filter_listbox.unselect_all()
-                if target is not None:
-                    self._notebook_listbox.select_row(target)
-                else:
-                    self._notebook_listbox.unselect_all()
+        self._suppress_selection_events = True
+        try:
+            match selection:
+                case SmartSelection():
+                    self._select_matching(self._smart_selection, selection)
+                    self._notebook_selection.set_selected(
+                        Gtk.INVALID_LIST_POSITION
+                    )
+                case NotebookSelection():
+                    self._select_matching(self._notebook_selection, selection)
+                    self._smart_selection.set_selected(
+                        Gtk.INVALID_LIST_POSITION
+                    )
+        finally:
+            self._suppress_selection_events = False
+
+    @staticmethod
+    def _select_matching(
+        selection: Gtk.SingleSelection,
+        target: Selection,
+    ) -> None:
+        """Select the row in ``selection`` whose payload equals ``target``.
+
+        Clears the section (``INVALID_LIST_POSITION``) when no row
+        matches — e.g. a :class:`NotebookSelection` for an id that no
+        longer exists.
+        """
+        model = _tree_model_of(selection)
+        for position, tree_row in enumerate(_iter_tree_rows(model)):
+            item = tree_row.get_item()
+            if isinstance(item, _SidebarItem) and item.payload == target:
+                selection.set_selected(position)
+                return
+        selection.set_selected(Gtk.INVALID_LIST_POSITION)
 
 
 # ---------------------------------------------------------------------------
-# Row-construction helpers (free functions, no widget state)
+# Model-access helpers (free functions, no widget state)
 # ---------------------------------------------------------------------------
 
 
-def _make_section_header(text: str) -> Gtk.Label:
-    """Build a left-aligned, dim section title (e.g. *Library*).
+def _tree_model_of(selection: Gtk.SingleSelection) -> Gtk.TreeListModel:
+    """Return the :class:`Gtk.TreeListModel` wrapped by ``selection``."""
+    model = selection.get_model()
+    assert isinstance(model, Gtk.TreeListModel)  # built that way in __init__
+    return model
 
-    Returned as a :class:`Gtk.Label` rather than a fancier widget so
-    the sidebar layout stays a single :class:`Gtk.Box` of stacked
-    children. The actual styling — colour, weight, padding — will
-    arrive with the bundled CSS at step 12+.
+
+def _root_store_of(selection: Gtk.SingleSelection) -> Gio.ListStore:
+    """Return the root :class:`Gio.ListStore` behind ``selection``."""
+    root = _tree_model_of(selection).get_model()
+    assert isinstance(root, Gio.ListStore)  # built that way in __init__
+    return root
+
+
+def _iter_tree_rows(
+    model: Gtk.TreeListModel,
+) -> Iterable[Gtk.TreeListRow]:
+    """Yield every realised :class:`Gtk.TreeListRow` in ``model``.
+
+    The model's item count includes children of expanded rows, so this
+    walks the currently-visible tree in display order.
     """
-    label = Gtk.Label.new(text)
-    label.set_halign(Gtk.Align.START)
-    label.set_margin_top(_SECTION_VERTICAL_SPACING_PX)
-    label.set_margin_bottom(_SECTION_VERTICAL_SPACING_PX // 2)
-    label.set_margin_start(_ROW_SPACING_PX)
-    return label
+    for position in range(model.get_n_items()):
+        tree_row = model.get_item(position)
+        if isinstance(tree_row, Gtk.TreeListRow):
+            yield tree_row
 
 
-def _make_smart_filter_row(
-    smart_filter: SmartFilter,
-    count: int,
-) -> tuple[_SidebarRow, Gtk.Label]:
-    """Build a single smart-filter row.
+def _expandable_rows_matching(
+    model: Gtk.TreeListModel,
+    notebook_ids: set[str],
+) -> list[Gtk.TreeListRow]:
+    """Collect expandable rows whose notebook id is in ``notebook_ids``.
 
-    Returns the row itself and the :class:`Gtk.Label` that holds the
-    count, so the caller can update it later without re-walking the
-    widget tree.
+    Returned as a list (not a generator) so the caller can expand them
+    without mutating the model mid-iteration: expanding a row inserts
+    its children and shifts later positions.
     """
-    box = Gtk.Box.new(Gtk.Orientation.HORIZONTAL, _ROW_SPACING_PX)
-    box.set_margin_start(_ROW_SPACING_PX)
-    box.set_margin_end(_ROW_SPACING_PX)
-
-    icon = Gtk.Image.new_from_icon_name(_SMART_FILTER_ICON_NAMES[smart_filter])
-    box.append(icon)
-
-    label = Gtk.Label.new(_SMART_FILTER_LABELS[smart_filter])
-    label.set_halign(Gtk.Align.START)
-    label.set_hexpand(True)
-    box.append(label)
-
-    count_label = Gtk.Label.new(str(count))
-    count_label.set_halign(Gtk.Align.END)
-    box.append(count_label)
-
-    row = _SidebarRow(
-        payload=_SmartRowPayload(smart_filter=smart_filter),
-        child=box,
-    )
-    return row, count_label
+    matches: list[Gtk.TreeListRow] = []
+    for tree_row in _iter_tree_rows(model):
+        if not tree_row.is_expandable():
+            continue
+        item = tree_row.get_item()
+        if isinstance(item, _SidebarItem) and isinstance(
+            item.payload, NotebookSelection
+        ):
+            if item.payload.notebook_id in notebook_ids:
+                matches.append(tree_row)
+    return matches
 
 
-def _make_notebook_row(  # pylint: disable=too-many-arguments
-    notebook: Notebook,
-    *,
-    count: int,
-    is_child: bool,
-    has_children: bool,
-    is_expanded: bool,
-    on_chevron_clicked: Callable[[str], None],
-) -> _SidebarRow:
-    """Build a single notebook row.
-
-    ``has_children`` controls whether a chevron button appears at
-    the start of the row; ``is_expanded`` chooses which icon the
-    chevron shows. Child rows (``is_child=True``) never have
-    children themselves under the two-level rule, so their chevron
-    slot is occupied by an empty :class:`Gtk.Box` of equal width to
-    keep the icon column aligned.
-
-    The chevron's click handler does not propagate to the row
-    activation (a :class:`Gtk.Button` consumes its own click event)
-    so toggling expansion does not also change the selection.
-    """
-    box = Gtk.Box.new(Gtk.Orientation.HORIZONTAL, _ROW_SPACING_PX)
-    if is_child:
-        box.set_margin_start(_ROW_SPACING_PX + _CHILD_INDENT_PX)
-    else:
-        box.set_margin_start(_ROW_SPACING_PX)
-    box.set_margin_end(_ROW_SPACING_PX)
-
-    if has_children:
-        chevron = Gtk.Button.new_from_icon_name(
-            _CHEVRON_DOWN_ICON if is_expanded else _CHEVRON_RIGHT_ICON
-        )
-        chevron.set_has_frame(False)
-        chevron.connect(
-            "clicked",
-            lambda _btn, nb_id=notebook.id: on_chevron_clicked(nb_id),
-        )
-        box.append(chevron)
-    else:
-        # Reserve the same horizontal space the chevron would
-        # occupy so that parent and leaf rows align under the icon
-        # column.
-        spacer = Gtk.Box.new(Gtk.Orientation.HORIZONTAL, 0)
-        spacer.set_size_request(_chevron_button_width(), -1)
-        box.append(spacer)
-
-    icon = Gtk.Image.new_from_icon_name(_icon_name_for_notebook(notebook.icon))
-    box.append(icon)
-
-    label = Gtk.Label.new(notebook.name)
-    label.set_halign(Gtk.Align.START)
-    label.set_hexpand(True)
-    # Long notebook names get ellipsised at the end so the count
-    # column on the right of the row is never pushed out of view.
-    label.set_ellipsize(Pango.EllipsizeMode.END)
-    box.append(label)
-
-    count_label = Gtk.Label.new(str(count))
-    count_label.set_halign(Gtk.Align.END)
-    box.append(count_label)
-
-    return _SidebarRow(
-        payload=_NotebookRowPayload(
-            notebook_id=notebook.id,
-            is_child=is_child,
-            has_children=has_children,
-        ),
-        child=box,
-    )
-
-
-def _chevron_button_width() -> int:
-    """Pixel width matching the chevron :class:`Gtk.Button`.
-
-    Used by leaf-row layouts to reserve the same horizontal slot
-    so labels align across rows. The actual button has GTK's
-    default minimum width for icon-only buttons; this constant
-    matches it closely enough that the eye reads the columns as
-    aligned and is a single point of adjustment if a future style
-    changes the chevron metrics.
-    """
-    return 24
+def _selected_item(selection: Gtk.SingleSelection) -> _SidebarItem | None:
+    """Return the :class:`_SidebarItem` selected in ``selection``, or None."""
+    position = selection.get_selected()
+    if position == Gtk.INVALID_LIST_POSITION:
+        return None
+    tree_row = selection.get_model().get_item(position)
+    if not isinstance(tree_row, Gtk.TreeListRow):
+        return None
+    item = tree_row.get_item()
+    return item if isinstance(item, _SidebarItem) else None
