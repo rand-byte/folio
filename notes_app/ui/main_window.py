@@ -58,13 +58,20 @@ Principles & invariants
   toolbar / status-bar children extend the window's child set, but
   leave its signal subscriptions confined to the same single
   view-mode dispatch.
-* Default sizes for the panes match the per-widget hints
+* The initial pane positions match the per-widget hints
   (:data:`_SIDEBAR_INITIAL_POSITION_PX`,
-  :data:`_NOTE_LIST_INITIAL_POSITION_PX`). They are *initial*
-  positions only; once the user drags either handle GTK records the
-  new value internally and our defaults stop applying. Saving and
-  restoring those positions across launches is a v2 feature — there
-  is no settings store in v1 (decision 4 of the plan).
+  :data:`_NOTE_LIST_INITIAL_POSITION_PX`), and the initial *window
+  width* is derived from them plus the rendered article column via
+  :func:`_default_window_width`, called once after :class:`NoteView`
+  has measured the body font (:meth:`NoteView.preferred_column_width_px`).
+  This guarantees the fixed-width column opens fully visible and
+  centred rather than overflowing into a horizontal scroll — the
+  derived width scales with the font instead of being a literal guess.
+  All of these are *initial* values only; once the user drags either
+  handle or resizes the window GTK records the new value internally
+  and our defaults stop applying. Saving and restoring those across
+  launches is a v2 feature — there is no settings store in v1
+  (decision 4 of the plan).
 * The window owns no data. Everything it needs — repositories,
   controllers, app state — is reached through references that
   originate in :class:`NotesApplication`. Tests can construct the
@@ -102,18 +109,45 @@ from notes_app.ui.toolbar import Toolbar
 # ---------------------------------------------------------------------------
 
 
-_DEFAULT_WINDOW_WIDTH_PX: Final[int] = 1200
-"""Initial window width.
-
-Wide enough that the rendered article column gets its full
-:data:`TARGET_CHARS_PER_LINE` × char-width allocation with slack on
-both sides of the article column, so the wide-window centring branch
-of :meth:`ArticleContainer.do_size_allocate` fires on the first
-allocation. Narrow enough to fit a 1366×768 laptop comfortably.
-"""
-
 _DEFAULT_WINDOW_HEIGHT_PX: Final[int] = 800
 """Initial window height. Matches the design's roomy default."""
+
+_PANED_HANDLE_ALLOWANCE_PX: Final[int] = 24
+"""Horizontal space reserved for the two ``Gtk.Paned`` drag handles.
+
+The layout has a divider between *sidebar | rest* and another between
+*note list | stack*; neither handle belongs to any pane, so the read
+pane loses a few pixels to each. This is a deliberately generous flat
+allowance (not a measured handle width) so the default-width formula
+in :func:`_default_window_width` never under-reserves and pushes the
+article column into a horizontal scroll on first show. Any rounding
+gap between a paned's *position* and the start child's allocated width
+is absorbed here too.
+"""
+
+_ARTICLE_SIDE_SLACK_PX: Final[int] = 96
+"""Breathing room added beyond the article column at the default size.
+
+:meth:`ArticleContainer.do_size_allocate` only centres the column when
+the read pane is *strictly wider* than the column. Sizing the pane to
+exactly the column width would leave the column edge-to-edge and skip
+that centring branch on the first allocation. This slack guarantees
+the pane opens wider than the column — splitting roughly in half it is
+~48px of gutter on each side — so the column starts centred, which is
+the behaviour the old fixed-1200 default claimed but did not deliver.
+"""
+
+_MIN_DEFAULT_WINDOW_WIDTH_PX: Final[int] = 1000
+"""Floor for the computed default window width.
+
+The article-column term in :func:`_default_window_width` is *measured*
+at runtime (it scales with the body font), and the underlying M-width
+measurer falls back to a tiny value if it cannot read a real font (see
+:data:`notes_app.ui.note_view._FALLBACK_CHAR_WIDTH_PX`). The floor
+keeps a degenerate measurement from opening an unusably narrow window.
+Under any normal font the computed sum exceeds this floor, so it only
+ever matters as insurance.
+"""
 
 _SIDEBAR_INITIAL_POSITION_PX: Final[int] = 220
 """Initial position of the outer paned divider.
@@ -171,6 +205,40 @@ def _stack_name_for_mode(mode: ViewMode) -> str:
     return _MODE_TO_STACK_NAME[mode]
 
 
+def _default_window_width(article_column_px: int) -> int:
+    """Compute the initial window width that fits the article column.
+
+    The window must hold, left to right: the sidebar pane
+    (:data:`_SIDEBAR_INITIAL_POSITION_PX`), the note-list pane
+    (:data:`_NOTE_LIST_INITIAL_POSITION_PX`), the two paned handles
+    (:data:`_PANED_HANDLE_ALLOWANCE_PX`), the rendered article column
+    (``article_column_px`` — the only runtime-measured term, so the
+    result tracks the body font), and a slack margin
+    (:data:`_ARTICLE_SIDE_SLACK_PX`) that opens the read pane wider
+    than the column so its centring branch fires on first allocation.
+
+    Both ``_*_POSITION_PX`` terms are horizontal ``Gtk.Paned`` divider
+    positions, which for a horizontal paned equal the width allocated
+    to the start child — i.e. the sidebar and note-list pane widths at
+    the initial layout. They live in different paned coordinate spaces,
+    but they are summed here as independent *widths*, not chained
+    offsets, which is the correct quantity.
+
+    The result is clamped up to :data:`_MIN_DEFAULT_WINDOW_WIDTH_PX` so
+    a degenerate (tiny) font measurement cannot yield an unusable
+    window. Pure arithmetic — no GTK — so it is unit-testable without a
+    display.
+    """
+    needed = (
+        _SIDEBAR_INITIAL_POSITION_PX
+        + _NOTE_LIST_INITIAL_POSITION_PX
+        + _PANED_HANDLE_ALLOWANCE_PX
+        + article_column_px
+        + _ARTICLE_SIDE_SLACK_PX
+    )
+    return max(_MIN_DEFAULT_WINDOW_WIDTH_PX, needed)
+
+
 # ---------------------------------------------------------------------------
 # MainWindow
 # ---------------------------------------------------------------------------
@@ -223,10 +291,12 @@ class MainWindow(  # pylint: disable=too-many-instance-attributes
         self._attachment_store = attachment_store
 
         self.set_title(_WINDOW_TITLE)
-        self.set_default_size(
-            _DEFAULT_WINDOW_WIDTH_PX,
-            _DEFAULT_WINDOW_HEIGHT_PX,
-        )
+        # The default *size* is set further down, once ``self._note_view``
+        # exists: the default width is derived from the article column the
+        # view will actually render (see :func:`_default_window_width`),
+        # and that column width is only known after :class:`NoteView` has
+        # measured the body font. Setting it here would force a literal
+        # guess — which is exactly the bug this replaced.
 
         # Build the top header bar (toolbar) and install it as the
         # window's title bar. ``set_titlebar`` replaces the default
@@ -267,6 +337,18 @@ class MainWindow(  # pylint: disable=too-many-instance-attributes
             note_repository=note_repository,
             note_controller=note_controller,
             app_state=app_state,
+        )
+
+        # Now that the rendered view exists (and has measured the body
+        # font), size the window so the fixed-width article column fits
+        # alongside the two left panes with slack on both sides — the
+        # centring branch of ``ArticleContainer`` then fires on the very
+        # first allocation instead of the column overflowing into a
+        # horizontal scroll. The width tracks the font because
+        # ``preferred_column_width_px`` is the measured column.
+        self.set_default_size(
+            _default_window_width(self._note_view.preferred_column_width_px()),
+            _DEFAULT_WINDOW_HEIGHT_PX,
         )
 
         # The right pane is a Gtk.Stack: rendered view OR editor,

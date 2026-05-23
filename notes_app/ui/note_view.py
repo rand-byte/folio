@@ -827,7 +827,12 @@ class NoteView(Gtk.Box):
     # references — adding them as ``self.`` attributes would duplicate
     # those references for no behavioural benefit. The error banner's
     # revealer and label *are* stored because :meth:`refresh` toggles
-    # them on every selection change.
+    # them on every selection change. The :class:`ArticleContainer`'s
+    # *outer column width* is stored as a derived ``int``
+    # (``_outer_column_width_px``) — not the widget — because
+    # :class:`MainWindow` needs the value to size the initial window
+    # (:meth:`preferred_column_width_px`); caching the int keeps it tied
+    # to the same M-width measurement without retaining the widget.
     _note_repository: NoteRepositoryProtocol
     _attachments: AttachmentStoreProtocol | None
     _app_state: AppState
@@ -837,6 +842,7 @@ class NoteView(Gtk.Box):
     _current_note_id: str | None
     _error_banner_revealer: Gtk.Revealer
     _error_banner_label: Gtk.Label
+    _outer_column_width_px: int
 
     def __init__(
         self,
@@ -936,6 +942,16 @@ class NoteView(Gtk.Box):
         )
         article_container.set_child(self._text_view)
 
+        # Cache the outer column width as a plain ``int`` (the widget
+        # itself is not retained — see the stored-fields note above).
+        # :class:`MainWindow` reads this via
+        # :meth:`preferred_column_width_px` to size the initial window
+        # so the column fits without a horizontal scroll. Caching the
+        # derived value keeps it tied to the *same* M-width measurement
+        # the column and margins already use, so the window cannot drift
+        # from the column it renders.
+        self._outer_column_width_px = article_container.outer_column_width()
+
         # The four breathing-space margins on the rendered-view
         # ``Gtk.TextView``. All four are font-relative — top / bottom
         # are multiples of the measured line height, left / right are
@@ -1001,6 +1017,20 @@ class NoteView(Gtk.Box):
     # ------------------------------------------------------------------
     # Public API
     # ------------------------------------------------------------------
+
+    def preferred_column_width_px(self) -> int:
+        """Return the rendered article column's outer width in pixels.
+
+        This is ``(TARGET_CHARS_PER_LINE + 2 ×
+        ARTICLE_INNER_HPADDING_CHARS) × measured-M-width`` — the width
+        the fixed-width column wants, including its inner horizontal
+        padding. It is the value :class:`MainWindow` adds to the two
+        left-pane widths to pick an initial window width that shows the
+        column without a horizontal scroll. Because it is derived from
+        the same M-width measurement as the column and its margins, the
+        window and the column it renders cannot disagree.
+        """
+        return self._outer_column_width_px
 
     def refresh(self) -> None:
         """Render the currently selected note into the buffer.

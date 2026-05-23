@@ -19,7 +19,15 @@ from notes_app.enums import NotebookIcon, ViewMode
 from notes_app.models.attachment import Attachment
 from notes_app.models.note import Note
 from notes_app.models.notebook import Notebook
-from notes_app.ui.main_window import MainWindow
+from notes_app.ui.main_window import (
+    MainWindow,
+    _ARTICLE_SIDE_SLACK_PX,
+    _MIN_DEFAULT_WINDOW_WIDTH_PX,
+    _NOTE_LIST_INITIAL_POSITION_PX,
+    _PANED_HANDLE_ALLOWANCE_PX,
+    _SIDEBAR_INITIAL_POSITION_PX,
+    _default_window_width,
+)
 from notes_app.ui.note_editor import NoteEditor
 from notes_app.ui.note_list import NoteList
 from notes_app.ui.note_view import NoteView
@@ -158,6 +166,59 @@ class _FakeAttachmentStore:
 # ---------------------------------------------------------------------------
 
 
+class DefaultWindowWidthTests(unittest.TestCase):
+    """Pure arithmetic for :func:`_default_window_width` — no display.
+
+    The function only does integer arithmetic over module constants, so
+    these run without a GDK display (the module-level ``gi`` import is
+    the only GTK dependency, shared by the whole test file).
+    """
+
+    _FIXED_OVERHEAD: int = (
+        _SIDEBAR_INITIAL_POSITION_PX
+        + _NOTE_LIST_INITIAL_POSITION_PX
+        + _PANED_HANDLE_ALLOWANCE_PX
+        + _ARTICLE_SIDE_SLACK_PX
+    )
+
+    def test_sums_overhead_and_column_when_above_floor(self) -> None:
+        # A column wide enough that the sum clears the floor: the result
+        # is the four fixed terms plus the column, exactly.
+        column = _MIN_DEFAULT_WINDOW_WIDTH_PX  # generously above the floor
+        self.assertEqual(
+            _default_window_width(column),
+            self._FIXED_OVERHEAD + column,
+        )
+
+    def test_clamps_up_to_floor_for_tiny_column(self) -> None:
+        # A degenerate (zero) column must not yield a sub-floor window.
+        self.assertEqual(
+            _default_window_width(0),
+            _MIN_DEFAULT_WINDOW_WIDTH_PX,
+        )
+
+    def test_is_monotonic_in_column_width(self) -> None:
+        # A wider column never produces a narrower window.
+        narrower = _default_window_width(800)
+        wider = _default_window_width(1400)
+        self.assertGreaterEqual(wider, narrower)
+
+    def test_result_strictly_exceeds_overhead_plus_column(self) -> None:
+        # Above the floor, the window is wider than overhead-without-slack
+        # + column, i.e. there is genuine slack so the centring branch can
+        # fire on first allocation.
+        column = 900
+        overhead_no_slack = (
+            _SIDEBAR_INITIAL_POSITION_PX
+            + _NOTE_LIST_INITIAL_POSITION_PX
+            + _PANED_HANDLE_ALLOWANCE_PX
+        )
+        self.assertGreater(
+            _default_window_width(column),
+            overhead_no_slack + column,
+        )
+
+
 @unittest.skipUnless(_display_available(), "no GDK display")
 class MainWindowConstructionTests(unittest.TestCase):
     """End-to-end smoke tests: the shell composes its panes without
@@ -214,7 +275,16 @@ class MainWindowConstructionTests(unittest.TestCase):
     def test_constructs_and_reports_default_size(self) -> None:
         window = self._build_window()
         self.assertIsInstance(window, Gtk.ApplicationWindow)
-        self.assertEqual(window.get_default_size(), (1200, 800))
+        # The default width is derived from the article column the
+        # rendered view actually measured (font-dependent, so not a
+        # literal here); the height stays the fixed design default.
+        expected_width = _default_window_width(
+            window._note_view.preferred_column_width_px(),
+        )
+        self.assertEqual(
+            window.get_default_size(),
+            (expected_width, 800),
+        )
 
     def test_window_title_is_notes(self) -> None:
         window = self._build_window()

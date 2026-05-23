@@ -1104,6 +1104,47 @@ class NoteViewMarginWiringTests(unittest.TestCase):
 
 
 @unittest.skipUnless(_display_available(), "no GDK display")
+class NoteViewPreferredColumnWidthTests(unittest.TestCase):
+    """Pin :meth:`NoteView.preferred_column_width_px`.
+
+    The accessor reports the *outer* column width — text column plus
+    the inner horizontal padding on both sides — which is what
+    :class:`MainWindow` adds to the left-pane widths to size the
+    initial window. Stubbing the font measurers makes the value exact
+    rather than font-dependent.
+    """
+
+    def _build_view_with_stubbed_font(
+        self, *, char_w: int, line_h: int,
+    ) -> NoteView:
+        repo = _FakeNoteRepository()
+        state = AppState()
+        with mock.patch.object(
+            note_view_module,
+            "_build_font_measurers",
+            _stub_font_measurers_factory(char_w=char_w, line_h=line_h),
+        ):
+            return NoteView(note_repository=repo, app_state=state)
+
+    def test_reports_outer_column_width(self) -> None:
+        view = self._build_view_with_stubbed_font(char_w=10, line_h=20)
+        expected = (
+            TARGET_CHARS_PER_LINE + 2 * ARTICLE_INNER_HPADDING_CHARS
+        ) * 10
+        self.assertEqual(view.preferred_column_width_px(), expected)
+
+    def test_scales_with_measured_char_width(self) -> None:
+        # Doubling the measured M-width doubles the reported column —
+        # the value tracks the font, it is not a constant.
+        narrow = self._build_view_with_stubbed_font(char_w=10, line_h=20)
+        wide = self._build_view_with_stubbed_font(char_w=20, line_h=20)
+        self.assertEqual(
+            wide.preferred_column_width_px(),
+            2 * narrow.preferred_column_width_px(),
+        )
+
+
+@unittest.skipUnless(_display_available(), "no GDK display")
 class NoteViewRendererWiringTests(unittest.TestCase):
     """The renderer must be fed the *text* column width — not the
     outer (padded) width — so tables and images continue to lay out
