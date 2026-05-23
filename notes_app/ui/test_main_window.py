@@ -4,14 +4,16 @@ from __future__ import annotations
 
 import unittest
 from datetime import UTC, datetime
+from itertools import count
 from pathlib import Path
 
 import gi
 
 gi.require_version("Gdk", "4.0")
+gi.require_version("Gio", "2.0")
 gi.require_version("Gtk", "4.0")
 # pylint: disable=wrong-import-position
-from gi.repository import Gdk, Gtk  # noqa: E402
+from gi.repository import Gdk, Gio, Gtk  # noqa: E402
 
 from notes_app.controllers.app_state import AppState
 from notes_app.controllers.note_controller import NoteController
@@ -42,6 +44,35 @@ def _display_available() -> bool:
     construction."""
     Gtk.init_check()
     return Gdk.Display.get_default() is not None
+
+
+_APP_ID_COUNTER = count(1)
+
+
+def _make_test_application() -> Gtk.Application:
+    """A freshly registered :class:`Gtk.Application` to host a window.
+
+    Registering before adding windows suppresses GTK's "New application
+    windows must be added after the GApplication::startup signal" warning.
+
+    The application id is made **unique per call**. A GApplication exports
+    an ``org.gtk.Application`` D-Bus object at a path derived from its id
+    (``org.notes_app.NotesApp.test`` → ``/org/notes_app/NotesApp/test``) on
+    the process-wide session-bus connection. The suite builds one throwaway
+    application per test and each :class:`MainWindow` keeps its application
+    alive, so a *shared* id makes the second ``register()`` fail with "An
+    object is already exported … at /org/notes_app/NotesApp/test". Neither
+    the ``NON_UNIQUE`` flag nor relying on garbage collection fixes this
+    reliably — the export path is a pure function of the id. A distinct id
+    per build gives each instance its own object path, so registrations
+    never collide regardless of object lifetime.
+    """
+    application = Gtk.Application.new(
+        f"org.notes_app.NotesApp.test{next(_APP_ID_COUNTER)}",
+        Gio.ApplicationFlags.DEFAULT_FLAGS,
+    )
+    application.register(None)
+    return application
 
 
 # ---------------------------------------------------------------------------
@@ -229,16 +260,7 @@ class MainWindowConstructionTests(unittest.TestCase):
         *,
         app_state: AppState | None = None,
     ) -> MainWindow:
-        application = Gtk.Application.new(
-            "org.notes_app.NotesApp.test",
-            0,
-        )
-        # Register the application before adding windows. Without
-        # this GTK emits a critical warning ("New application windows
-        # must be added after the GApplication::startup signal has
-        # been emitted"), which clutters test output even though the
-        # window itself is constructed correctly.
-        application.register(None)
+        application = _make_test_application()
         notes = _FakeNoteRepository()
         notebooks = _FakeNotebookRepository()
         notebooks.add(
@@ -337,11 +359,7 @@ class MainWindowViewModeStackTests(unittest.TestCase):
     """The right-pane stack tracks :attr:`AppState.view_mode`."""
 
     def _build_window(self, *, view_mode: ViewMode) -> MainWindow:
-        application = Gtk.Application.new(
-            "org.notes_app.NotesApp.test",
-            0,
-        )
-        application.register(None)
+        application = _make_test_application()
         notes = _FakeNoteRepository()
         notebooks = _FakeNotebookRepository()
         state = AppState(initial_view_mode=view_mode)
@@ -427,11 +445,7 @@ class MainWindowViewModeChangeFlushAndRefreshTests(unittest.TestCase):
         assert against the autosave path and drive view-mode toggles
         without reaching into private window state.
         """
-        application = Gtk.Application.new(
-            "org.notes_app.NotesApp.test",
-            0,
-        )
-        application.register(None)
+        application = _make_test_application()
         notes = _FakeNoteRepository()
         notebooks = _FakeNotebookRepository()
         notebooks.add(
