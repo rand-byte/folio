@@ -17,12 +17,14 @@ it first so you can find the right file before opening it.
 | Goal | Command |
 | --- | --- |
 | Launch app | `python -m notes_app` (or `notes-app` after `pip install -e .`) |
-| Run all tests | `python -m unittest discover -s notes_app -v` |
+| Run all tests | `make test` (preferred — sets up a headless display) or, with a display already available, `python -m unittest discover -s notes_app -v` |
 | Type-check | `mypy notes_app` |
 | Lint (non-test) | `pylint --disable=missing-module-docstring,missing-function-docstring,missing-class-docstring --enable=useless-suppression --min-public-methods=1 notes_app` |
 | Lint (test files) | additionally disable `too-many-public-methods,protected-access,duplicate-code,too-many-lines` |
 
 System packages required: `gir1.2-gtk-4.0`, `gir1.2-gtksource-5` (Debian/Ubuntu) plus equivalents elsewhere. Python ≥ 3.13. The only Python runtime dependency is `PyGObject>=3.50` (see `pyproject.toml`); SQLite is in the standard library.
+
+To run the **full** test suite headlessly (e.g. in CI), `weston` is also required: the widget-level UI tests are gated behind a `_display_available()` guard and only run when a GDK display can be opened. `make test` provides one by launching a headless Weston compositor; see section 5 for the mechanics. Without a display those UI tests skip rather than fail, so a `python -m unittest …` run with no display reports `OK` while silently exercising none of the GTK widgets.
 
 ---
 
@@ -231,6 +233,8 @@ This is the only layer that owns widget trees. Every widget is thin and unit-tes
 - Storage tests run against a real `Database.in_memory()` with the v1 schema applied — the in-memory backend is the unit under test alongside the repository.
 - Controllers are tested against dataclass-backed in-memory **fakes** of the storage protocols, plus a **fake clock** and **counter id-gen** for determinism. No GTK display, no temp directories.
 - UI tests instantiate widgets directly and drive them with fake controllers/protocols. Asynchronous GTK 4 dialogs (`Gtk.FileDialog.open`, `Gtk.AlertDialog`) are wrapped behind callable type aliases (`FileDialogOpener`, `ConfirmDialogPresenter`) so tests pass a synchronous fake.
+- **UI tests need a real GDK display.** Each such test (and several whole classes) is decorated `@unittest.skipUnless(_display_available(), "no GDK display")`, where `_display_available()` is true iff `Gdk.Display.get_default()` opens. With no display they *skip*, so a green run without one proves nothing about the widgets. The `make test` target supplies a display by running a headless Weston compositor; on the reference environment this is the difference between ~312 skipped and 1 skipped.
+- **How `make test` wires the display** (see the comment in the `Makefile`): it launches `weston --backend headless --socket=test_1` in the **background** (Weston is a long-running compositor — chaining it with `&&` would block forever and never reach the tests), waits for the `$XDG_RUNTIME_DIR/test_1` socket to appear, then runs the suite with `WAYLAND_DISPLAY=test_1` exported (the socket name alone is not enough — without this env var GTK opens no display) and kills Weston on exit. Requires the `weston` package.
 - For pylint, test files additionally disable `too-many-public-methods,protected-access,duplicate-code,too-many-lines`.
 
 ---
