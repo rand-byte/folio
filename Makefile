@@ -31,5 +31,5 @@ test:
 			[ -S "$$XDG_RUNTIME_DIR/test_notes" ] && break; \
 			sleep 0.1; \
 		done; \
-		WAYLAND_DISPLAY=test_notes GDK_BACKEND=wayland \
+		WAYLAND_DISPLAY=test_notes GDK_BACKEND=wayland PYTHONFAULTHANDLER=1 \
 			python3 -B -m unittest discover -s notes_app -f
