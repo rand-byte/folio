@@ -30,6 +30,16 @@ Principles & invariants
   The only correct base for this widget is therefore ``Gtk.Widget``,
   with manual single-child management via :meth:`set_parent` /
   :meth:`unparent` and :meth:`Gtk.Widget.allocate` on the child.
+  Because that parent link is owned manually, the container must also
+  release it at teardown, or GTK finalizes the container with the child
+  still parented and warns about leftover children. ``dispose`` — the
+  natural hook in C — is not exposed for override by PyGObject, so the
+  unparent runs from :meth:`ArticleContainer.do_unroot` (fired by GTK
+  while a *rooted* tree is torn down, i.e. in production) with a
+  :meth:`ArticleContainer.__del__` net for a container that is
+  finalized without ever being rooted (i.e. the standalone widgets the
+  unit tests build). Both funnel through one guarded
+  :meth:`ArticleContainer._release_child`.
 * The target column width is :data:`TARGET_CHARS_PER_LINE` ×
   *measured glyph width*. The measurement is injected as a callable so
   tests can stub it without needing a realised font, and so production
@@ -653,6 +663,55 @@ class ArticleContainer(Gtk.Widget):
             self._child.unparent()
         self._child = child
         child.set_parent(self)
+
+    def _release_child(self) -> None:
+        """Unparent the single child if it is still parented to us.
+
+        The lone place that severs the manual ``set_parent`` link. It is
+        idempotent and self-guarding: it only unparents when a child is
+        held *and* that child's parent is still this container, so the
+        two teardown hooks below (:meth:`do_unroot` and :meth:`__del__`)
+        can both call it without double-unparenting.
+        """
+        if self._child is not None and self._child.get_parent() is self:
+            self._child.unparent()
+        self._child = None
+
+    def do_unroot(self) -> None:  # pylint: disable=arguments-differ
+        """Release the manually parented child when leaving the widget tree.
+
+        A custom ``Gtk.Widget`` that parents a child via
+        :meth:`Gtk.Widget.set_parent` (as :meth:`set_child` does) owns
+        that link and must drop it at teardown — GTK does not
+        auto-unparent the children of a bare ``Gtk.Widget`` subclass the
+        way it does for a ``Gtk.Box``. The natural hook would be
+        ``dispose``, but PyGObject does not expose ``GObject``'s
+        ``dispose`` vfunc for overriding, so ``do_unroot`` — which GTK
+        invokes synchronously while tearing the window's widget tree
+        down — is the reliable equivalent for any *rooted* container.
+        Without this the container is finalized with the child still
+        parented and GTK warns *"Finalizing … but it still has children
+        left"*. The container is never re-rooted in this application
+        (the :class:`NoteView` lives for the window's lifetime), so
+        unparenting here is safe. The :meth:`__del__` below is the
+        companion net for the never-rooted case (see its docstring).
+        """
+        self._release_child()
+        Gtk.Widget.do_unroot(self)
+
+    def __del__(self) -> None:
+        """Release the child for a container that is finalized un-rooted.
+
+        :meth:`do_unroot` only fires for a container that was added to a
+        window; a container built in isolation and dropped (as the unit
+        tests do) is finalized without ever being rooted, so the
+        unparent has to happen here instead. The container holds the
+        only reference to its child via :meth:`Gtk.Widget.set_parent`,
+        so the child is guaranteed still alive at this point; the
+        :meth:`_release_child` guard makes this a no-op when
+        :meth:`do_unroot` already ran.
+        """
+        self._release_child()
 
     def char_width_px(self) -> int:
         """Return the cached measured width of the reference glyph.

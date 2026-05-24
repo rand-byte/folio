@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import gc
 import unittest
 from collections.abc import Callable
 from datetime import UTC, datetime, timedelta
@@ -595,6 +596,76 @@ class ArticleContainerSizeAllocateTests(unittest.TestCase):
         # No assertion target beyond "does not raise" — the
         # implementation has nothing to delegate to.
         container.do_size_allocate(outer + 100, 600, -1)
+
+
+@unittest.skipUnless(_display_available(), "no GDK display")
+class ArticleContainerTeardownTests(unittest.TestCase):
+    """Pin the teardown unparent that silences the GTK 4 finalize warning.
+
+    :class:`ArticleContainer` parents its single child manually via
+    :meth:`Gtk.Widget.set_parent`, so — unlike a ``Gtk.Box``, whose
+    layout manager disposes of children for it — it must unparent that
+    child itself before being finalized, or GTK prints *"Finalizing …
+    but it still has children left"*. PyGObject does not expose
+    ``GObject``'s ``dispose`` vfunc, so the container does this from
+    :meth:`ArticleContainer.do_unroot` for the rooted (production) path
+    and from :meth:`ArticleContainer.__del__` for a container that is
+    finalized without ever being rooted (the standalone widgets these
+    tests build). Both routes are exercised here.
+    """
+
+    def test_unroot_unparents_the_child(self) -> None:
+        # The rooted path: adding the container to a window and then
+        # destroying the window unroots it, which must drop the child.
+        container = _make_test_article_container(char_w=10, line_h=20)
+        child = _CapturingChild()
+        container.set_child(child)
+        window = Gtk.Window()
+        window.set_child(container)
+        self.assertIs(child.get_parent(), container)
+
+        window.set_child(None)  # unroots the container
+
+        self.assertIsNone(child.get_parent())
+        self.assertIsNone(container.get_first_child())
+        window.destroy()
+
+    def test_release_child_is_idempotent(self) -> None:
+        # Both teardown hooks call the same guarded helper; calling it
+        # twice (as do_unroot + __del__ can) must not double-unparent.
+        container = _make_test_article_container(char_w=10, line_h=20)
+        child = _CapturingChild()
+        container.set_child(child)
+
+        container._release_child()
+        container._release_child()  # second pass is a guarded no-op
+
+        self.assertIsNone(child.get_parent())
+        self.assertIsNone(container.get_first_child())
+
+    def test_release_child_with_no_child_is_a_no_op(self) -> None:
+        # The container is constructible without a child; releasing in
+        # that state must not raise.
+        container = _make_test_article_container(char_w=10, line_h=20)
+        container._release_child()
+        self.assertIsNone(container.get_first_child())
+
+    def test_standalone_container_unparents_child_on_finalize(self) -> None:
+        # The never-rooted path the rest of this test module hits: build
+        # a container with a child, drop the only reference, force a GC
+        # pass, and confirm the child is no longer parented (which is
+        # what stops the finalize warning). The child is kept alive via
+        # a weakref-free local so the assertion can read its parent
+        # after the container is gone.
+        child = _CapturingChild()
+        container = _make_test_article_container(char_w=10, line_h=20)
+        container.set_child(child)
+        self.assertIs(child.get_parent(), container)
+
+        del container
+        gc.collect()
+
+        self.assertIsNone(child.get_parent())
 
 
 @unittest.skipUnless(_display_available(), "no GDK display")
