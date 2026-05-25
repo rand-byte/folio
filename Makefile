@@ -1,4 +1,4 @@
-.PHONY: all validate test clean build package
+.PHONY: all validate test type clean build package
 
 package:
 	rm -f note_src_arc.zip && \
@@ -33,3 +33,6 @@ test:
 		done; \
 		WAYLAND_DISPLAY=test_notes GDK_BACKEND=wayland \
 			python3 -B -m unittest discover -s notes_app -f
+
+type:
+	mypy $(shell find notes_app -type f -name "*.py")
