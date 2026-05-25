@@ -1,4 +1,4 @@
-"""Tests for :mod:`notes_app.asciidoc.tag_table`."""
+"""Tests for :mod:`notes_app.ui.note_render.tag_table`."""
 
 from __future__ import annotations
 
@@ -11,7 +11,7 @@ gi.require_version("Pango", "1.0")
 # pylint: disable=wrong-import-position
 from gi.repository import Gtk, Pango  # noqa: E402
 
-from notes_app.asciidoc.tag_table import (
+from notes_app.ui.note_render.tag_table import (
     TagName,
     WashSpec,
     admonition_body_tag_name,

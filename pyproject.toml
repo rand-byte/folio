@@ -34,7 +34,7 @@ include = ["notes_app*"]
 # included by the same mechanism.
 [tool.setuptools.package-data]
 notes_app = [
-    "asciidoc/language_spec.lang",
+    "ui/language_spec.lang",
     "ui/css/*.css",
     "ui/icons/*.svg",
 ]

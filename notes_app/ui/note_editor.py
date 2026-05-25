@@ -15,7 +15,7 @@ Principles & invariants
   selections — that would create the second source of truth the
   module docstring of :class:`AppState` warns against.
 * The bundled :data:`LANGUAGE_ID` AsciiDoc grammar
-  (``notes_app/asciidoc/language_spec.lang``) is what
+  (``notes_app/ui/language_spec.lang``) is what
   :class:`GtkSource.View` highlights against. The grammar covers only
   the step-4 subset (sections, lists, code blocks, image macros,
   bold, italic, strikethrough, underline) because anything richer
@@ -128,7 +128,6 @@ gi.require_version("GtkSource", "5")
 # pylint: disable=wrong-import-position
 from gi.repository import GLib, Gtk, GtkSource  # noqa: E402
 
-from notes_app import asciidoc as _asciidoc_pkg
 from notes_app.controllers.app_state import AppState
 from notes_app.controllers.note_controller import NoteController
 from notes_app.storage.protocols import NoteRepositoryProtocol
@@ -147,7 +146,7 @@ LANGUAGE_ID: Final[str] = "notes-asciidoc"
 """Identifier the bundled language file declares.
 
 Matches the ``id`` attribute of the ``<language>`` root element in
-``notes_app/asciidoc/language_spec.lang``. Kept as a module-level
+``notes_app/ui/language_spec.lang``. Kept as a module-level
 constant rather than a literal so the grep target for "where is the
 language id used" is exactly one place.
 """
@@ -156,7 +155,7 @@ LANGUAGE_FILE_NAME: Final[str] = "language_spec.lang"
 """File name of the bundled language definition.
 
 Lives next to the AsciiDoc parser under
-``notes_app/asciidoc/language_spec.lang``. The same package directory
+``notes_app/ui/language_spec.lang``. The same package directory
 is added to a per-editor :class:`GtkSource.LanguageManager` search
 path so the file is discoverable at runtime.
 """
@@ -532,23 +531,13 @@ def buffer_text(buffer: Gtk.TextBuffer) -> str:
 def _bundled_language_dir() -> Path:
     """Directory containing the bundled ``language_spec.lang`` file.
 
-    Resolves at import time without touching ``sys.path`` games:
-    :mod:`notes_app.asciidoc` is the package the file lives next to,
-    so its ``__file__`` attribute's parent is the directory we want.
+    The grammar is a GtkSourceView asset for the source *editor*, so it
+    lives next to this module under ``notes_app/ui/`` rather than in the
+    pure ``asciidoc`` package. This module's own ``__file__`` therefore
+    locates it — its parent is the ``ui`` package directory the grammar
+    ships in.
     """
-    asciidoc_init = _asciidoc_pkg.__file__
-    if asciidoc_init is None:
-        # The package has no __file__ only in exotic packaging
-        # scenarios (frozen executables, namespace packages). The
-        # editor is shipped as a regular installable package so this
-        # branch should be unreachable in practice — the assertion is
-        # defence against future refactors that might break the
-        # invariant silently.
-        raise RuntimeError(
-            "notes_app.asciidoc is missing __file__; cannot locate the "
-            "bundled language definition."
-        )
-    return Path(asciidoc_init).parent
+    return Path(__file__).parent
 
 
 _LANGUAGE_MANAGER: GtkSource.LanguageManager | None = None

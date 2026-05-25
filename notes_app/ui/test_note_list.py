@@ -4,16 +4,18 @@ from __future__ import annotations
 
 import unittest
 from datetime import UTC, datetime, timedelta
+from pathlib import Path
 
 import gi
 
 gi.require_version("Gdk", "4.0")
 gi.require_version("Gtk", "4.0")
 # pylint: disable=wrong-import-position
-from gi.repository import Gdk, Gtk  # noqa: E402
+from gi.repository import Gdk, Gtk, Pango  # noqa: E402
 
 from notes_app.controllers.app_state import AppState
 from notes_app.enums import NoteSortKey, NotebookIcon, SmartFilter
+from notes_app.models.attachment import Attachment
 from notes_app.models.note import Note
 from notes_app.models.notebook import Notebook
 from notes_app.search.note_filter import (
@@ -23,6 +25,8 @@ from notes_app.search.note_filter import (
 )
 from notes_app.ui.note_list import (
     NoteList,
+    _make_meta_line,
+    _make_note_row,
     _NoteListRow,
     _NoteRowPayload,
     compute_display_notes,
@@ -536,6 +540,156 @@ class NoteListRowTests(unittest.TestCase):
         )
         self.assertFalse(widget._empty_label.get_visible())
         self.assertTrue(widget._list_box.get_visible())
+
+
+class _FakeAttachmentStore:
+    """Minimal attachment store returning counts from a fixed mapping.
+
+    Only :meth:`count_for_note` is exercised by :class:`NoteList`; the
+    remaining protocol methods are present so the fake conforms to
+    :class:`AttachmentStoreProtocol` but raise if ever called.
+    """
+
+    counts: dict[str, int]
+
+    def __init__(self, counts: dict[str, int] | None = None) -> None:
+        self.counts = counts if counts is not None else {}
+
+    def count_for_note(self, note_id: str) -> int:
+        return self.counts.get(note_id, 0)
+
+    def add_for_note(self, _note_id: str, _source_path: Path) -> Attachment:
+        raise NotImplementedError
+
+    def remove(self, _attachment_id: str) -> None:
+        raise NotImplementedError
+
+    def list_for_note(self, _note_id: str) -> list[Attachment]:
+        raise NotImplementedError
+
+    def get_bytes(self, _attachment_id: str) -> bytes:
+        raise NotImplementedError
+
+
+def _row_labels(row: _NoteListRow) -> list[Gtk.Label]:
+    """Collect every :class:`Gtk.Label` descendant of a row, in order."""
+    labels: list[Gtk.Label] = []
+
+    def walk(widget: Gtk.Widget) -> None:
+        child = widget.get_first_child()
+        while child is not None:
+            if isinstance(child, Gtk.Label):
+                labels.append(child)
+            walk(child)
+            child = child.get_next_sibling()
+
+    walk(row)
+    return labels
+
+
+def _meta_texts(note: Note, attachment_count: int) -> list[str]:
+    """Return the meta line's label texts left-to-right."""
+    meta = _make_meta_line(note, attachment_count)
+    texts: list[str] = []
+    child = meta.get_first_child()
+    while child is not None:
+        if isinstance(child, Gtk.Label):
+            texts.append(child.get_text())
+        child = child.get_next_sibling()
+    return texts
+
+
+class NoteRowPresentationTests(unittest.TestCase):
+    """Bold title, two-line dim snippet, and the meta line layout."""
+
+    def test_title_label_is_bold_via_css_class(self) -> None:
+        row = _make_note_row(_make_note("a", title="My Title"), 0)
+        labels = _row_labels(row)
+        title_label = labels[0]
+        self.assertEqual(title_label.get_text(), "My Title")
+        self.assertTrue(title_label.has_css_class("note-title"))
+
+    def test_snippet_is_two_lines_dim_and_wrapping(self) -> None:
+        row = _make_note_row(_make_note("a", snippet="Some preview text"), 0)
+        snippet_label = next(
+            label for label in _row_labels(row)
+            if label.has_css_class("note-snippet")
+        )
+        self.assertEqual(snippet_label.get_lines(), 2)
+        self.assertTrue(snippet_label.get_wrap())
+        self.assertEqual(snippet_label.get_ellipsize(), Pango.EllipsizeMode.END)
+
+    def test_row_without_snippet_omits_snippet_label(self) -> None:
+        row = _make_note_row(_make_note("a", snippet=""), 0)
+        self.assertFalse(
+            any(label.has_css_class("note-snippet") for label in _row_labels(row))
+        )
+
+    def test_meta_line_date_only_when_no_attachments(self) -> None:
+        note = _make_note("a", modified_at=datetime(2026, 4, 14, tzinfo=UTC))
+        self.assertEqual(_meta_texts(note, 0), ["Apr 14"])
+
+    def test_meta_line_shows_paperclip_count_separator_and_date(self) -> None:
+        note = _make_note("a", modified_at=datetime(2026, 4, 14, tzinfo=UTC))
+        self.assertEqual(_meta_texts(note, 2), ["\U0001f4ce 2", "|", "Apr 14"])
+
+    def test_meta_count_and_date_share_dim_class(self) -> None:
+        note = _make_note("a")
+        meta = _make_meta_line(note, 3)
+        dim = [
+            child for child in _iter_children(meta)
+            if isinstance(child, Gtk.Label) and child.has_css_class("note-meta")
+        ]
+        # Paperclip-count, separator, and date all carry .note-meta.
+        self.assertEqual(len(dim), 3)
+
+    def test_separator_carries_its_own_low_opacity_class(self) -> None:
+        note = _make_note("a")
+        meta = _make_meta_line(note, 1)
+        separator = next(
+            child for child in _iter_children(meta)
+            if isinstance(child, Gtk.Label) and child.get_text() == "|"
+        )
+        self.assertTrue(separator.has_css_class("note-meta-separator"))
+
+    def test_note_list_wires_counts_from_attachment_store(self) -> None:
+        notes = _FakeNoteRepository()
+        notes.notes["a"] = _make_note("a")
+        store = _FakeAttachmentStore({"a": 4})
+        widget = NoteList(
+            note_repository=notes,
+            notebook_repository=_FakeNotebookRepository(),
+            app_state=AppState(),
+            clock=_fixed_clock,
+            attachment_store=store,
+        )
+        row = widget._row_for_note_id["a"]
+        texts = {label.get_text() for label in _row_labels(row)}
+        self.assertIn("\U0001f4ce 4", texts)
+
+    def test_note_list_without_store_shows_no_paperclip(self) -> None:
+        notes = _FakeNoteRepository()
+        notes.notes["a"] = _make_note("a")
+        widget = NoteList(
+            note_repository=notes,
+            notebook_repository=_FakeNotebookRepository(),
+            app_state=AppState(),
+            clock=_fixed_clock,
+        )
+        row = widget._row_for_note_id["a"]
+        self.assertFalse(
+            any("\U0001f4ce" in label.get_text() for label in _row_labels(row))
+        )
+
+
+def _iter_children(widget: Gtk.Widget) -> list[Gtk.Widget]:
+    """Return a widget's direct children left-to-right."""
+    out: list[Gtk.Widget] = []
+    child = widget.get_first_child()
+    while child is not None:
+        out.append(child)
+        child = child.get_next_sibling()
+    return out
 
 
 @unittest.skipUnless(_display_available(), "no GDK display")

@@ -72,14 +72,14 @@ Principles & invariants
 * The article's :class:`Gtk.TextView` is a private subclass
   :class:`_ArticleTextView` that paints tinted block backgrounds
   (admonition, blockquote, code block) at snapshot time. The
-  paragraph tags from :mod:`notes_app.asciidoc.tag_table` deliberately
+  paragraph tags from :mod:`notes_app.ui.note_render.tag_table` deliberately
   carry only the *text position* (``accumulative-margin = True`` plus
   ``left-margin`` / ``right-margin`` = inset + one M-width); the
   matching tinted *wash* is painted by this subclass via
   :meth:`do_snapshot`. The wash extends one M-width beyond the text
   on each side, producing the visual "padded card" effect that
   ``paragraph-background-rgba`` cannot reproduce on its own — see
-  :class:`notes_app.asciidoc.tag_table.WashSpec` for the per-tag
+  :class:`notes_app.ui.note_render.tag_table.WashSpec` for the per-tag
   parameters. The tag table is therefore built *after* M-width is
   measured (``char_width_px`` is required), and the wash-spec map
   passed to the subclass is keyed by :class:`Gtk.TextTag` objects
@@ -157,12 +157,12 @@ gi.require_version("Gdk", "4.0")
 # pylint: disable=wrong-import-position
 from gi.repository import Gdk, Graphene, Gsk, Gtk  # noqa: E402
 
-from notes_app.asciidoc.tag_table import (
+from notes_app.ui.note_render.tag_table import (
     WashSpec,
     build_tag_table,
     build_wash_specs,
 )
-from notes_app.asciidoc.textbuffer_renderer import TextBufferRenderer
+from notes_app.ui.note_render.textbuffer_renderer import TextBufferRenderer
 from notes_app.config.defaults import (
     ARTICLE_BOTTOM_MARGIN_LINES,
     ARTICLE_INNER_HPADDING_CHARS,
@@ -395,7 +395,7 @@ class _WidgetXMetrics:
 class _ArticleTextView(Gtk.TextView):
     """A :class:`Gtk.TextView` subclass that paints wider washes for tinted block paragraphs.
 
-    The paragraph tags in :mod:`notes_app.asciidoc.tag_table`
+    The paragraph tags in :mod:`notes_app.ui.note_render.tag_table`
     deliberately omit ``paragraph-background-rgba``; this subclass
     paints the matching wash itself via :meth:`do_snapshot`. For every
     visible logical line whose first iter carries a tag listed in the
@@ -562,7 +562,7 @@ def _rgba_from_tint(tint: tuple[float, float, float, float]) -> Gdk.RGBA:
     """Build a :class:`Gdk.RGBA` from a 4-tuple of floats in ``[0, 1]``.
 
     Used by :class:`_ArticleTextView` to translate a
-    :class:`notes_app.asciidoc.tag_table.WashSpec`'s tint into the
+    :class:`notes_app.ui.note_render.tag_table.WashSpec`'s tint into the
     colour type :meth:`Gtk.Snapshot.append_color` expects. A free
     function (rather than a static method on the subclass) so the
     test suite can call it directly when asserting on wash colours.
@@ -966,7 +966,7 @@ class NoteView(Gtk.Box):
 
         # Build the tag table parameterised by the measured M-width so
         # the paragraph margins encode "inset + M-width" — see
-        # :class:`notes_app.asciidoc.tag_table.WashSpec` for the split
+        # :class:`notes_app.ui.note_render.tag_table.WashSpec` for the split
         # between text position (tag margins) and wash position
         # (paint-time, in :class:`_ArticleTextView`).
         tag_table = build_tag_table(char_width_px=char_width_measurer())
@@ -1190,7 +1190,7 @@ class NoteView(Gtk.Box):
         """Adapter for the renderer's ``WidgetAttacher`` contract.
 
         :data:`WidgetAttacher` (defined in
-        :mod:`notes_app.asciidoc.textbuffer_renderer`) is
+        :mod:`notes_app.ui.note_render.textbuffer_renderer`) is
         ``Callable[[Gtk.TextChildAnchor, Gtk.Widget], None]`` —
         anchor first, widget second — because anchor *creation* is
         the renderer's first step. :meth:`Gtk.TextView.add_child_at_anchor`

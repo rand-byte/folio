@@ -5,8 +5,9 @@ from __future__ import annotations
 import unittest
 from datetime import UTC, datetime, timedelta, timezone
 
-from notes_app.config.defaults import SEED_NOTEBOOK_ID_PERSONAL
-from notes_app.models.note import Note, derive_snippet, derive_title
+from notes_app.config.defaults import SEED_NOTEBOOK_ID_PERSONAL, UNTITLED
+from notes_app.asciidoc.summary import derive_summary
+from notes_app.models.note import Note
 from notes_app.storage.database import Database
 from notes_app.storage.migrations import apply_pending
 from notes_app.storage.note_repository import NoteRepository
@@ -23,15 +24,20 @@ def _make_note(
     created_at: datetime | None = None,
     modified_at: datetime | None = None,
 ) -> Note:
-    """Build a :class:`Note` with derived title/snippet for tests."""
+    """Build a :class:`Note` with derived title/snippet for tests.
+
+    The title/snippet match what the repository would derive on insert,
+    so the in-memory note and the stored row agree.
+    """
     when = created_at if created_at is not None else _FIXED_NOW
     mod = modified_at if modified_at is not None else when
+    summary = derive_summary(source)
     return Note(
         id=note_id,
-        title=derive_title(source),
+        title=summary.title,
         notebook_id=notebook_id,
         source=source,
-        snippet=derive_snippet(source),
+        snippet=summary.snippet,
         created_at=when,
         modified_at=mod,
     )
@@ -253,9 +259,10 @@ class UpdateSourceTests(_NoteRepoTestBase):
         self.repo.update_source("n1", new_source, new_modified)
 
         fetched = self.repo.get("n1")
+        expected = derive_summary(new_source)
         self.assertEqual(fetched.source, new_source)
-        self.assertEqual(fetched.title, derive_title(new_source))
-        self.assertEqual(fetched.snippet, derive_snippet(new_source))
+        self.assertEqual(fetched.title, expected.title)
+        self.assertEqual(fetched.snippet, expected.snippet)
         self.assertEqual(fetched.modified_at, new_modified)
 
     def test_update_source_preserves_created_at(self) -> None:
@@ -279,7 +286,7 @@ class UpdateSourceTests(_NoteRepoTestBase):
         self.repo.update_source(
             "n1", "no heading here", datetime(2026, 6, 1, tzinfo=UTC)
         )
-        self.assertEqual(self.repo.get("n1").title, derive_title("no heading here"))
+        self.assertEqual(self.repo.get("n1").title, UNTITLED)
 
 
 class UpdateNotebookTests(_NoteRepoTestBase):

@@ -367,6 +367,9 @@ class _FakeAttachmentStore:
     def get_bytes(self, attachment_id: str) -> bytes:
         return self._blobs[attachment_id]
 
+    def count_for_note(self, note_id: str) -> int:
+        return sum(1 for m in self.metadata.values() if m.note_id == note_id)
+
 
 class _FakeRenderer:
     """Minimal :class:`RendererProtocol` implementation that records
@@ -469,8 +472,11 @@ class StructuralConformanceTests(unittest.TestCase):
         self.assertEqual(att.note_id, "n1")
         self.assertEqual(proto.list_for_note("n1"), [att])
         self.assertEqual(proto.get_bytes(att.id), b"")
+        self.assertEqual(proto.count_for_note("n1"), 1)
+        self.assertEqual(proto.count_for_note("other"), 0)
         proto.remove(att.id)
         self.assertEqual(proto.list_for_note("n1"), [])
+        self.assertEqual(proto.count_for_note("n1"), 0)
 
     def test_renderer_signature_round_trip(self) -> None:
         # The renderer fake is bound to RendererProtocol so any drift

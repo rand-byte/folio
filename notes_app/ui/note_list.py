@@ -58,7 +58,7 @@ Principles & invariants
 
 from __future__ import annotations
 
-from collections.abc import Callable
+from collections.abc import Callable, Iterable
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Final
@@ -83,6 +83,7 @@ from notes_app.search.note_filter import (
     sort_notes,
 )
 from notes_app.storage.protocols import (
+    AttachmentStoreProtocol,
     NoteRepositoryProtocol,
     NotebookRepositoryProtocol,
 )
@@ -146,8 +147,28 @@ _DEFAULT_SORT_KEY: Final[NoteSortKey] = NoteSortKey.MODIFIED
 _HEADER_SPACING_PX: Final[int] = 6
 _ROW_SPACING_PX: Final[int] = 4
 _ROW_PADDING_PX: Final[int] = 8
+_META_SPACING_PX: Final[int] = 4
+"""Horizontal gap between the meta line's paperclip, separator, and date."""
 _DEFAULT_PANE_WIDTH_PX: Final[int] = 320
 """Initial width hint for the note-list pane in :class:`MainWindow`."""
+
+_TITLE_CSS_CLASS: Final[str] = "note-title"
+"""CSS class bolding the row title (font weight only — palette-safe)."""
+
+_SNIPPET_CSS_CLASS: Final[str] = "note-snippet"
+"""CSS class dimming the two-line row snippet (opacity only)."""
+
+_META_CSS_CLASS: Final[str] = "note-meta"
+"""CSS class dimming the meta line (count + separator + date), opacity only."""
+
+_META_SEPARATOR_CSS_CLASS: Final[str] = "note-meta-separator"
+"""Extra CSS class for the meta separator's own low-opacity treatment."""
+
+_PAPERCLIP: Final[str] = "\U0001f4ce"
+"""Paperclip glyph (📎) prefixing the attachment count when positive."""
+
+_META_SEPARATOR: Final[str] = "|"
+"""Literal separator drawn between the attachment count and the date."""
 
 _MONTH_ABBREVIATIONS: Final[tuple[str, ...]] = (
     "Jan", "Feb", "Mar", "Apr", "May", "Jun",
@@ -351,6 +372,7 @@ class NoteList(Gtk.Box):  # pylint: disable=too-many-instance-attributes
     _notebook_repository: NotebookRepositoryProtocol
     _app_state: AppState
     _clock: ClockFn
+    _attachment_store: AttachmentStoreProtocol | None
 
     _title_label: Gtk.Label
     _count_label: Gtk.Label
@@ -361,19 +383,21 @@ class NoteList(Gtk.Box):  # pylint: disable=too-many-instance-attributes
     _sort_key: NoteSortKey
     _row_for_note_id: dict[str, _NoteListRow]
 
-    def __init__(
+    def __init__(  # pylint: disable=too-many-arguments
         self,
         *,
         note_repository: NoteRepositoryProtocol,
         notebook_repository: NotebookRepositoryProtocol,
         app_state: AppState,
         clock: ClockFn = _default_clock,
+        attachment_store: AttachmentStoreProtocol | None = None,
     ) -> None:
         super().__init__(orientation=Gtk.Orientation.VERTICAL, spacing=0)
         self._note_repository = note_repository
         self._notebook_repository = notebook_repository
         self._app_state = app_state
         self._clock = clock
+        self._attachment_store = attachment_store
         self._sort_key = _DEFAULT_SORT_KEY
         self._row_for_note_id = {}
 
@@ -484,12 +508,18 @@ class NoteList(Gtk.Box):  # pylint: disable=too-many-instance-attributes
 
         self._count_label.set_text(str(len(notes)))
 
+        # Per-note attachment counts for the row meta line. A single
+        # COUNT(*) per visible note keeps the badge off the BLOB path
+        # entirely; with no store wired (some tests) every count is 0
+        # and no paperclip is shown.
+        counts = self._attachment_counts(notes)
+
         # Rebuild rows from scratch. ``remove_all`` clears the
         # ListBox; the row-for-note-id index is rebuilt as we go.
         self._list_box.remove_all()
         self._row_for_note_id = {}
         for note in notes:
-            row = _make_note_row(note)
+            row = _make_note_row(note, counts[note.id])
             self._row_for_note_id[note.id] = row
             self._list_box.append(row)
 
@@ -507,6 +537,20 @@ class NoteList(Gtk.Box):  # pylint: disable=too-many-instance-attributes
         the active sort (e.g. a future status-bar indicator).
         """
         return self._sort_key
+
+    def _attachment_counts(self, notes: Iterable[Note]) -> dict[str, int]:
+        """Map each note id to its attachment count for the meta line.
+
+        Sourced through the store the widget already holds rather than
+        by threading a new parameter into :func:`compute_display_notes`
+        (which keeps that free function's signature — and its existing
+        ``too-many-arguments`` suppression — untouched). With no store
+        wired, every count is 0.
+        """
+        store = self._attachment_store
+        if store is None:
+            return {note.id: 0 for note in notes}
+        return {note.id: store.count_for_note(note.id) for note in notes}
 
     # ------------------------------------------------------------------
     # Signal handlers
@@ -575,18 +619,23 @@ class NoteList(Gtk.Box):  # pylint: disable=too-many-instance-attributes
 # ---------------------------------------------------------------------------
 
 
-def _make_note_row(note: Note) -> _NoteListRow:
+def _make_note_row(note: Note, attachment_count: int) -> _NoteListRow:
     """Build a single note-list row.
 
-    Layout per row:
+    Layout per row (top to bottom):
 
-    * Top: title (bold-ish via CSS later; just plain in step 9).
-    * Middle: snippet, ellipsised at the end.
-    * Bottom: short date.
+    * Title — bold, single line, end-ellipsised (``.note-title``).
+    * Snippet — up to two wrapped lines, dimmed, end-ellipsised
+      (``.note-snippet``); omitted entirely when the note has none.
+    * Meta line — right-aligned ``📎 N | <date>``. The paperclip and
+      count appear only when ``attachment_count`` is positive; the date
+      always shows. The count, separator, and date are dimmed via CSS
+      (palette-safe — opacity only, no colour).
 
-    The row carries a :class:`_NoteRowPayload` so the click handler
-    on the list-box can recover the note id without walking back
-    through the model.
+    ``attachment_count`` is the note's number of attachments, surfaced
+    by :class:`NoteList` from the attachment store. The row carries a
+    :class:`_NoteRowPayload` so the click handler on the list-box can
+    recover the note id without walking back through the model.
     """
     box = Gtk.Box.new(Gtk.Orientation.VERTICAL, _ROW_SPACING_PX)
     box.set_margin_start(_ROW_PADDING_PX)
@@ -598,24 +647,54 @@ def _make_note_row(note: Note) -> _NoteListRow:
     title_label.set_halign(Gtk.Align.START)
     title_label.set_hexpand(True)
     title_label.set_ellipsize(Pango.EllipsizeMode.END)
+    title_label.add_css_class(_TITLE_CSS_CLASS)
     box.append(title_label)
 
     if note.snippet:
         snippet_label = Gtk.Label.new(note.snippet)
         snippet_label.set_halign(Gtk.Align.START)
+        snippet_label.set_xalign(0.0)
         snippet_label.set_hexpand(True)
+        # Two wrapped lines with an end ellipsis: enough to preview the
+        # lead sentence without letting the row height run away.
+        snippet_label.set_wrap(True)
+        snippet_label.set_wrap_mode(Pango.WrapMode.WORD_CHAR)
+        snippet_label.set_lines(2)
         snippet_label.set_ellipsize(Pango.EllipsizeMode.END)
-        # Keep the snippet on a single line — multi-line snippets
-        # would make the row height unpredictable, which the
-        # design's compact card layout deliberately avoids.
-        snippet_label.set_lines(1)
+        snippet_label.add_css_class(_SNIPPET_CSS_CLASS)
         box.append(snippet_label)
 
-    date_label = Gtk.Label.new(format_date_short(note.modified_at))
-    date_label.set_halign(Gtk.Align.START)
-    box.append(date_label)
+    box.append(_make_meta_line(note, attachment_count))
 
     return _NoteListRow(
         payload=_NoteRowPayload(note_id=note.id),
         child=box,
     )
+
+
+def _make_meta_line(note: Note, attachment_count: int) -> Gtk.Box:
+    """Build the right-aligned ``📎 N | <date>`` meta line for a row.
+
+    When ``attachment_count`` is zero the line is just the date (no
+    leading separator). The paperclip-count and separator share the
+    date's dim treatment; the separator additionally carries its own
+    low-opacity class.
+    """
+    meta = Gtk.Box.new(Gtk.Orientation.HORIZONTAL, _META_SPACING_PX)
+    meta.set_halign(Gtk.Align.END)
+
+    if attachment_count > 0:
+        clip_label = Gtk.Label.new(f"{_PAPERCLIP} {attachment_count}")
+        clip_label.add_css_class(_META_CSS_CLASS)
+        meta.append(clip_label)
+
+        separator_label = Gtk.Label.new(_META_SEPARATOR)
+        separator_label.add_css_class(_META_CSS_CLASS)
+        separator_label.add_css_class(_META_SEPARATOR_CSS_CLASS)
+        meta.append(separator_label)
+
+    date_label = Gtk.Label.new(format_date_short(note.modified_at))
+    date_label.add_css_class(_META_CSS_CLASS)
+    meta.append(date_label)
+
+    return meta

@@ -14,8 +14,8 @@ gi.require_version("Gtk", "4.0")
 # pylint: disable=wrong-import-position
 from gi.repository import Gdk, Gio, Gtk  # noqa: E402
 
-from notes_app.asciidoc.tag_table import TagName, build_tag_table
-from notes_app.asciidoc.textbuffer_renderer import TextBufferRenderer
+from notes_app.ui.note_render.tag_table import TagName, build_tag_table
+from notes_app.ui.note_render.textbuffer_renderer import TextBufferRenderer
 from notes_app.ui.link_handler import (
     LinkHandler,
     UriLauncherProtocol,

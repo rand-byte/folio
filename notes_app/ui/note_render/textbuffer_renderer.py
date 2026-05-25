@@ -119,7 +119,7 @@ from notes_app.asciidoc.ast import (
     UnorderedList,
 )
 from notes_app.asciidoc.parser import parse
-from notes_app.asciidoc.tag_table import (
+from notes_app.ui.note_render.tag_table import (
     TagName,
     admonition_body_tag_name,
     admonition_kind_tag_name,

@@ -1,11 +1,17 @@
-"""AsciiDoc lexer, parser, AST, and TextBuffer renderer.
+"""AsciiDoc lexer, parser, AST, and summary — a pure format library.
 
-The ``lexer``, ``inline_parser``, ``parser``, and ``ast`` sub-modules are
-pure (text → AST, no GTK, no storage). The ``textbuffer_renderer`` is the
-one place in this package that imports ``gi`` because it has to populate a
-``Gtk.TextBuffer`` and instantiate child widgets — it still does no I/O,
-since image bytes are supplied by an injected resolver.
+The ``lexer``, ``inline_parser``, ``parser``, ``ast``, and ``summary``
+sub-modules are pure: they turn text into an AST (and the AST into a
+note-list summary) with no GTK and no storage dependency. The package
+imports only ``enums``, ``models``, and ``config``, which makes it
+reusable by any non-view consumer — the note-list summary today, a
+future export or structure-aware index tomorrow.
 
-Populated by build-order steps 4 (core grammar), 6 (renderer), 13 (links
-and monospace), 14 (tables), and 15 (admonitions and blockquotes).
+The GTK ``TextBuffer`` renderer and its tag table, which used to live
+here as the package's only ``gi`` consumers, now live under
+:mod:`notes_app.ui.note_render`; the GtkSourceView editor grammar lives
+under :mod:`notes_app.ui`. Nothing in this package imports ``gi`` or
+``storage``.
 """
+
+from __future__ import annotations

@@ -13,10 +13,12 @@ Principles & invariants
   never escape this module.
 * Timestamps are persisted as ISO-8601 strings (timezone-aware UTC).
   Round-trip is :meth:`datetime.isoformat` / :meth:`datetime.fromisoformat`.
-* Title and snippet are derived from the source in :meth:`update_source`
-  so the cached columns track the source. :meth:`insert` accepts pre-
-  derived title and snippet from the caller — typically the controller,
-  which already had to compute them while constructing the dataclass.
+* Title and snippet are derived from the source via
+  :func:`notes_app.asciidoc.summary.derive_summary` in both
+  :meth:`insert` and :meth:`update_source`, so this repository is the
+  single owner of the ``source -> cached columns`` mapping. The
+  dataclass's own ``title`` / ``snippet`` fields are advisory only on
+  insert — the columns always reflect a fresh derive from ``source``.
 * Methods that target a specific note (:meth:`get`, :meth:`update_source`,
   :meth:`update_notebook`, :meth:`delete`) raise :class:`KeyError` when
   the id is unknown. This matches the dict-like in-memory fake used by
@@ -38,7 +40,8 @@ import sqlite3
 from datetime import datetime
 from typing import Final
 
-from notes_app.models.note import Note, derive_snippet, derive_title
+from notes_app.asciidoc.summary import derive_summary
+from notes_app.models.note import Note
 from notes_app.storage.database import Database
 
 
@@ -112,6 +115,12 @@ class NoteRepository:
         return [_row_to_note(row) for row in cursor.fetchall()]
 
     def insert(self, note: Note) -> None:
+        # Title and snippet are derived here from the note's source, not
+        # taken from the dataclass fields, so the repository is the one
+        # and only place that maps source to the cached columns (the same
+        # invariant ``update_source`` upholds). ``derive_summary`` never
+        # raises, so an unparseable in-progress note is still insertable.
+        summary = derive_summary(note.source)
         with self._db.transaction() as connection:
             connection.execute(
                 "INSERT INTO notes "
@@ -120,10 +129,10 @@ class NoteRepository:
                 "VALUES (?, ?, ?, ?, ?, ?, ?)",
                 (
                     note.id,
-                    note.title,
+                    summary.title,
                     note.notebook_id,
                     note.source,
-                    note.snippet,
+                    summary.snippet,
                     note.created_at.isoformat(),
                     note.modified_at.isoformat(),
                 ),
@@ -138,7 +147,9 @@ class NoteRepository:
         # Title and snippet are derived here, not in the controller, so
         # there is exactly one place that owns the "source -> cached
         # columns" mapping. A controller change can never forget to
-        # update one of them.
+        # update one of them. ``derive_summary`` parses once and never
+        # raises, so a mid-edit unparseable note stays saveable.
+        summary = derive_summary(source)
         with self._db.transaction() as connection:
             cursor = connection.execute(
                 "UPDATE notes "
@@ -146,8 +157,8 @@ class NoteRepository:
                 "WHERE id = ?",
                 (
                     source,
-                    derive_title(source),
-                    derive_snippet(source),
+                    summary.title,
+                    summary.snippet,
                     modified_at.isoformat(),
                     note_id,
                 ),

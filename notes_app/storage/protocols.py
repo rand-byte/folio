@@ -8,7 +8,7 @@ Principles & invariants
   from a higher layer (controllers, ui), and at runtime it never imports
   ``gi`` or ``sqlite3``. Concrete implementations live in sibling modules
   (``note_repository.py``, ``notebook_repository.py``,
-  ``attachment_store.py``, ``asciidoc/textbuffer_renderer.py``) and depend
+  ``attachment_store.py``, ``ui/note_render/textbuffer_renderer.py``) and depend
   on this module — never the other way round.
 * Every method signature uses **specific** parameter and return types —
   no ``Any``, no ``object``. The protocol *is* the contract; vague types
@@ -237,12 +237,21 @@ class AttachmentStoreProtocol(Protocol):
         :meth:`list_for_note` instead.
         """
 
+    def count_for_note(self, note_id: str) -> int:
+        """Return how many attachments ``note_id`` has.
+
+        A pure ``SELECT COUNT(*)`` — it materialises neither
+        :class:`Attachment` objects nor BLOBs, so the note-list pane can
+        surface a per-note attachment badge cheaply without touching the
+        metadata/bytes split that the rest of this protocol enforces.
+        """
+
 
 class RendererProtocol(Protocol):
     """The high-level surface controllers and the note view depend on.
 
     Concrete renderers (currently
-    :mod:`notes_app.asciidoc.textbuffer_renderer`) take an
+    :mod:`notes_app.ui.note_render.textbuffer_renderer`) take an
     :data:`ImageBytesResolver` and a :data:`ColumnWidthResolver` at
     construction so this protocol does not have to expose them — the
     protocol describes the call surface, not ``__init__``.

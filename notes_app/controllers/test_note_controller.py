@@ -19,7 +19,8 @@ from notes_app.enums import (
     SmartFilter,
 )
 from notes_app.models.attachment import Attachment
-from notes_app.models.note import Note, derive_snippet, derive_title
+from notes_app.asciidoc.summary import derive_summary
+from notes_app.models.note import Note
 from notes_app.search.note_filter import (
     NotebookSelection,
     SmartSelection,
@@ -87,8 +88,8 @@ class _FakeNoteRepository:
     Implements the dataclass-based contract that production code
     follows: returns frozen :class:`Note` instances, raises
     :class:`KeyError` for missing ids, recomputes ``title`` and
-    ``snippet`` inside :meth:`update_source` so the storage-layer
-    invariant is honoured here too.
+    ``snippet`` inside :meth:`update_source` via ``derive_summary`` so
+    the storage-layer invariant is honoured here too.
     """
 
     notes: dict[str, Note]
@@ -144,12 +145,13 @@ class _FakeNoteRepository:
         # Storage layer recomputes title/snippet; the fake mirrors that
         # so callers see the same observable behaviour.
         existing = self.notes[note_id]
+        summary = derive_summary(source)
         self.notes[note_id] = Note(
             id=existing.id,
-            title=derive_title(source),
+            title=summary.title,
             notebook_id=existing.notebook_id,
             source=source,
-            snippet=derive_snippet(source),
+            snippet=summary.snippet,
             created_at=existing.created_at,
             modified_at=modified_at,
         )
@@ -227,6 +229,9 @@ class _FakeAttachmentStore:
     def get_bytes(self, attachment_id: str) -> bytes:
         _ = attachment_id
         return b""
+
+    def count_for_note(self, note_id: str) -> int:
+        return sum(1 for m in self.metadata.values() if m.note_id == note_id)
 
 
 class _SignalRecorder:

@@ -47,13 +47,13 @@ Layers may only import **downward**. Every arrow below points from caller to cal
                           │      ┌──────────────┘
                           ▼      ▼
                   ┌──────────────────────────────────┐
-    asciidoc  ────│ notes_app.asciidoc               │  pure parsing + GTK renderer
-   (text→AST)     │   lexer → inline_parser → parser │  (renderer + tag_table are the
-   (AST→buffer)   │   → ast → textbuffer_renderer    │   only GTK consumers here)
+      storage ────│ notes_app.storage (SQLite impls) │  imports sqlite3 + asciidoc
                   └─────────────────┬────────────────┘
                                     ▼
                   ┌──────────────────────────────────┐
-      storage ────│ notes_app.storage (SQLite impls) │  imports sqlite3
+    asciidoc  ────│ notes_app.asciidoc (pure core)   │  text→AST→summary; no GTK,
+   (text→AST)     │   lexer → inline_parser → parser │  no storage. The GTK renderer
+   (AST→summary)  │   → ast → summary                │  now lives in ui/note_render.
                   └─────────────────┬────────────────┘
                                     ▼
                   ┌──────────────────────────────────┐
@@ -73,15 +73,14 @@ Layers may only import **downward**. Every arrow below points from caller to cal
 | `enums` | nothing internal | anything else (it must stay leaf) |
 | `models` | `enums` | `storage`, `controllers`, `ui`, `asciidoc`, `search` |
 | `config` | `enums`, `models` | `storage`, `controllers`, `ui`, `asciidoc` |
-| `asciidoc` (pure: `ast`, `lexer`, `inline_parser`, `parser`) | `enums`, `models`, `config` | `storage` (concrete), `controllers`, `ui`, `gi` |
-| `asciidoc.textbuffer_renderer`, `asciidoc.tag_table` | the above + `gi` + `storage.protocols` (type aliases) | concrete `storage`, `controllers`, `ui` |
+| `asciidoc` (pure: `ast`, `lexer`, `inline_parser`, `parser`, `summary`) | `enums`, `models`, `config` | `storage`, `controllers`, `ui`, `gi`, `storage.protocols` |
 | `storage.protocols` | `enums`, `models` (uses `gi` only in `TYPE_CHECKING`) | everything else |
-| `storage` (concrete) | `enums`, `models`, `config`, `storage.protocols`, `sqlite3` | `gi`, `controllers`, `ui` |
+| `storage` (concrete) | `enums`, `models`, `config`, `storage.protocols`, `sqlite3`, `asciidoc` (pure core, for `derive_summary`) | `gi`, `controllers`, `ui` |
 | `search` | `enums`, `models` | `storage` (concrete), `controllers`, `ui`, `gi` |
 | `controllers` | `enums`, `models`, `config`, `search`, `storage.protocols`, `gi` (for `GObject`) | concrete `storage`, `ui` |
 | `ui` | everything below | — |
 
-**`gi` (GTK) is allowed only in:** `ui/*`, `controllers/*` (for `GObject` signals), `asciidoc/textbuffer_renderer.py`, `asciidoc/tag_table.py`. Anywhere else it is a bug.
+**`gi` (GTK) is allowed only in:** `ui/*` (including `ui/note_render/*`) and `controllers/*` (for `GObject` signals). Anywhere else — including the whole of `asciidoc/*`, now a pure format library — it is a bug.
 
 ---
 
@@ -90,21 +89,22 @@ Layers may only import **downward**. Every arrow below points from caller to cal
 | Change | Start here | Likely also touches |
 | --- | --- | --- |
 | Add a new enum value (icon, link scheme, etc.) | `notes_app/enums.py` | any consumer that pattern-matches the enum; for `StrEnum`s persisted to disk, also add a migration |
-| Add a new AsciiDoc construct | `asciidoc/ast.py` (new node) → `asciidoc/lexer.py` → `asciidoc/parser.py` → `asciidoc/textbuffer_renderer.py` → `asciidoc/tag_table.py` (new tag) → `asciidoc/language_spec.lang` (editor highlight) (purely structural inline nodes — e.g. `SoftBreak`, the parser-emitted soft-line-break joiner — skip the lexer and `language_spec.lang` and need only the AST union plus both renderer dispatch ladders) | `enums.py` (new `NodeKind`, possibly `ParseErrorKind`) |
+| Add a new AsciiDoc construct | `asciidoc/ast.py` (new node) → `asciidoc/lexer.py` → `asciidoc/parser.py` → `ui/note_render/textbuffer_renderer.py` → `ui/note_render/tag_table.py` (new tag) → `ui/language_spec.lang` (editor highlight) → **decide its snippet treatment in `asciidoc/summary.py`** (the `match` over `BlockNode`/`InlineNode` is exhaustive, so an unhandled new kind is a type error there). Purely structural inline nodes — e.g. `SoftBreak`, the parser-emitted soft-line-break joiner — skip the lexer and `language_spec.lang` and need only the AST union plus both renderer dispatch ladders and the summary flattener. | `enums.py` (new `NodeKind`, possibly `ParseErrorKind`) |
 | Add a parse error variant | `notes_app/enums.py` `ParseErrorKind` → the parser site that detects it → `parser.py` tests | gutter rendering in `ui/note_view.py` |
 | Change DB schema | **new** `Migration` appended to `storage/migrations.py` `ALL_MIGRATIONS` — never edit a shipped one | the repository that reads/writes the new column |
 | Add a note-level user action | `controllers/note_controller.py` (mutate + emit signal) → caller in `ui/toolbar.py` or `ui/note_editor.py` | repository protocol if storage shape changes |
 | Add a notebook-level user action | `controllers/notebook_controller.py` → caller in `ui/sidebar.py` | `storage/notebook_repository.py` if storage shape changes |
-| Change rendered-view styling | `asciidoc/tag_table.py` (tag definitions) — every visual style lives in exactly one place, including block-level paragraph styling for admonitions / blockquotes / code blocks. Block-level *tints* are painted at snapshot time by `_ArticleTextView` in `ui/note_view.py`, driven by `tag_table.build_wash_specs()` — see the next row for the constants. | rarely `asciidoc/textbuffer_renderer.py` for layout (only table sizing escapes to widget land) |
-| Change block-level tint colours or insets | `asciidoc/tag_table.py` — `_ADMONITION_TINTS`, `_BLOCKQUOTE_TINT`, `_CODE_BLOCK_TINT` for colours; `_ADMONITION_HMARGIN_PX`, `_BLOCKQUOTE_HMARGIN_PX`, `_BLOCKQUOTE_RIGHT_MARGIN_PX`, `_CODE_BLOCK_HMARGIN_PX` for insets. The same constants feed both the paragraph tag margins (text position, `accumulative-margin = True`) and the `WashSpec` records (wash painter), so the two cannot drift. | `test_tag_table.py` `WashSpecTests`, `test_note_view.py` `ArticleTextViewWashRectTests` |
+| Change rendered-view styling | `ui/note_render/tag_table.py` (tag definitions) — every visual style lives in exactly one place, including block-level paragraph styling for admonitions / blockquotes / code blocks. Block-level *tints* are painted at snapshot time by `_ArticleTextView` in `ui/note_view.py`, driven by `tag_table.build_wash_specs()` — see the next row for the constants. | rarely `ui/note_render/textbuffer_renderer.py` for layout (only table sizing escapes to widget land) |
+| Change block-level tint colours or insets | `ui/note_render/tag_table.py` — `_ADMONITION_TINTS`, `_BLOCKQUOTE_TINT`, `_CODE_BLOCK_TINT` for colours; `_ADMONITION_HMARGIN_PX`, `_BLOCKQUOTE_HMARGIN_PX`, `_BLOCKQUOTE_RIGHT_MARGIN_PX`, `_CODE_BLOCK_HMARGIN_PX` for insets. The same constants feed both the paragraph tag margins (text position, `accumulative-margin = True`) and the `WashSpec` records (wash painter), so the two cannot drift. | `test_tag_table.py` `WashSpecTests`, `test_note_view.py` `ArticleTextViewWashRectTests` |
 | Tune article column margins | `config/defaults.py` (the three `ARTICLE_*` multipliers) | none — `ui/note_view.py` reads the constants once at `NoteView.__init__` and applies them to the inner `Gtk.TextView`'s four margins |
 | Change rendered-view layout sizing | `ui/note_view.py` `ArticleContainer` — note that it must remain a `Gtk.Widget` subclass; `Gtk.Box` silently disables `do_measure`/`do_size_allocate` overrides because its `BoxLayout` layout manager intercepts them. Because it is a bare `Gtk.Widget` that parents its child by hand (`set_parent`), it must also unparent that child at teardown or GTK warns *"Finalizing … but it still has children left"*; PyGObject does not expose `dispose`, so it does this from `do_unroot` (rooted/production teardown) plus a `__del__` net (never-rooted standalone instances, e.g. tests), both via the guarded `_release_child` | `ui/test_note_view.py` `ArticleContainer*` tests (incl. `ArticleContainerTeardownTests`) |
 | Change application chrome / CSS | `ui/css/app.css` | bumping `pyproject.toml` `package-data` if a new asset is added |
 | Change the initial window size | `ui/main_window.py` — height is `_DEFAULT_WINDOW_HEIGHT_PX`; width is computed by `_default_window_width(...)` from `_SIDEBAR_INITIAL_POSITION_PX` + `_NOTE_LIST_INITIAL_POSITION_PX` + `_PANED_HANDLE_ALLOWANCE_PX` + the rendered article column + `_ARTICLE_SIDE_SLACK_PX`, clamped up to `_MIN_DEFAULT_WINDOW_WIDTH_PX`. The column term is `NoteView.preferred_column_width_px()`, so the default width tracks the body font and the column always opens fully visible / centred rather than overflowing into a horizontal scroll. | `ui/test_main_window.py` `DefaultWindowWidthTests` + `test_constructs_and_reports_default_size`; `ui/test_note_view.py` `NoteViewPreferredColumnWidthTests` |
-| Change source-editor syntax highlight | `asciidoc/language_spec.lang` (GtkSourceView grammar) | nothing else; the file is data |
+| Change source-editor syntax highlight | `ui/language_spec.lang` (GtkSourceView grammar) | nothing else; the file is data |
 | Tune a constant (sizes, quotas) | `config/defaults.py` | none — that is the point of this module |
 | Change paths / XDG behaviour | `config/paths.py` | tests under `config/test_paths.py` |
 | Add a new sort key / smart filter | `enums.py` (`NoteSortKey` / `SmartFilter`) → `search/note_filter.py` → `ui/note_list.py` (dropdown) | tests in `search/test_note_filter.py` |
+| Change the note-list row title/snippet | the *derivation* in `asciidoc/summary.py` (`derive_summary`); the *presentation* in `ui/note_list.py` `_make_note_row` + classes in `ui/css/app.css` (`.note-title` / `.note-snippet` / `.note-meta`) | `storage/note_repository.py` only if the cached-column contract changes; a backfill migration if existing rows must be rewritten |
 | Change selection / view-mode plumbing | `controllers/app_state.py` (add a field + signal). Every UI widget that reacts to it. **The MainWindow's `_on_view_mode_changed` handler is the single place that orchestrates editor-flush + view-refresh across the toggle — see the corresponding invariant in `ui/main_window.py`.** | every UI widget that reacts to it |
 | Add a new dialog | `ui/dialogs.py` | the controller or widget that opens it |
 | Change link/URL handling | `ui/link_handler.py`; allowlist in `enums.LinkScheme` | `asciidoc/inline_parser.py` for scheme validation |
@@ -128,21 +128,21 @@ Test files (`test_*.py`) sit next to their subject — `test_M.py` covers `M.py`
 
 | File | LOC | One-line summary |
 | --- | ---: | --- |
-| `defaults.py` | 187 | Tunable constants (`MAX_ATTACHMENT_BYTES`, `TARGET_CHARS_PER_LINE`, and the three `ARTICLE_*` margin multipliers `ARTICLE_TOP_MARGIN_LINES` / `ARTICLE_BOTTOM_MARGIN_LINES` / `ARTICLE_INNER_HPADDING_CHARS`) and the seed `SEED_NOTEBOOKS` / `SEED_WELCOME_NOTE_SOURCE` written by the v1 migration. |
+| `defaults.py` | 205 | Tunable constants (`MAX_ATTACHMENT_BYTES`, `TARGET_CHARS_PER_LINE`, the three `ARTICLE_*` margin multipliers, plus `SNIPPET_MAX_CHARS` and `UNTITLED` consumed by `asciidoc/summary.py`) and the seed `SEED_NOTEBOOKS` / `SEED_WELCOME_NOTE_SOURCE`. |
 | `paths.py` | 76 | `data_directory()`, `database_path()` — XDG-aware filesystem resolution. Each call is pure; mkdir is the only side effect. |
 
 ### `notes_app/models/` — frozen dataclasses
 
 | File | LOC | One-line summary |
 | --- | ---: | --- |
-| `note.py` | 162 | `Note` dataclass + pure `derive_title` / `derive_snippet`. The dataclass is frozen; updates produce new instances via the repository. |
+| `note.py` | 79 | `Note` dataclass + the frozen `NoteSummary` `(title, snippet)` value type. Both are frozen; updates produce new instances via the repository. Derivation lives in `asciidoc/summary.py`, not here (single classifier). |
 | `notebook.py` | 53 | `Notebook` dataclass. Two-level hierarchy invariant is enforced in `storage`, not here. |
 | `attachment.py` | 56 | `Attachment` metadata — deliberately has **no `data` field**; bytes live only in the `attachments.data` BLOB column. |
 | `parse_error.py` | 58 | `ParseError`, the **only** exception type raised by the AsciiDoc lexer / parser / inline parser. Carries `kind: ParseErrorKind` + `line` + `column`. |
 
-### `notes_app/asciidoc/` — text ⇒ AST ⇒ TextBuffer
+### `notes_app/asciidoc/` — text ⇒ AST ⇒ summary
 
-The pipeline. Everything from `lexer` through `parser` is pure (no GTK, no I/O). The renderer is the one place that imports `gi`.
+A **pure** format library: every module is GTK-free and storage-free, importing only `enums` / `models` / `config`. The GTK `TextBuffer` renderer and tag table moved to `ui/note_render/`; the editor grammar moved to `ui/`.
 
 | File | LOC | One-line summary |
 | --- | ---: | --- |
@@ -150,9 +150,7 @@ The pipeline. Everything from `lexer` through `parser` is pure (no GTK, no I/O).
 | `inline_parser.py` | 790 | `parse_inline(line, line_no) -> tuple[InlineNode, ...]`. **Strict** — every formatting marker must be paired; otherwise raises `ParseErrorKind.BAD_INLINE_SPAN` (or `UNTERMINATED_MONOSPACE`). |
 | `parser.py` | 1353 | `parse(source) -> Document`. Recursive-descent, strict, exhaustive over tokens. Each syntactic failure maps to a specific `ParseErrorKind`. |
 | `ast.py` | 434 | Frozen dataclasses for every AST node (`Document`, `Section`, `Paragraph`, `OrderedList`, …, `Bold`, `Italic`, `Link`, …). Children are `tuple[...]` for true immutability. `BlockNode` and `InlineNode` are closed unions. |
-| `tag_table.py` | 379 | Builds the shared `Gtk.TextTagTable`. **Every visual style lives here, exactly once.** Tag names are exposed as `TagName` enum members. Holds inline styles (bold / italic / strikethrough / underline / monospace / link), heading styles, **plus the paragraph-tag styling for admonitions (per-kind label and body tags + a kind-label character tag), blockquotes (body + attribution), and code blocks** — all the block-level styling that used to live in widget builders. Block-level tags carry only the *text position* (`accumulative-margin = True`); the matching tinted wash is painted by `_ArticleTextView` in `ui/note_view.py` using `build_wash_specs()`. |
-| `textbuffer_renderer.py` | 869 | `TextBufferRenderer.render_into(document, buffer, ...)`. Image bytes flow through an injected `ImageBytesResolver`. Rebuilds the buffer from scratch on each call. **Block-level constructs render as styled paragraphs in the buffer wherever the styling primitive set allows; only tables escape to an anchored widget** (which is sized via `set_size_request` because anchored children ignore `hexpand`). Images use the private `_ScaledImagePaintable` to cap intrinsic width at the column width; decode failures fall through to `_PlaceholderImagePaintable`. |
-| `language_spec.lang` | 353 | GtkSourceView 5 grammar that drives source-editor syntax highlighting. Pure data, loaded by `ui/note_editor.py`. |
+| `summary.py` | 267 | `derive_summary(source) -> NoteSummary`. Parses once and reads title + snippet off the AST (prose vs structure decided by an exhaustive `match`). **Never raises** — catches `ParseError` only and falls back to a permissive extraction so a mid-edit note stays saveable. The single source of truth for the note-list summary. |
 
 ### `notes_app/storage/` — SQLite persistence
 
@@ -160,12 +158,12 @@ The pipeline. Everything from `lexer` through `parser` is pure (no GTK, no I/O).
 
 | File | LOC | One-line summary |
 | --- | ---: | --- |
-| `protocols.py` | 267 | `NoteRepositoryProtocol`, `NotebookRepositoryProtocol`, `AttachmentStoreProtocol`, `RendererProtocol`; the `AttachmentRejected` / `NestingTooDeep` exceptions; PEP 695 resolver aliases `ImageBytesResolver` / `ColumnWidthResolver`. **Pure typing — no `sqlite3` or `gi` at runtime.** |
+| `protocols.py` | 276 | `NoteRepositoryProtocol`, `NotebookRepositoryProtocol`, `AttachmentStoreProtocol` (now incl. `count_for_note` — a BLOB-free `SELECT COUNT(*)` for the note-list badge), `RendererProtocol`; the `AttachmentRejected` / `NestingTooDeep` exceptions; PEP 695 resolver aliases `ImageBytesResolver` / `ColumnWidthResolver`. **Pure typing — no `sqlite3` or `gi` at runtime.** |
 | `database.py` | 170 | Owns the single `sqlite3.Connection`. `autocommit=True`, `PRAGMA foreign_keys=ON`, composable `transaction()` (nested calls become `SAVEPOINT`). |
-| `migrations.py` | 252 | All `CREATE TABLE` / `CREATE INDEX` / `CREATE TRIGGER` statements. Append-only `ALL_MIGRATIONS` tuple; `apply_pending()` is idempotent. v1 also seeds notebooks + welcome note. |
-| `note_repository.py` | 207 | SQLite-backed `NoteRepositoryProtocol`. Row↔dataclass conversion lives in exactly one place per direction. Timestamps round-trip via ISO-8601. |
+| `migrations.py` | 289 | All `CREATE TABLE` / `CREATE INDEX` / `CREATE TRIGGER` statements. Append-only `ALL_MIGRATIONS` tuple; `apply_pending()` is idempotent. v1 seeds notebooks + welcome note (title/snippet via `derive_summary`); v2 backfills every note's cached `title`/`snippet` from `derive_summary` (fallback-safe, leaves `modified_at` untouched). |
+| `note_repository.py` | 218 | SQLite-backed `NoteRepositoryProtocol`. **Single owner of the `source → cached columns` mapping**: both `insert` and `update_source` derive `title`/`snippet` from the source via `derive_summary`. Row↔dataclass conversion lives in one place per direction; timestamps round-trip via ISO-8601. |
 | `notebook_repository.py` | 187 | SQLite-backed `NotebookRepositoryProtocol`. Catches the `RAISE(ABORT, 'NestingTooDeep')` trigger and re-raises as `NestingTooDeep`. `delete_and_reparent_notes` is one transaction. |
-| `attachment_store.py` | 266 | BLOB-backed `AttachmentStoreProtocol`. Enforces `MAX_ATTACHMENT_BYTES` via `Path.stat()` **before** any bytes are read. Rejections raise `AttachmentRejected(reason=…)`. |
+| `attachment_store.py` | 280 | BLOB-backed `AttachmentStoreProtocol`. Enforces `MAX_ATTACHMENT_BYTES` via `Path.stat()` **before** any bytes are read. Rejections raise `AttachmentRejected(reason=…)`. `count_for_note` is a BLOB-free `SELECT COUNT(*)` for the note-list badge. |
 | `_notebook_writes.py` | 55 | Private helper sharing the `INSERT INTO notebooks` statement between migrations and the repository. Do not import from outside the storage package. |
 
 **v1 schema (live in `migrations.py`):**
@@ -215,14 +213,24 @@ This is the only layer that owns widget trees. Every widget is thin and unit-tes
 | `application.py` | 286 | `NotesApplication(Gtk.Application)` — composes `Database`, repositories, `AttachmentStore`, `AppState`, controllers, then presents `MainWindow`. Single-instance via `FLAGS_NONE`. |
 | `main_window.py` | 328 | `MainWindow` — the three-pane shell: sidebar │ note list │ `Gtk.Stack(view ↔ editor)`. Toolbar is set as the title bar. The initial window width is derived from the rendered article column (`_default_window_width` + `NoteView.preferred_column_width_px()`) so the fixed-width column opens fully visible. |
 | `sidebar.py` | 846 | Notebook tree on the left, rendered with `Gtk.ListView` + `Gtk.TreeListModel` + `Gtk.TreeExpander` (one `ListView`/`SingleSelection` per section). Click → mutate `AppState.selection`. Expansion state is widget-local (intentional — different windows could disagree), snapshotted across `refresh()`. Icon-column alignment depends on the `treeexpander indent` rule in `css/app.css` — the two are a matched pair. |
-| `note_list.py` | 621 | Middle pane: header + sortable, filtered list. `compute_display_notes(...)` is a free function so tests don't need widgets. |
+| `note_list.py` | 700 | Middle pane: header + sortable, filtered list. `compute_display_notes(...)` is a free function so tests don't need widgets. Each row has a bold title, a two-line dimmed snippet, and a right-aligned `📎 N \| date` meta line; per-note attachment counts come from the injected `AttachmentStoreProtocol` (`count_for_note`) without threading a new arg through `compute_display_notes`. |
 | `note_view.py` | 933 | Read pane. `ArticleContainer` enforces the fixed-width text column; `preferred_column_width_px()` exposes that column's outer width so `MainWindow` can size the initial window to it. Calls `TextBufferRenderer.render_into` on every change. `_ArticleTextView` paints the wider tinted wash behind admonition / blockquote / code-block paragraphs (see `tag_table.WashSpec`). |
 | `note_editor.py` | 1260 | Source pane (`GtkSource.View` + `GtkSource.Buffer`). Debounced autosave (`AUTOSAVE_DEBOUNCE_MS`). Stateless w.r.t. notes — reloads from repo on selection change. |
 | `toolbar.py` | 702 | Top `Gtk.HeaderBar` — *New* button, search entry, breadcrumb, View/Source toggle, More menu (Duplicate/Delete). `resolve_target_notebook`, `compute_breadcrumb`, `format_breadcrumb` are extracted as free functions. |
 | `dialogs.py` | 363 | Shared modal dialogs — confirm-delete (a callable matching `ConfirmDialogPresenter`) and `IconPickerPopover`. Production wires `Gtk.AlertDialog`; tests drive callbacks synchronously. |
 | `link_handler.py` | 386 | `LinkHandler.install(textview, ...)` — wires `EventControllerMotion` (cursor) + `GestureClick` (open on `released`). URI is launched via an injected `UriLauncherProtocol`; allowlist is `enums.LinkScheme`. |
 | `_image_picker.py` | 152 | `FileDialogOpener` callable + `default_file_dialog_opener` wrapping `Gtk.FileDialog.open`. MIME filters mirror `enums.MimeKind`. Module is private so `note_editor.py` stays under pylint's `max-module-lines`. |
-| `css/app.css` | 91 | Application stylesheet — loaded by `NotesApplication`. Styles the note-view parse-error banner and the library sidebar (inset rounded selection pill + icon-column alignment, palette-safe via geometry/opacity only). Asset is shipped via `pyproject.toml` `package-data`. |
+| `css/app.css` | 118 | Application stylesheet — loaded by `NotesApplication`. Styles the note-view parse-error banner, the library sidebar, and the note-list rows (`.note-title` bold; `.note-snippet` / `.note-meta` / `.note-meta-separator` dimmed) — all palette-safe via geometry/opacity only. Asset is shipped via `pyproject.toml` `package-data`. |
+| `language_spec.lang` | 353 | GtkSourceView 5 grammar driving source-editor syntax highlighting. Pure data, loaded by `ui/note_editor.py` (resolved next to it). Moved here from `asciidoc/` because it is an editor/toolkit asset, not format knowledge. Shipped via `pyproject.toml` `package-data`. |
+
+#### `notes_app/ui/note_render/` — AST ⇒ TextBuffer (GTK)
+
+The GTK rendering of a parsed document. These two modules are the only consumers that need `gi` + `storage.protocols`, so they live under `ui` and keep `asciidoc` pure. The "tag table and note view must not drift" invariant is now an intra-`ui` concern.
+
+| File | LOC | One-line summary |
+| --- | ---: | --- |
+| `tag_table.py` | 619 | Builds the shared `Gtk.TextTagTable`. **Every visual style lives here, exactly once** (inline + heading + block-level admonition/blockquote/code styling). Block tags carry only text position; the tinted wash is painted by `_ArticleTextView` in `ui/note_view.py` via `build_wash_specs()`. |
+| `textbuffer_renderer.py` | 1150 | `TextBufferRenderer.render_into(document, buffer, ...)`. Image bytes flow through an injected `ImageBytesResolver`; rebuilds the buffer each call. Only tables escape to an anchored widget. `_ScaledImagePaintable` caps image width at the column; decode failures fall through to `_PlaceholderImagePaintable`. |
 
 ---
 

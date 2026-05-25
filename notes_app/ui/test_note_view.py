@@ -17,7 +17,7 @@ gi.require_version("Gsk", "4.0")
 # pylint: disable=wrong-import-position
 from gi.repository import Gdk, Gsk, Gtk  # noqa: E402
 
-from notes_app.asciidoc.tag_table import (
+from notes_app.ui.note_render.tag_table import (
     TagName,
     WashSpec,
     admonition_body_tag_name,
@@ -237,6 +237,9 @@ class _FakeAttachmentStore:
     def get_bytes(self, attachment_id: str) -> bytes:
         self.get_bytes_calls.append(attachment_id)
         return self.blobs[attachment_id]
+
+    def count_for_note(self, note_id: str) -> int:
+        return len(self.metadata_by_note.get(note_id, ()))
 
 
 # ---------------------------------------------------------------------------

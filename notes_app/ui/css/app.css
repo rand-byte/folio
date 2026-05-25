@@ -1,9 +1,11 @@
 /* Application stylesheet.
  *
- * Two concerns live here, each behind its own class prefix:
+ * Three concerns live here, each behind its own class prefix:
  *  - the note-view parse-error banner (`.note-view-banner`);
  *  - the library sidebar (`.sidebar`) — selection pill + icon-column
- *    alignment, appended at the bottom of this file.
+ *    alignment, appended below;
+ *  - the note-list rows (`.note-title` / `.note-snippet` / `.note-meta`),
+ *    appended at the bottom of this file.
  *
  * Loaded once at application startup via Gtk.CssProvider at
  * Gtk.STYLE_PROVIDER_PRIORITY_APPLICATION — see
@@ -88,4 +90,29 @@
 /* Counts dimmed, but full-strength on the selected row for legibility. */
 .sidebar row:not(:selected) .sidebar-count {
     opacity: 0.5;
+}
+
+/* Note-list rows (middle pane).
+ *
+ * Emphasis is palette-safe: the bold title uses font weight only and
+ * the dimmed snippet / meta line use opacity only. No colour is named,
+ * so the row tracks the active Adwaita theme and accent. Keyed off the
+ * classes added in notes_app/ui/note_list.py (_make_note_row). */
+.note-title {
+    font-weight: 700;
+}
+
+.note-snippet {
+    opacity: 0.6;
+}
+
+/* Meta line: attachment count, separator, and date all dimmed alike. */
+.note-meta {
+    opacity: 0.6;
+}
+
+/* The separator gets an extra notch of dimming so it reads as a divider
+ * rather than competing with the count and date it sits between. */
+.note-meta-separator {
+    opacity: 0.45;
 }

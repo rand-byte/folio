@@ -322,6 +322,7 @@ class MainWindow(  # pylint: disable=too-many-instance-attributes
             note_repository=note_repository,
             notebook_repository=notebook_repository,
             app_state=app_state,
+            attachment_store=attachment_store,
         )
         # NoteView accepts the attachment store so its internal
         # image-bytes resolver can fetch attachment BLOBs by

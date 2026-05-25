@@ -69,7 +69,7 @@ from gi.repository import GObject  # noqa: E402
 from notes_app.controllers._storage_errors import capturing_storage_errors
 from notes_app.controllers.app_state import AppState
 from notes_app.models.attachment import Attachment
-from notes_app.models.note import Note, derive_snippet, derive_title
+from notes_app.models.note import Note
 from notes_app.storage.protocols import (
     AttachmentRejected,
     AttachmentStoreProtocol,
@@ -132,7 +132,7 @@ def _suffix_title_in_source(source: str, suffix: str) -> str:
     """Append ``suffix`` to the first level-0 heading line in ``source``.
 
     Operates on a *prefix* of the source — only the first non-blank
-    line is examined, mirroring :func:`derive_title`'s contract — so
+    line is examined, mirroring the level-0 title rule — so
     later headings are untouched. If the source has no level-0
     heading the original string is returned unchanged; the caller
     falls back to whatever cached title the duplicate already has.
@@ -251,12 +251,18 @@ class NoteController(GObject.Object):
         widgets observing app state see no half-applied effect.
         """
         now = self._clock()
+        # The blank source's derived summary is known statically: its
+        # only heading flattens to ``_BLANK_NOTE_TITLE`` and it has no
+        # body, so the snippet is empty. The repository re-derives both
+        # columns from ``source`` on insert (it is the single owner of
+        # that mapping); the values here describe the returned in-memory
+        # note and match what the repository writes.
         note = Note(
             id=self._id_factory(),
-            title=derive_title(_BLANK_NOTE_SOURCE),
+            title=_BLANK_NOTE_TITLE,
             notebook_id=notebook_id,
             source=_BLANK_NOTE_SOURCE,
-            snippet=derive_snippet(_BLANK_NOTE_SOURCE),
+            snippet="",
             created_at=now,
             modified_at=now,
         )
@@ -287,7 +293,12 @@ class NoteController(GObject.Object):
             title=new_title,
             notebook_id=original.notebook_id,
             source=new_source,
-            snippet=derive_snippet(new_source),
+            # The body is copied verbatim, so the prose snippet is
+            # unchanged from the original; only the title gains the
+            # suffix. The repository re-derives both columns from
+            # ``new_source`` on insert — it owns that mapping — so these
+            # values only describe the returned in-memory note.
+            snippet=original.snippet,
             created_at=now,
             modified_at=now,
         )

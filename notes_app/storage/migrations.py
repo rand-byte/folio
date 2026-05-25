@@ -20,6 +20,11 @@ Principles & invariants
   and is applied **exactly once**: the ``schema_version`` table records
   that v1 has run, and v1 is never replayed. A user who deletes the
   welcome note will not see it reappear on the next launch.
+* This module derives cached note columns through
+  :func:`notes_app.asciidoc.summary.derive_summary` (the v1 seed and the
+  v2 backfill). ``storage`` is allowed to import the pure ``asciidoc``
+  core; the edge is acyclic because ``asciidoc`` imports nothing from
+  ``storage``.
 * The migration runner does not import from :mod:`notes_app.storage.note_repository`
   or :mod:`notes_app.storage.notebook_repository`. The repositories
   depend on the schema being in place; the schema is set up here. Going
@@ -33,13 +38,13 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime
 
+from notes_app.asciidoc.summary import derive_summary
 from notes_app.config.defaults import (
     SEED_NOTEBOOKS,
     SEED_WELCOME_NOTE_ID,
     SEED_WELCOME_NOTE_NOTEBOOK_ID,
     SEED_WELCOME_NOTE_SOURCE,
 )
-from notes_app.models.note import derive_snippet, derive_title
 from notes_app.storage._notebook_writes import insert_notebook_row
 from notes_app.storage.database import Database
 
@@ -153,20 +158,51 @@ def _apply_v1(connection: sqlite3.Connection, now: datetime) -> None:
         insert_notebook_row(connection, notebook, sort_order)
 
     timestamp = now.isoformat()
+    welcome_summary = derive_summary(SEED_WELCOME_NOTE_SOURCE)
     connection.execute(
         "INSERT INTO notes "
         "(id, title, notebook_id, source, snippet, created_at, modified_at) "
         "VALUES (?, ?, ?, ?, ?, ?, ?)",
         (
             SEED_WELCOME_NOTE_ID,
-            derive_title(SEED_WELCOME_NOTE_SOURCE),
+            welcome_summary.title,
             SEED_WELCOME_NOTE_NOTEBOOK_ID,
             SEED_WELCOME_NOTE_SOURCE,
-            derive_snippet(SEED_WELCOME_NOTE_SOURCE),
+            welcome_summary.snippet,
             timestamp,
             timestamp,
         ),
     )
+
+
+# ---------------------------------------------------------------------------
+# v2 migration body — backfill title/snippet from derive_summary
+# ---------------------------------------------------------------------------
+
+
+def _apply_v2(connection: sqlite3.Connection, now: datetime) -> None:
+    """Rewrite every note's cached ``title`` / ``snippet`` columns.
+
+    The derivation moved to :func:`derive_summary` and now selects clean
+    prose (dropping document attribute entries, table markup, and list
+    bullets that the old prefix-scanner leaked), so cached values written
+    by earlier releases are stale. This migration re-derives both columns
+    from each note's stored source. ``derive_summary`` never raises, so
+    historical rows whose source no longer parses are handled by its
+    permissive fallback rather than aborting the migration.
+
+    ``now`` is unused: a backfill does not touch timestamps — rewriting
+    ``modified_at`` would lie about when the user last edited the note.
+    """
+    _ = now
+    cursor = connection.execute("SELECT id, source FROM notes")
+    rows = cursor.fetchall()
+    for row in rows:
+        summary = derive_summary(row["source"])
+        connection.execute(
+            "UPDATE notes SET title = ?, snippet = ? WHERE id = ?",
+            (summary.title, summary.snippet, row["id"]),
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -175,6 +211,7 @@ def _apply_v1(connection: sqlite3.Connection, now: datetime) -> None:
 
 ALL_MIGRATIONS: tuple[Migration, ...] = (
     Migration(version=1, apply=_apply_v1),
+    Migration(version=2, apply=_apply_v2),
 )
 
 

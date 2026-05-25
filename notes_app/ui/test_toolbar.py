@@ -303,6 +303,9 @@ class _FakeAttachmentStore:
     def list_for_note(self, _note_id: str) -> list[Attachment]:
         return []
 
+    def count_for_note(self, _note_id: str) -> int:
+        return 0
+
     def get_bytes(self, _attachment_id: str) -> bytes:
         raise NotImplementedError
 

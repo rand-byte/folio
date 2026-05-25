@@ -12,7 +12,8 @@ from notes_app.config.defaults import (
     SEED_NOTEBOOK_ID_RECIPES,
 )
 from notes_app.enums import NotebookIcon
-from notes_app.models.note import Note, derive_snippet, derive_title
+from notes_app.asciidoc.summary import derive_summary
+from notes_app.models.note import Note
 from notes_app.models.notebook import Notebook
 from notes_app.storage.database import Database
 from notes_app.storage.migrations import apply_pending
@@ -47,12 +48,13 @@ def _make_note(
     notebook_id: str,
     source: str = "= Test\n\nbody",
 ) -> Note:
+    summary = derive_summary(source)
     return Note(
         id=note_id,
-        title=derive_title(source),
+        title=summary.title,
         notebook_id=notebook_id,
         source=source,
-        snippet=derive_snippet(source),
+        snippet=summary.snippet,
         created_at=_FIXED_NOW,
         modified_at=_FIXED_NOW,
     )

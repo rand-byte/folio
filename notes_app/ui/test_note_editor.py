@@ -217,6 +217,9 @@ class _FakeAttachmentStore:
     def list_for_note(self, _note_id: str) -> list[Attachment]:
         raise NotImplementedError
 
+    def count_for_note(self, _note_id: str) -> int:
+        return 0
+
     def get_bytes(self, _attachment_id: str) -> bytes:
         raise NotImplementedError
 
@@ -584,9 +587,10 @@ class InsertInlineTextTests(unittest.TestCase):
 
 class BundledLanguageDirTests(unittest.TestCase):
     def test_directory_contains_the_language_file(self) -> None:
-        # The directory is computed at runtime from the asciidoc
-        # package's ``__file__``. The bundled .lang must be sitting
-        # right next to it for GtkSource to discover it.
+        # The directory is computed at runtime from the editor module's
+        # own ``__file__`` (the grammar lives next to it under ``ui``).
+        # The bundled .lang must be sitting right next to it for
+        # GtkSource to discover it.
         directory = _bundled_language_dir()
         self.assertTrue(
             (directory / LANGUAGE_FILE_NAME).is_file(),

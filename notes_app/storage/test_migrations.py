@@ -13,7 +13,7 @@ from notes_app.config.defaults import (
     SEED_WELCOME_NOTE_NOTEBOOK_ID,
     SEED_WELCOME_NOTE_SOURCE,
 )
-from notes_app.models.note import derive_snippet, derive_title
+from notes_app.asciidoc.summary import derive_summary
 from notes_app.storage.database import Database
 from notes_app.storage.migrations import (
     ALL_MIGRATIONS,
@@ -58,11 +58,14 @@ class SchemaVersionTests(unittest.TestCase):
         self.addCleanup(db.close)
         self.assertEqual(current_schema_version(db), 0)
 
-    def test_apply_pending_records_v1(self) -> None:
+    def test_apply_pending_records_latest_version(self) -> None:
         db = Database.in_memory()
         self.addCleanup(db.close)
         apply_pending(db, now=_FIXED_NOW)
-        self.assertEqual(current_schema_version(db), 1)
+        self.assertEqual(
+            current_schema_version(db),
+            max(m.version for m in ALL_MIGRATIONS),
+        )
 
     def test_apply_pending_is_idempotent(self) -> None:
         db = Database.in_memory()
@@ -72,7 +75,10 @@ class SchemaVersionTests(unittest.TestCase):
         # no extra notebooks, no extra notes.
         apply_pending(db, now=_FIXED_NOW)
 
-        self.assertEqual(current_schema_version(db), 1)
+        self.assertEqual(
+            current_schema_version(db),
+            max(m.version for m in ALL_MIGRATIONS),
+        )
 
         notebook_count = db.connection.execute(
             "SELECT COUNT(*) FROM notebooks"
@@ -87,7 +93,7 @@ class SchemaVersionTests(unittest.TestCase):
         version_row_count = db.connection.execute(
             "SELECT COUNT(*) FROM schema_version"
         ).fetchone()[0]
-        self.assertEqual(version_row_count, 1)
+        self.assertEqual(version_row_count, len(ALL_MIGRATIONS))
 
     def test_all_migrations_have_unique_versions(self) -> None:
         versions = [m.version for m in ALL_MIGRATIONS]
@@ -195,12 +201,10 @@ class SeedDataTests(unittest.TestCase):
             (SEED_WELCOME_NOTE_ID,),
         )
         row = cursor.fetchone()
+        expected = derive_summary(SEED_WELCOME_NOTE_SOURCE)
         self.assertEqual(row["source"], SEED_WELCOME_NOTE_SOURCE)
-        self.assertEqual(row["title"], derive_title(SEED_WELCOME_NOTE_SOURCE))
-        self.assertEqual(
-            row["snippet"],
-            derive_snippet(SEED_WELCOME_NOTE_SOURCE),
-        )
+        self.assertEqual(row["title"], expected.title)
+        self.assertEqual(row["snippet"], expected.snippet)
 
     def test_welcome_note_uses_supplied_now(self) -> None:
         cursor = self.db.connection.execute(
@@ -236,6 +240,127 @@ class SeedDataTests(unittest.TestCase):
         rows = cursor.fetchall()
         sort_orders = [row["sort_order"] for row in rows]
         self.assertEqual(sort_orders, list(range(len(SEED_NOTEBOOKS))))
+
+
+# ---------------------------------------------------------------------------
+# v2 backfill — title/snippet rewritten from derive_summary
+# ---------------------------------------------------------------------------
+
+
+class V2BackfillTests(unittest.TestCase):
+    """The v2 migration rewrites cached title/snippet for every note."""
+
+    def _fresh_v1_only_db(self) -> Database:
+        """A database with only v1 applied, so v2 is still pending.
+
+        Creates the schema by hand-running the first migration the same
+        way the runner does, then records v1 — without letting
+        ``apply_pending`` run v2 yet.
+        """
+        db = Database.in_memory()
+        self.addCleanup(db.close)
+        db.connection.execute(
+            "CREATE TABLE IF NOT EXISTS schema_version "
+            "(version INTEGER NOT NULL PRIMARY KEY)"
+        )
+        v1 = next(m for m in ALL_MIGRATIONS if m.version == 1)
+        with db.transaction() as connection:
+            v1.apply(connection, _FIXED_NOW)
+            connection.execute(
+                "INSERT INTO schema_version (version) VALUES (1)"
+            )
+        return db
+
+    def test_backfill_rewrites_stale_snippet(self) -> None:
+        db = self._fresh_v1_only_db()
+        # Simulate a row written by an older release whose cached
+        # columns are stale / leaky relative to the new derivation.
+        source = (
+            "= Recipe\n"
+            ":author: Me\n"
+            "\n"
+            "A weekly bake.\n"
+        )
+        db.connection.execute(
+            "INSERT INTO notes "
+            "(id, title, notebook_id, source, snippet, "
+            " created_at, modified_at) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?)",
+            (
+                "stale-note",
+                "WRONG TITLE",
+                SEED_NOTEBOOK_ID_PERSONAL,
+                source,
+                ":author: Me A weekly bake.",  # leaky old-style snippet
+                _FIXED_NOW.isoformat(),
+                _FIXED_NOW.isoformat(),
+            ),
+        )
+
+        apply_pending(db, now=_FIXED_NOW)
+
+        row = db.connection.execute(
+            "SELECT title, snippet FROM notes WHERE id = ?",
+            ("stale-note",),
+        ).fetchone()
+        expected = derive_summary(source)
+        self.assertEqual(row["title"], expected.title)
+        self.assertEqual(row["snippet"], expected.snippet)
+        self.assertNotIn(":author:", row["snippet"])
+
+    def test_backfill_does_not_touch_modified_at(self) -> None:
+        db = self._fresh_v1_only_db()
+        original_modified = datetime(2025, 6, 1, tzinfo=UTC)
+        db.connection.execute(
+            "INSERT INTO notes "
+            "(id, title, notebook_id, source, snippet, "
+            " created_at, modified_at) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?)",
+            (
+                "n",
+                "t",
+                SEED_NOTEBOOK_ID_PERSONAL,
+                "= T\n\nBody.",
+                "old",
+                _FIXED_NOW.isoformat(),
+                original_modified.isoformat(),
+            ),
+        )
+
+        apply_pending(db, now=_FIXED_NOW)
+
+        row = db.connection.execute(
+            "SELECT modified_at FROM notes WHERE id = ?", ("n",)
+        ).fetchone()
+        self.assertEqual(row["modified_at"], original_modified.isoformat())
+
+    def test_backfill_survives_unparseable_source(self) -> None:
+        db = self._fresh_v1_only_db()
+        db.connection.execute(
+            "INSERT INTO notes "
+            "(id, title, notebook_id, source, snippet, "
+            " created_at, modified_at) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?)",
+            (
+                "bad",
+                "t",
+                SEED_NOTEBOOK_ID_PERSONAL,
+                "= Draft\n\nThis *is unterminated",
+                "old",
+                _FIXED_NOW.isoformat(),
+                _FIXED_NOW.isoformat(),
+            ),
+        )
+
+        # Must not raise — derive_summary's fallback handles bad source.
+        apply_pending(db, now=_FIXED_NOW)
+
+        row = db.connection.execute(
+            "SELECT title, snippet FROM notes WHERE id = ?", ("bad",)
+        ).fetchone()
+        expected = derive_summary("= Draft\n\nThis *is unterminated")
+        self.assertEqual(row["title"], expected.title)
+        self.assertEqual(row["snippet"], expected.snippet)
 
 
 if __name__ == "__main__":

@@ -259,6 +259,47 @@ class AddForNoteHappyPathTests(unittest.TestCase):
 
 
 # ---------------------------------------------------------------------------
+# count_for_note
+# ---------------------------------------------------------------------------
+
+
+class CountForNoteTests(unittest.TestCase):
+    db: Database
+    files: _TempFileFactory
+    store: AttachmentStore
+
+    def setUp(self) -> None:
+        self.db = _build_database_with_note()
+        self.files = _TempFileFactory()
+        self.store = AttachmentStore(self.db, id_factory=_IdSequence())
+
+    def tearDown(self) -> None:
+        self.files.close()
+        self.db.close()
+
+    def test_zero_when_note_has_no_attachments(self) -> None:
+        self.assertEqual(self.store.count_for_note("note-1"), 0)
+
+    def test_counts_only_the_target_notes_attachments(self) -> None:
+        self.store.add_for_note("note-1", self.files.write("a.png", _PNG_1X1))
+        self.store.add_for_note(
+            "note-1", self.files.write("b.png", _PNG_1X1 + b"\x00")
+        )
+        self.assertEqual(self.store.count_for_note("note-1"), 2)
+
+    def test_unknown_note_id_is_zero_not_an_error(self) -> None:
+        self.assertEqual(self.store.count_for_note("does-not-exist"), 0)
+
+    def test_count_drops_after_remove(self) -> None:
+        att = self.store.add_for_note(
+            "note-1", self.files.write("a.png", _PNG_1X1)
+        )
+        self.assertEqual(self.store.count_for_note("note-1"), 1)
+        self.store.remove(att.id)
+        self.assertEqual(self.store.count_for_note("note-1"), 0)
+
+
+# ---------------------------------------------------------------------------
 # add_for_note — size cap
 # ---------------------------------------------------------------------------
 

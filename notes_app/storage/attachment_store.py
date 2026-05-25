@@ -264,3 +264,17 @@ class AttachmentStore:
         if row is None:
             raise KeyError(attachment_id)
         return bytes(row["data"])
+
+    def count_for_note(self, note_id: str) -> int:
+        """Return the number of attachments belonging to ``note_id``.
+
+        A bare ``SELECT COUNT(*)`` — it never selects ``data`` (nor any
+        metadata column), so the note-list attachment badge stays off
+        the BLOB path entirely. An unknown ``note_id`` is not an error;
+        it simply has zero attachments.
+        """
+        cursor = self._db.connection.execute(
+            "SELECT COUNT(*) FROM attachments WHERE note_id = ?",
+            (note_id,),
+        )
+        return int(cursor.fetchone()[0])

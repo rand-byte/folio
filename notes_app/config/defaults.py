@@ -77,6 +77,24 @@ Applied as ``left-margin`` / ``right-margin`` on the rendered-view
 text area stays at :data:`TARGET_CHARS_PER_LINE` characters wide.
 """
 
+SNIPPET_MAX_CHARS: int = 200
+"""Hard cap for a note's derived snippet length, in characters.
+
+A presentation/derivation constant consumed by
+:func:`notes_app.asciidoc.summary.derive_summary`. Bounding the snippet
+keeps the note-list query plan cheap and the rendered list cells at a
+predictable height. ``config`` sits below ``asciidoc``, which imports
+this value — there is no cycle.
+"""
+
+UNTITLED: str = "Untitled"
+"""Fallback note title used when the source has no level-0 heading.
+
+Part of the persistence contract: the repository writes this string
+into ``notes.title`` whenever :func:`derive_summary` finds no usable
+title, so the note list always has a non-empty title to show.
+"""
+
 
 # ---------------------------------------------------------------------------
 # Seed identifiers
