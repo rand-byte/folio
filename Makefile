@@ -1,8 +1,8 @@
-.PHONY: all validate test type clean build package
+.PHONY: all validate test type clean build
 
-package:
-	rm -f note_src_arc.zip && \
-		zip note_src_arc.zip -r Makefile notes_app tests pyproject.toml
+PY_SRC := $(shell find notes_app -type f -name "*.py" ! -name "test_*")
+PY_TST := $(shell find notes_app -type f -name "test_*.py")
+
 
 # The UI tests build real GTK 4 widgets and are gated behind a
 # `@skipUnless(_display_available())` guard, so they only run when a GDK
@@ -35,4 +35,8 @@ test:
 			python3 -B -m unittest discover -s notes_app -f
 
 type:
-	mypy $(shell find notes_app -type f -name "*.py")
+	mypy $(PY_SRC) $(PY_TST)
+
+lint:
+	pylint $(PY_SRC)
+	pylint $(PY_TST) --disable=too-many-public-methods,protected-access,duplicate-code,too-many-lines

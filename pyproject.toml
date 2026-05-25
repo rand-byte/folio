@@ -39,6 +39,31 @@ notes_app = [
     "ui/icons/*.svg",
 ]
 
+[tool.pylint."MESSAGES CONTROL"]
+disable = [
+    "missing-module-docstring",
+    "missing-function-docstring",
+    "missing-class-docstring",
+    "too-many-arguments",
+]
+enable = ["useless-suppression"]
+
+[tool.pylint.design]
+min-public-methods = 1
+
+[tool.mypy]
+python_version = "3.13"
+warn_return_any = true
+warn_unused_configs = true
+disallow_untyped_defs = true
+disallow_incomplete_defs = true
+check_untyped_defs = true
+no_implicit_optional = true
+strict_optional = true
+
+incremental = false
+cache_dir = "/dev/null"
+
 # PyGObject does not ship type stubs or a ``py.typed`` marker, so
 # ``from gi.repository import Gtk`` always trips mypy's import-untyped
 # check. The override below is project-wide so each future module that
