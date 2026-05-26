@@ -1,0 +1,353 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  Notes App AsciiDoc subset — GtkSourceView 5 language definition.
+
+  This grammar covers the constructs the parser understands as of build
+  step 15 (see asciidoc/parser.py and section 7 of plan.md):
+  document title, sections (== through six equals signs), unordered
+  lists (asterisk item), ordered lists (dot item), code blocks
+  (four-hyphen fences, with optional [source,lang] directive), image
+  macros (image::file[]), the four inline styles bold (*x*), italic
+  (_x_), strikethrough ([.line-through]#x#), and underline
+  ([.underline]#x#), inline monospace (`x`), links in three forms:
+  bare URL (https://x), URL-with-text (https://x[label]), and the
+  link:URL[label] macro, tables (|=== fences, with optional
+  [cols="N,N,..."] directive), admonitions in both forms — single-line
+  (NOTE: text and friends, restricted to the five known kinds) and
+  block ([NOTE]/[TIP]/[IMPORTANT]/[WARNING]/[CAUTION] followed by a
+  four-equals fence), and blockquotes (four-underscore fence, with
+  optional [quote, Author, Source] directive). Anything outside this
+  subset is intentionally NOT highlighted; it is a parse error at
+  render time and the editor lets the raw text show through.
+
+  Style ids reference def.lang (shipped with GtkSourceView) so any
+  installed style scheme renders sensible colours without bundling our
+  own.
+
+  Note on XML comment escaping: XML disallows the literal sequence
+  consisting of two adjacent hyphens inside a comment, which is why
+  the AsciiDoc fence (four hyphens) is described in prose above
+  rather than reproduced verbatim. Fence regexes inside <start>
+  and <end> tags are NOT in comments and reproduce the syntax as-is.
+-->
+<language id="notes-asciidoc" name="Notes AsciiDoc" version="2.0" _section="Markup">
+  <metadata>
+    <property name="mimetypes">text/x-notes-asciidoc</property>
+    <property name="globs">*.adoc</property>
+    <property name="line-comment-start">//</property>
+  </metadata>
+
+  <styles>
+    <style id="heading"      name="Heading"        map-to="def:heading"/>
+    <style id="bold"         name="Bold"           map-to="def:strong-emphasis"/>
+    <style id="italic"       name="Italic"         map-to="def:emphasis"/>
+    <style id="strikethrough" name="Strikethrough" map-to="def:deletion"/>
+    <style id="underline"    name="Underline"      map-to="def:underlined"/>
+    <style id="monospace"    name="Monospace"      map-to="def:inline-code"/>
+    <style id="link"         name="Link"           map-to="def:link-text"/>
+    <style id="link-destination" name="Link Destination" map-to="def:link-destination"/>
+    <style id="list-marker"  name="List Marker"    map-to="def:list-marker"/>
+    <style id="code-block"   name="Code Block"     map-to="def:preformatted-section"/>
+    <style id="code-fence"   name="Code Fence"     map-to="def:preprocessor"/>
+    <style id="image-macro"  name="Image Macro"    map-to="def:link-destination"/>
+    <style id="table-fence"  name="Table Fence"    map-to="def:preprocessor"/>
+    <style id="table-cell-separator" name="Table Cell Separator" map-to="def:list-marker"/>
+    <style id="cols-directive" name="Cols Directive" map-to="def:preprocessor"/>
+    <style id="admonition-directive" name="Admonition Directive" map-to="def:preprocessor"/>
+    <style id="admonition-fence"     name="Admonition Fence"     map-to="def:preprocessor"/>
+    <style id="single-admonition"    name="Single-Line Admonition" map-to="def:note"/>
+    <style id="quote-directive"      name="Quote Directive"      map-to="def:preprocessor"/>
+    <style id="quote-fence"          name="Quote Fence"          map-to="def:preprocessor"/>
+  </styles>
+
+  <definitions>
+    <!--
+      Code block: a region between two lines containing exactly four
+      hyphens (with no other characters). The optional [source,lang]
+      directive on the line directly above is NOT consumed by this
+      region — it is matched separately so the directive itself
+      highlights even if the fence is malformed. Inside the fence the
+      content is monospace / preformatted; no inline markers are
+      interpreted, matching the parser's verbatim treatment.
+    -->
+    <context id="code-block" style-ref="code-block" class="no-spell-check">
+      <start>^----\s*$</start>
+      <end>^----\s*$</end>
+      <include>
+        <context sub-pattern="0" where="start" style-ref="code-fence"/>
+        <context sub-pattern="0" where="end" style-ref="code-fence"/>
+      </include>
+    </context>
+
+    <!--
+      Heading line: 1..6 leading '=' followed by at least one space and
+      some content. The parser rejects mid-document level-1 headings as
+      UNKNOWN_BLOCK, but level 1 IS valid as the document title — and
+      the highlighter cannot tell which one it is looking at without
+      a parser. Highlighting all six levels uniformly is the honest
+      compromise: the rendered view is the place mistakes are
+      surfaced, not the editor gutter.
+    -->
+    <context id="heading" style-ref="heading">
+      <match>^={1,6}[ \t]+\S.*$</match>
+    </context>
+
+    <!--
+      Unordered list bullet: '*' followed by a space, at the start of a
+      line. Only the marker is styled — the rest of the line is plain
+      text so inline emphasis inside list items still picks up the
+      bold/italic contexts below.
+    -->
+    <context id="unordered-list-bullet" style-ref="list-marker">
+      <match>^\*[ \t]+</match>
+    </context>
+
+    <!--
+      Ordered list bullet: '.' followed by a space, at the start of a
+      line. Same scoping as unordered.
+    -->
+    <context id="ordered-list-bullet" style-ref="list-marker">
+      <match>^\.[ \t]+</match>
+    </context>
+
+    <!--
+      Source directive: [source,lang] on its own line. Highlighted
+      whether or not the next line is a fence — the parser performs the
+      pairing; the highlighter only colours the directive.
+    -->
+    <context id="source-directive" style-ref="code-fence">
+      <match>^\[source(?:,[^\]]*)?\][ \t]*$</match>
+    </context>
+
+    <!--
+      Image macro: image::filename[attrs]. The whole line is coloured
+      so the user sees at a glance that the line is structural rather
+      than prose. The parser checks bracket pairing; the highlighter
+      tolerates malformed attrs and lets the parser report the error.
+    -->
+    <context id="image-macro" style-ref="image-macro">
+      <match>^image::[^\[\]\s]+\[[^\]]*\]\s*$</match>
+    </context>
+
+    <!--
+      Cols directive: [cols="N,N,..."] on its own line, preceding a
+      table fence. Highlighted whether or not the next line is a
+      fence — the parser performs the pairing and validates the
+      contents; the highlighter only colours the directive shape.
+    -->
+    <context id="cols-directive" style-ref="cols-directive">
+      <match>^\[cols=&quot;[^&quot;]*&quot;\][ \t]*$</match>
+    </context>
+
+    <!--
+      Table fence: a line that is exactly |=== . Used at both ends of
+      a table. Highlighted as a preprocessor-style marker so the user
+      sees the table boundaries at a glance. The cells between the
+      fences are not styled by a region context — instead, the
+      table-cell-separator context below picks up the leading | of
+      each row, and inline contexts (bold, italic, link, …) keep
+      highlighting cell content like any other prose line.
+    -->
+    <context id="table-fence" style-ref="table-fence">
+      <match>^\|===\s*$</match>
+    </context>
+
+    <!--
+      Table cell separator: a leading | at the start of a row line,
+      followed by any subsequent | within that row. The match is
+      anchored to the start of a line so paragraph prose containing
+      a literal | outside a table is unaffected. This is a heuristic
+      — the highlighter doesn't track table-fence pairing — but the
+      "row line starts with |" rule covers every supported case in
+      the v1 subset and gives table cells a clear visible delimiter.
+    -->
+    <context id="table-cell-separator" style-ref="table-cell-separator">
+      <match>^\||(?&lt;=[^|])\|(?=.*$)</match>
+    </context>
+
+    <!--
+      Admonition fence: a line that is exactly four equals signs.
+      Matched whether or not preceded by a [NOTE]/[TIP]/… directive
+      — the parser performs the pairing; the highlighter only
+      colours the fence shape so the user sees the boundary.
+    -->
+    <context id="admonition-fence" style-ref="admonition-fence">
+      <match>^====\s*$</match>
+    </context>
+
+    <!--
+      Admonition directive: [NOTE], [TIP], [IMPORTANT], [WARNING],
+      or [CAUTION] on a line by itself. Highlighted regardless of
+      whether the next line is the four-equals fence; the parser
+      reports the missing-fence error at render time.
+    -->
+    <context id="admonition-directive" style-ref="admonition-directive">
+      <match>^\[(NOTE|TIP|IMPORTANT|WARNING|CAUTION)\]\s*$</match>
+    </context>
+
+    <!--
+      Single-line admonition: KIND: text where KIND is one of the
+      five known labels. The whole line is coloured so the user
+      sees the construct at a glance. Other inline contexts inside
+      the body still match (bold, italic, …) because GtkSourceView
+      composes nested context matches.
+    -->
+    <context id="single-admonition" style-ref="single-admonition">
+      <match>^(NOTE|TIP|IMPORTANT|WARNING|CAUTION):\s+.+$</match>
+    </context>
+
+    <!--
+      Quote fence: a line that is exactly four underscores. Used at
+      both ends of a blockquote. Highlighted as a preprocessor-style
+      marker so the user sees the boundaries.
+    -->
+    <context id="quote-fence" style-ref="quote-fence">
+      <match>^____\s*$</match>
+    </context>
+
+    <!--
+      Quote directive: [quote] or [quote, Author, Source] on a line
+      by itself. The captured contents (Author / Source) are not
+      validated by the highlighter — the parser does that and
+      surfaces malformed-attribution errors at render time.
+    -->
+    <context id="quote-directive" style-ref="quote-directive">
+      <match>^\[quote(?:,[^\]]*)?\]\s*$</match>
+    </context>
+
+    <!--
+      Inline bold: *...* on a single line, with the asterisks adjacent
+      to non-whitespace characters (matches the parser's rule that
+      ``* foo *`` is plain prose, not a bold span). The negative
+      lookahead before the opening '*' prevents confusion with the
+      unordered-list bullet at column 0.
+    -->
+    <context id="inline-bold" style-ref="bold">
+      <match>(?&lt;![\w*])\*(?=\S)[^*\n]*\S\*(?![\w])</match>
+    </context>
+
+    <!--
+      Inline italic: _..._ on a single line, same shape rules.
+    -->
+    <context id="inline-italic" style-ref="italic">
+      <match>(?&lt;![\w_])_(?=\S)[^_\n]*\S_(?![\w])</match>
+    </context>
+
+    <!--
+      Inline strikethrough: [.line-through]#text# on a single line.
+      The ``#…#`` content is part of the highlighted run so the user
+      sees the full marker. The text itself is not nested into other
+      contexts to keep the regex simple.
+    -->
+    <context id="inline-strikethrough" style-ref="strikethrough">
+      <match>\[\.line-through\]#[^#\n]+#</match>
+    </context>
+
+    <!--
+      Inline underline: [.underline]#text# on a single line, same
+      shape as strikethrough.
+    -->
+    <context id="inline-underline" style-ref="underline">
+      <match>\[\.underline\]#[^#\n]+#</match>
+    </context>
+
+    <!--
+      Inline monospace: a backtick pair on a single line. The body
+      is matched verbatim by the parser; in the editor we colour the
+      whole run including the backticks so the user sees the
+      delimiters.
+    -->
+    <context id="inline-monospace" style-ref="monospace" class="no-spell-check">
+      <match>`[^`\n]*`</match>
+    </context>
+
+    <!--
+      Bare URL: http://, https://, mailto: at a word boundary,
+      followed by URL characters until whitespace, '[', or one of
+      the inline marker characters '*', '_', '#', '`' that the
+      parser also uses as URL terminators. The (?: ... ) wrapper
+      keeps the alternatives in one group so the colouring covers
+      the whole URL run.
+
+      The trailing-text variant (https://x[label]) is matched by a
+      separate context below so the LABEL portion is coloured as
+      link text rather than link destination.
+    -->
+    <context id="bare-url" style-ref="link-destination">
+      <match>(?&lt;![A-Za-z0-9])(?:https?://|mailto:)[^\s\[*_`#]+</match>
+    </context>
+
+    <!--
+      URL-with-text: https://x[label] / http://x[label] /
+      mailto:x[label]. The whole run is coloured as a link, with
+      the URL portion in the destination colour and the label in
+      the link colour. Implemented as a region so the inner styles
+      can be split.
+    -->
+    <context id="url-with-text" style-ref="link">
+      <start>(?&lt;![A-Za-z0-9])(?:https?://|mailto:)[^\s\[*_`#]+\[</start>
+      <end>\]</end>
+      <include>
+        <context sub-pattern="0" where="start" style-ref="link-destination"/>
+        <context sub-pattern="0" where="end" style-ref="link-destination"/>
+      </include>
+    </context>
+
+    <!--
+      link: macro: link:URL[label]. The macro form accepts any
+      syntactically-valid URL scheme; the parser rejects schemes
+      outside the allow-list, but the editor cannot reproduce that
+      check without a lexer pass, so we colour the macro shape
+      regardless and let the rendered view's error panel catch
+      forbidden schemes.
+    -->
+    <context id="link-macro" style-ref="link">
+      <start>(?&lt;![A-Za-z0-9])link:[A-Za-z][A-Za-z0-9+.\-]*:[^\s\[*_`#]*\[</start>
+      <end>\]</end>
+      <include>
+        <context sub-pattern="0" where="start" style-ref="link-destination"/>
+        <context sub-pattern="0" where="end" style-ref="link-destination"/>
+      </include>
+    </context>
+
+    <!-- Top-level dispatch: order matters for overlapping patterns.
+         Block-level constructs are tried first so a line beginning
+         with ``*`` is recognised as a list item before the inline
+         bold context can match the asterisk. The link contexts
+         appear before bare-url because url-with-text and the link:
+         macro both contain a bare URL at their start — without
+         the precedence, the bare-url match would consume the
+         scheme and prefix and prevent the bracketed-text region
+         from being recognised. Admonition and quote fences /
+         directives appear with the rest of the block-level
+         constructs; the single-line admonition appears before
+         the inline contexts so its KIND: prefix is coloured as
+         an admonition (not as inline text). -->
+    <context id="notes-asciidoc">
+      <include>
+        <context ref="code-block"/>
+        <context ref="source-directive"/>
+        <context ref="cols-directive"/>
+        <context ref="table-fence"/>
+        <context ref="admonition-fence"/>
+        <context ref="admonition-directive"/>
+        <context ref="quote-fence"/>
+        <context ref="quote-directive"/>
+        <context ref="single-admonition"/>
+        <context ref="heading"/>
+        <context ref="image-macro"/>
+        <context ref="unordered-list-bullet"/>
+        <context ref="ordered-list-bullet"/>
+        <context ref="table-cell-separator"/>
+        <context ref="link-macro"/>
+        <context ref="url-with-text"/>
+        <context ref="bare-url"/>
+        <context ref="inline-monospace"/>
+        <context ref="inline-strikethrough"/>
+        <context ref="inline-underline"/>
+        <context ref="inline-bold"/>
+        <context ref="inline-italic"/>
+      </include>
+    </context>
+  </definitions>
+</language>

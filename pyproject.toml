@@ -1,42 +1,21 @@
-[build-system]
-requires = ["setuptools>=68", "wheel"]
-build-backend = "setuptools.build_meta"
-
 [project]
-name = "notes-app"
+name = "folio"
 version = "0.1.0"
 description = "AsciiDoc note-taking application"
 requires-python = ">=3.13"
-readme = "README.md"
+readme = "src/README.md"
 
 # Runtime dependencies. ``PyGObject`` is the Python-side binding for
-# GTK 4 (build step 8 onwards) and GtkSourceView 5 (build step 10
-# onwards); both typelibs are system packages. On Debian/Ubuntu the
-# packages are ``gir1.2-gtk-4.0`` and ``gir1.2-gtksource-5``;
-# equivalents exist on other distributions. SQLite is in the standard
-# library.
+# GTK 4 and GtkSourceView 5; both typelibs are system packages. On
+# Debian/Ubuntu the packages are ``gir1.2-gtk-4.0`` and
+# ``gir1.2-gtksource-5`` (GtkSourceView >= 5.4 — see the README's
+# Packaging notes); equivalents exist on other distributions. SQLite is
+# in the standard library. The app is distributed as a zipapp
+# (``folio.pyz``), so there is no build backend, console script, or
+# wheel-packaging configuration here — only project metadata and tool
+# config.
 dependencies = [
     "PyGObject>=3.50",
-]
-
-[project.scripts]
-notes-app = "notes_app.__main__:main"
-
-[tool.setuptools.packages.find]
-where = ["."]
-include = ["notes_app*"]
-
-# The bundled GtkSourceView language definition is loaded at runtime
-# by :mod:`notes_app.ui.note_editor`. Listing it here ensures it ships
-# in the wheel alongside the Python sources rather than being silently
-# dropped by the default include rules. Application CSS and SVG
-# assets that already lived under ``ui/css`` and ``ui/icons`` are
-# included by the same mechanism.
-[tool.setuptools.package-data]
-notes_app = [
-    "ui/language_spec.lang",
-    "ui/css/*.css",
-    "ui/icons/*.svg",
 ]
 
 [tool.pylint."MESSAGES CONTROL"]
@@ -63,6 +42,14 @@ strict_optional = true
 
 incremental = false
 cache_dir = "/dev/null"
+
+# ``src`` is the source root but not an importable package (it has no
+# ``__init__.py``), so its top-level modules (``config``, ``ui``, …) are
+# imported by their bare names. These two keys tell mypy to treat ``src``
+# as the import base and to allow package-less top-level modules,
+# avoiding spurious duplicate-module / "not in a package" errors.
+mypy_path = "src"
+explicit_package_bases = true
 
 # PyGObject does not ship type stubs or a ``py.typed`` marker, so
 # ``from gi.repository import Gtk`` always trips mypy's import-untyped

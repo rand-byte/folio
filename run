@@ -1,1 +1,4 @@
-python3 -B -m notes_app
+#!/bin/sh
+set -e
+make resource
+exec python3 -B src/__main__.py
