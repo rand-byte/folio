@@ -65,8 +65,8 @@ type:
 # PYTHONPATH=src is what lets ``import config``/``import ui`` etc. resolve.
 # The disable/enable flags are unchanged from the package layout.
 lint:
-	pylint $(PY_SRC)
-	pylint $(PY_TST) --disable=too-many-public-methods,protected-access,duplicate-code,too-many-lines
+	python3 -B -m pylint $(PY_SRC)
+	python3 -B -m pylint $(PY_TST) --disable=too-many-public-methods,protected-access,duplicate-code,too-many-lines
 
 # Build the distributable zipapp. Depends on the compiled GResource so the
 # packaged grammar is the same artifact dev/test load. The exclusions
