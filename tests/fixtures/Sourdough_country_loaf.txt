@@ -1,0 +1,33 @@
+= Sourdough country loaf
+:author: Me
+:revdate: 2026-04-14
+:tags: favorite, reference
+
+A weekly bake. Open crumb, mahogany crust, mild tang.
+
+[cols="3,1", options="header"]
+|===
+|Ingredient |Grams
+|Bread flour |400
+|Whole-wheat flour |100
+|Water (84%) |420
+|Salt (2.2%) |11
+|Active levain |100
+|===
+
+== Notes
+
+* Hydration sits at 84%; bumped from 78% after switching flour.
+* Bulk ferment ~5h at 24°C with four sets of folds in the first 90 min.
+* Flavour is great; link:++recipe://levain-maintenance++[levain schedule] is dialed in.
+
+NOTE: If the dough feels slack at the second fold, hold back 20g of water
+on the next bake — easier than coil-folding it back into shape.
+
+== Result
+
+The crumb is open and even. See <<n2,Brown butter chocolate chip cookies>>
+for a sweet companion to a slice of this.
+
+TIP: Score with a single deep slash on a slight diagonal — splits open more
+predictably than a cross.
