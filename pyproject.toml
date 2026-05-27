@@ -18,6 +18,23 @@ dependencies = [
     "PyGObject>=3.50",
 ]
 
+# Dev-tooling declaration (PEP 735 dependency group — tool-agnostic and
+# build-backend-free, so it fits the zipapp project without introducing a
+# build system). These are NOT runtime dependencies; they are the
+# type-checker and linter the ``type`` / ``lint`` Makefile targets invoke.
+#
+# ``mypy >= 1.16`` is the recorded minimum: earlier releases mis-widened
+# ``StrEnum`` members to the ``str`` mixin when an enum class was passed to
+# builtins typed ``Iterable[_T]`` (``enumerate``/``list``) — see
+# python/mypy#18587, fixed in 1.16. Below that floor ``make type`` reports
+# spurious ``NotebookIcon``-vs-``str`` errors in ``ui/dialogs.py`` and
+# ``ui/test_dialogs.py``; pinning the floor keeps it from regressing.
+[dependency-groups]
+dev = [
+    "mypy>=1.16",
+    "pylint",
+]
+
 [tool.pylint."MESSAGES CONTROL"]
 disable = [
     "missing-module-docstring",

@@ -42,7 +42,8 @@ def main(argv: list[str] | None = None) -> int:
     suitable for ``raise SystemExit(...)`` at the call site.
     """
     effective_argv = list(sys.argv) if argv is None else list(argv)
-    return NotesApplication().run(effective_argv)
+    exit_code: int = NotesApplication().run(effective_argv)
+    return exit_code
 
 
 if __name__ == "__main__":

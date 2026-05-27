@@ -490,20 +490,22 @@ class MainWindowViewModeChangeFlushAndRefreshTests(unittest.TestCase):
     def _view_buffer_text(self, window: MainWindow) -> str:
         """Pull the rendered view's buffer text as a plain string."""
         buffer = window._note_view._buffer
-        return buffer.get_text(
+        text: str = buffer.get_text(
             buffer.get_start_iter(),
             buffer.get_end_iter(),
             False,
         )
+        return text
 
     def _editor_buffer_text(self, window: MainWindow) -> str:
         """Pull the source editor's buffer text as a plain string."""
         buffer = window._note_editor._buffer
-        return buffer.get_text(
+        text: str = buffer.get_text(
             buffer.get_start_iter(),
             buffer.get_end_iter(),
             False,
         )
+        return text
 
     def test_view_mode_change_to_view_flushes_pending_editor_save(
         self,

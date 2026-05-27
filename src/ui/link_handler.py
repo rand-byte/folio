@@ -136,7 +136,8 @@ def default_launcher_factory(url: str) -> UriLauncherProtocol:
     :class:`Gtk.UriLauncher` already conforms structurally to
     :class:`UriLauncherProtocol`, so no adapter is needed.
     """
-    return Gtk.UriLauncher.new(url)
+    launcher: UriLauncherProtocol = Gtk.UriLauncher.new(url)
+    return launcher
 
 
 class LinkHandler:

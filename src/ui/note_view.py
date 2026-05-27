@@ -803,7 +803,10 @@ class ArticleContainer(Gtk.Widget):
             return (0, 0, -1, -1)
         outer = self.outer_column_width()
         child_for_size = min(for_size, outer) if for_size > 0 else outer
-        return self._child.measure(orientation, child_for_size)
+        measured: tuple[int, int, int, int] = self._child.measure(
+            orientation, child_for_size
+        )
+        return measured
 
     def do_size_allocate(  # pylint: disable=arguments-differ
         self,
@@ -1264,7 +1267,8 @@ class NoteView(Gtk.Box):
         Public read-only so tests can assert the success / failure
         bookkeeping without reaching into the revealer's children.
         """
-        return self._error_banner_revealer.get_reveal_child()
+        reveal: bool = self._error_banner_revealer.get_reveal_child()
+        return reveal
 
     @property
     def error_banner_text(self) -> str:
@@ -1273,7 +1277,8 @@ class NoteView(Gtk.Box):
         Empty when no parse error is being shown — see
         :meth:`_hide_error_banner` for the convention.
         """
-        return self._error_banner_label.get_text()
+        text: str = self._error_banner_label.get_text()
+        return text
 
 
 # ---------------------------------------------------------------------------

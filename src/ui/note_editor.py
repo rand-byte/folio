@@ -365,7 +365,8 @@ def _default_timeout_scheduler(
     PyGObject's introspected signatures do not always satisfy mypy
     against arbitrary callable types.
     """
-    return GLib.timeout_add(delay_ms, callback)
+    handle: int = GLib.timeout_add(delay_ms, callback)
+    return handle
 
 
 def _default_timeout_canceller(handle: int) -> None:
@@ -547,7 +548,8 @@ def buffer_text(buffer: Gtk.TextBuffer) -> str:
     """
     start = buffer.get_start_iter()
     end = buffer.get_end_iter()
-    return buffer.get_text(start, end, False)
+    text: str = buffer.get_text(start, end, False)
+    return text
 
 
 # ---------------------------------------------------------------------------
@@ -1260,7 +1262,12 @@ class NoteEditor(Gtk.Box):  # pylint: disable=too-many-instance-attributes
         # trying to cancel the now-firing one.
         self._pending_save_handle = None
         self._save_now()
-        return GLib.SOURCE_REMOVE
+        # GLib source callbacks return a bool: SOURCE_REMOVE (False)
+        # tears the timer down so it does not re-fire. Keep returning the
+        # named constant rather than a bare ``False`` so the source
+        # contract stays explicit.
+        result: bool = GLib.SOURCE_REMOVE
+        return result
 
     def _save_now(self) -> None:
         """Perform the save synchronously.

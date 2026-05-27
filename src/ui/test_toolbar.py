@@ -766,7 +766,8 @@ def _button_label_matches(button: Gtk.Button, label: str) -> bool:
     if child is None:
         return False
     if isinstance(child, Gtk.Label):
-        return child.get_text() == label
+        text: str = child.get_text()
+        return text == label
     if isinstance(child, Gtk.Box):
         descendant = child.get_first_child()
         while descendant is not None:

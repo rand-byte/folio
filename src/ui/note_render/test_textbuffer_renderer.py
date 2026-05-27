@@ -119,11 +119,12 @@ def _collect(
 
 def _full_text(buffer: Gtk.TextBuffer) -> str:
     """Whole buffer text excluding child-anchor placeholder characters."""
-    return buffer.get_text(
+    text: str = buffer.get_text(
         buffer.get_start_iter(),
         buffer.get_end_iter(),
         False,
     )
+    return text
 
 
 def _tag_names_at(buffer: Gtk.TextBuffer, offset: int) -> set[str]:

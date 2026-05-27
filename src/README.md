@@ -18,7 +18,7 @@ it first so you can find the right file before opening it.
 | --- | --- |
 | Launch app | `./run` (dev — builds the grammar resource, then runs `python3 -B src/__main__.py`) or `python folio.pyz` (distributed zipapp) |
 | Run all tests | `make test` (preferred — builds the grammar resource and sets up a headless display) or, with a display already available, `python3 -B -m unittest discover -s src -t src -v` |
-| Type-check | `mypy src` (the `[tool.mypy]` `mypy_path = "src"` + `explicit_package_bases = true` keys handle the package-less `src` layout) |
+| Type-check | `mypy src` — **requires `mypy >= 1.16`** (earlier releases mis-widen `StrEnum` members to `str` under `enumerate`/`list`, [python/mypy#18587](https://github.com/python/mypy/pull/18587); pinned in `pyproject.toml`'s `[dependency-groups]` `dev`). The `[tool.mypy]` `mypy_path = "src"` + `explicit_package_bases = true` keys handle the package-less `src` layout. |
 | Lint (non-test) | `PYTHONPATH=src pylint --disable=missing-module-docstring,missing-function-docstring,missing-class-docstring --enable=useless-suppression --min-public-methods=1 src` (`PYTHONPATH=src` puts the source root on the path so intra-tree imports resolve) |
 | Lint (test files) | additionally disable `too-many-public-methods,protected-access,duplicate-code,too-many-lines` |
 

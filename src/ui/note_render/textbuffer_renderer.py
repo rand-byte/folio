@@ -86,7 +86,8 @@ Principles & invariants
 
 from __future__ import annotations
 
-from collections.abc import Callable
+from collections.abc import Callable, Iterable
+from typing import assert_never
 
 import gi
 
@@ -1062,56 +1063,63 @@ def _inlines_to_pango_markup(
     (e.g. an italic span inside a header) still needs to compose with
     the header's boldness — Pango handles the composition naturally.
     """
-    body = "".join(_inline_to_pango_markup(node) for node in inlines)
+    body = _join_inline_markup(inlines)
     if bold:
         return f"<b>{body}</b>"
     return body
 
 
-# Same dispatch-ladder shape as the parser's _parse_non_heading_block:
-# isinstance over a closed union, one return per branch. Combining
-# branches via a lookup table would require uniform child-traversal
-# shapes the inline kinds don't share (Monospace's content is a str,
-# Link's text uses a different field name, plain Text has no
-# children at all).
-# pylint: disable-next=too-many-return-statements
+def _join_inline_markup(children: Iterable[InlineNode]) -> str:
+    """Concatenate the Pango markup of each child inline node."""
+    return "".join(_inline_to_pango_markup(child) for child in children)
+
+
+# Closed-union dispatch over InlineNode via ``match`` ending in
+# ``assert_never`` — the same exhaustiveness convention used by
+# asciidoc/summary.py._flatten (this function's twin) and
+# search/note_filter.py. Adding a new InlineNode kind without a case
+# here is a compile-time type error. The result is bound to a single
+# annotated ``markup`` local and returned once: assigning the Any from
+# GLib.markup_escape_text to a typed target is a checked assertion at
+# the assignment boundary, so warn_return_any is satisfied without a
+# suppression.
 def _inline_to_pango_markup(node: InlineNode) -> str:
     """Convert a single inline node to its Pango markup form."""
-    if isinstance(node, Text):
-        return GLib.markup_escape_text(node.content)
-    if isinstance(node, Bold):
-        inner = "".join(_inline_to_pango_markup(c) for c in node.children)
-        return f"<b>{inner}</b>"
-    if isinstance(node, Italic):
-        inner = "".join(_inline_to_pango_markup(c) for c in node.children)
-        return f"<i>{inner}</i>"
-    if isinstance(node, Strikethrough):
-        inner = "".join(_inline_to_pango_markup(c) for c in node.children)
-        return f"<s>{inner}</s>"
-    if isinstance(node, Underline):
-        inner = "".join(_inline_to_pango_markup(c) for c in node.children)
-        return f"<u>{inner}</u>"
-    if isinstance(node, Monospace):
-        # Monospace's content is a literal :class:`str`, not a list of
-        # nested inlines — match :class:`Monospace`'s "no re-parsing"
-        # rule by escaping the content directly. Pango's ``<tt>`` tag
-        # selects a monospace family.
-        return f"<tt>{GLib.markup_escape_text(node.content)}</tt>"
-    if isinstance(node, Link):
-        inner = "".join(_inline_to_pango_markup(c) for c in node.text)
-        # Pango's ``<a href="…">`` requires the URL itself to be
-        # markup-escaped to handle ``&`` characters in query strings.
-        href = GLib.markup_escape_text(node.url)
-        return f'<a href="{href}">{inner}</a>'
-    if isinstance(node, SoftBreak):
-        # Soft line break collapses to a single space (see _emit_inline).
-        # A SoftBreak cannot reach this markup path in practice — the
-        # joiner only appears as a direct child of Paragraph.inlines,
-        # never inside a table/header cell — but the dispatch must stay
-        # exhaustive over the (now wider) InlineNode union.
-        return " "
-    # Closed union; new inline kinds must extend this dispatch.
-    raise TypeError(f"unknown inline node: {type(node).__name__}")
+    markup: str
+    match node:
+        case Text(content=content):
+            markup = GLib.markup_escape_text(content)
+        case Bold(children=children):
+            markup = f"<b>{_join_inline_markup(children)}</b>"
+        case Italic(children=children):
+            markup = f"<i>{_join_inline_markup(children)}</i>"
+        case Strikethrough(children=children):
+            markup = f"<s>{_join_inline_markup(children)}</s>"
+        case Underline(children=children):
+            markup = f"<u>{_join_inline_markup(children)}</u>"
+        case Monospace(content=content):
+            # Monospace's content is a literal :class:`str`, not a list
+            # of nested inlines — match :class:`Monospace`'s "no
+            # re-parsing" rule by escaping the content directly. Pango's
+            # ``<tt>`` tag selects a monospace family.
+            markup = f"<tt>{GLib.markup_escape_text(content)}</tt>"
+        case Link(text=text, url=url):
+            # Pango's ``<a href="…">`` requires the URL itself to be
+            # markup-escaped to handle ``&`` characters in query strings.
+            markup = (
+                f'<a href="{GLib.markup_escape_text(url)}">'
+                f"{_join_inline_markup(text)}</a>"
+            )
+        case SoftBreak():
+            # Soft line break collapses to a single space (see
+            # _emit_inline). A SoftBreak cannot reach this markup path in
+            # practice — the joiner only appears as a direct child of
+            # Paragraph.inlines, never inside a table/header cell — but
+            # the dispatch must stay exhaustive over the InlineNode union.
+            markup = " "
+        case _:
+            assert_never(node)
+    return markup
 
 
 # ---------------------------------------------------------------------------
