@@ -6,7 +6,6 @@ import struct
 import unittest
 import zlib
 from collections.abc import Callable
-from pathlib import Path
 from typing import cast
 
 import gi
@@ -21,13 +20,9 @@ from asciidoc.ast import (
     Bold,
     Italic,
     Monospace,
-    Paragraph,
-    Section,
     SoftBreak,
-    Table,
     Text,
 )
-from asciidoc.parser import parse
 from ui.note_render.tag_table import (
     TagName,
     admonition_body_tag_name,
@@ -43,7 +38,7 @@ from ui.note_render.textbuffer_renderer import (
     _ScaledImagePaintable,
 )
 from config.defaults import TARGET_CHARS_PER_LINE
-from enums import AdmonitionKind, ParseErrorKind
+from enums import AdmonitionKind
 from models.parse_error import ParseError
 
 
@@ -1669,178 +1664,82 @@ class BlockquoteRenderingTests(unittest.TestCase):
 
 
 # ---------------------------------------------------------------------------
-# Sourdough fixture: end-to-end regression for the parser-and-banner work
+# Heterogeneous document composition
 # ---------------------------------------------------------------------------
 
 
-_SOURDOUGH_FIXTURE_PATH: str = (
-    "tests/fixtures/Sourdough_country_loaf.txt"
-)
-"""Frozen real-world note used as the regression target for the
-parser changes that allow document header attribute entries,
-``[cols=…, …]`` directives with sibling fields, and ``link:++…++[t]``
-passthrough URLs. See :class:`SourdoughFixtureRegressionTests`.
-"""
-
-
-def _read_sourdough_fixture() -> str:
-    """Read the Sourdough fixture from disk.
-
-    The fixture is checked into ``tests/fixtures/`` and is the
-    source of truth for the parser-fix regression. Lifting it into
-    a string at test time means an in-tree edit (a typo, a new
-    construct) is caught by the test suite without anyone having
-    to remember to rebuild a baked-in copy.
-    """
-    return Path(_SOURDOUGH_FIXTURE_PATH).read_text(encoding="utf-8")
-
-
-def _elide_recipe_link_line(source: str) -> str:
-    """Return ``source`` with the ``link:++recipe://…++[…]`` line replaced.
-
-    The ``recipe://`` scheme is intentionally outside :class:`LinkScheme`
-    — its eventual home is the cross-reference feature (§3.6), which is
-    deferred. To exercise the *rest* of the fixture (header attributes,
-    cols-with-options table, multi-line admonitions) end-to-end we
-    rewrite this single line into something parseable. The replacement
-    line preserves the bullet and structurally identical prose so the
-    surrounding paragraph layout is unchanged.
-    """
-    out_lines: list[str] = []
-    for line in source.splitlines():
-        if "link:++recipe://" in line:
-            out_lines.append(
-                "* Flavour is great; the levain schedule is dialed in."
-            )
-        else:
-            out_lines.append(line)
-    return "\n".join(out_lines) + "\n"
-
-
 @unittest.skipUnless(_display_available(), "no GDK display")
-class SourdoughFixtureRegressionTests(unittest.TestCase):
-    """End-to-end gate for the plan's parser changes.
+class DocumentCompositionRenderingTests(unittest.TestCase):
+    """The renderer walks a heterogeneous document in a single pass.
 
-    The un-elided fixture must raise :data:`UNSUPPORTED_LINK_SCHEME`
-    on the ``recipe://`` line — the *only* failure remaining after
-    §3.1, §3.2, §3.3, and §3.5 land. With that line elided to a
-    plain bullet, the fixture must render through the full pipeline
-    (parser → renderer → buffer) without raising and produce a
-    non-empty buffer.
+    Every block kind has its own focused rendering test above; this
+    class is the one integration check that they *coexist* — a title, a
+    discarded header attribute run, a top-level table, two sections, a
+    list, and a multi-line admonition all render into one buffer without
+    raising and with each block's text present. It replaces a former
+    real-world note fixture: a hand-written source keeps the test about
+    the renderer rather than about any particular note.
     """
 
-    def test_unelided_fixture_raises_unsupported_link_scheme(self) -> None:
-        source = _read_sourdough_fixture()
-        with self.assertRaises(ParseError) as ctx:
-            parse(source)
-        # Per §3.4 / §6 of the plan, this is the *only* error the
-        # un-elided fixture should raise after the four parser fixes
-        # land. Any other kind here is a regression in one of those
-        # fixes (the header attributes, the cols-with-options table,
-        # the multi-line NOTE/TIP, or the ``++…++`` passthrough).
-        self.assertEqual(
-            ctx.exception.kind,
-            ParseErrorKind.UNSUPPORTED_LINK_SCHEME,
-        )
-        # The error points at the ``link:++recipe://…++[…]`` line —
-        # search the source for the substring and assert the line
-        # number matches. This avoids hard-coding a line number that
-        # would drift if the fixture were ever lightly edited.
-        target_line = next(
-            (
-                idx
-                for idx, line in enumerate(source.splitlines(), start=1)
-                if "recipe://" in line
-            ),
-            None,
-        )
-        self.assertIsNotNone(target_line)
-        self.assertEqual(ctx.exception.line, target_line)
+    _SOURCE: str = (
+        "= Doc Title\n"
+        ":author: Me\n"
+        "\n"
+        "A lead paragraph.\n"
+        "\n"
+        '[cols="3,1"]\n'
+        "|===\n"
+        "|Ingredient |Grams\n"
+        "|Flour |400\n"
+        "|===\n"
+        "\n"
+        "== Notes\n"
+        "\n"
+        "* first point\n"
+        "* second point\n"
+        "\n"
+        "NOTE: a hint that wraps\n"
+        "onto a second line.\n"
+        "\n"
+        "== Result\n"
+        "\n"
+        "Final remark.\n"
+    )
 
-    def test_elided_fixture_parses_cleanly(self) -> None:
-        source = _elide_recipe_link_line(_read_sourdough_fixture())
-        # No ParseError should be raised. The Document carries
-        # the title, the lead paragraph, the table, and the two
-        # sections.
-        document = parse(source)
-        self.assertIsNotNone(document.title)
-        # Header attributes are discarded so they don't appear as
-        # blocks; what *does* appear is: lead paragraph, table,
-        # then the two sections.
-        kinds = [type(b).__name__ for b in document.blocks]
-        self.assertEqual(
-            kinds.count("Paragraph"),
-            1,
-            f"expected exactly one top-level paragraph, got blocks: {kinds}",
-        )
-        self.assertEqual(
-            kinds.count("Table"),
-            1,
-            f"expected exactly one table, got blocks: {kinds}",
-        )
-        self.assertEqual(
-            kinds.count("Section"),
-            2,
-            f"expected two sections, got blocks: {kinds}",
-        )
-        # Spot-check positions for self-documentation.
-        self.assertIsInstance(document.blocks[0], Paragraph)
-        self.assertIsInstance(document.blocks[1], Table)
-        self.assertIsInstance(document.blocks[2], Section)
-        self.assertIsInstance(document.blocks[3], Section)
-
-    def test_elided_fixture_renders_into_buffer(self) -> None:
-        # End-to-end: the full pipeline (parser + renderer) produces
-        # a non-empty buffer for the elided fixture.
+    def test_renders_every_block_into_one_non_empty_buffer(self) -> None:
         renderer, buffer, _ = _build_renderer()
         attached: list[tuple[Gtk.TextChildAnchor, Gtk.Widget]] = []
-        source = _elide_recipe_link_line(_read_sourdough_fixture())
         renderer.render_into(
-            source,
+            self._SOURCE,
             buffer,
-            note_id="sourdough",
+            note_id="composition",
             attach_widget=_collect(attached),
         )
         text = _full_text(buffer)
         self.assertTrue(text)
-        self.assertIn("Sourdough country loaf", text)
-        # Admonition bodies now live in the buffer text (they used to
-        # be inside anchored widgets); section titles and bullet items
-        # were already there. Spot-check both flavours.
-        self.assertIn("Notes", text)
-        self.assertIn("Result", text)
-        self.assertIn("Hydration", text)
+        # Title, both section headings, list text, and the admonition
+        # body all reach the buffer.
+        for fragment in (
+            "Doc Title",
+            "Notes",
+            "Result",
+            "first point",
+            "second point",
+            "Final remark.",
+        ):
+            self.assertIn(fragment, text)
+        # Of these block kinds only the table escapes to an anchored
+        # widget; everything else is in-buffer text.
+        self.assertEqual(len(attached), 1)
 
-    def test_elided_fixture_admonitions_carry_continuation_text(self) -> None:
-        # §3.5: the multi-line NOTE / TIP admonitions in the fixture
-        # carry their full second-line text. After the refactor,
-        # admonition bodies are in-buffer text — walk the buffer
-        # rather than the widget tree.
+    def test_multi_line_admonition_joins_onto_one_logical_line(self) -> None:
+        # The NOTE body wraps over two source lines; it must render as a
+        # single soft-broken line, not with a literal newline embedded.
         renderer, buffer, _ = _build_renderer()
-        source = _elide_recipe_link_line(_read_sourdough_fixture())
-        renderer.render_into(source, buffer, note_id="sourdough")
+        renderer.render_into(self._SOURCE, buffer, note_id="composition")
         text = _full_text(buffer)
-        # Both NOTE and TIP bodies are wrapped over two source lines.
-        # The continuation text from each must appear in the buffer.
-        self.assertIn("hold back 20g", text)
-        self.assertIn("on the next bake", text)  # NOTE line 2
-        self.assertIn("predictably than a cross", text)  # TIP line 2
-
-    def test_elided_fixture_table_has_correct_arity(self) -> None:
-        # §3.2: ``[cols="3,1", options="header"]`` should be
-        # recognised, the cols proportions parsed, and the table
-        # should have the correct number of cells per row.
-        source = _elide_recipe_link_line(_read_sourdough_fixture())
-        document = parse(source)
-        tables = [b for b in document.blocks if isinstance(b, Table)]
-        self.assertEqual(len(tables), 1)
-        table = tables[0]
-        # cols="3,1" — two columns.
-        self.assertEqual(table.column_proportions, (3, 1))
-        # Six rows: header + five ingredient rows.
-        self.assertEqual(len(table.rows), 6)
-        for row in table.rows:
-            self.assertEqual(len(row.cells), 2)
+        self.assertIn("a hint that wraps onto a second line.", text)
+        self.assertNotIn("wraps\nonto", text)
 
 
 @unittest.skipUnless(_display_available(), "no GDK display")

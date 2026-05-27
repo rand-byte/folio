@@ -925,8 +925,8 @@ class LinkMacroPassthroughTests(unittest.TestCase):
 
     def test_passthrough_with_unsupported_scheme_raises(self) -> None:
         # The passthrough wraps the URL syntactically, but the scheme
-        # validation still applies after the closing ``++``. The
-        # Sourdough fixture's ``link:++recipe://…++[…]`` lands here.
+        # validation still applies after the closing ``++`` — a
+        # ``recipe://`` scheme is outside LinkScheme and is rejected.
         with self.assertRaises(ParseError) as ctx:
             parse_inline(
                 "link:++recipe://x++[t]", _LINE

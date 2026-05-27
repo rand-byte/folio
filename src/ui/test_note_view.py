@@ -1296,8 +1296,8 @@ class MessageForTests(unittest.TestCase):
                 self.assertIn("42", message)
 
     def test_unsupported_link_scheme_message_lists_supported_schemes(self) -> None:
-        # The Sourdough note's specific failure is on this kind, so
-        # pin its content explicitly.
+        # This banner must name the schemes the user *can* use, so pin
+        # its content explicitly.
         message = _message_for(ParseErrorKind.UNSUPPORTED_LINK_SCHEME, 39)
         self.assertIn("39", message)
         for scheme in ("http", "https", "mailto"):
@@ -1372,8 +1372,8 @@ class NoteViewErrorBannerTests(unittest.TestCase):
     def test_banner_message_reflects_specific_error_kind(self) -> None:
         # Different parse-error kinds produce different messages.
         repo = _FakeNoteRepository()
-        # Unsupported link scheme — what the Sourdough fixture
-        # actually trips on, after the parser fixes have landed.
+        # Unsupported link scheme — an ftp:// link is outside the
+        # allowlist and surfaces a distinct banner message.
         repo.notes["note-A"] = _make_note(
             "note-A",
             source="link:ftp://example.com[click]\n",

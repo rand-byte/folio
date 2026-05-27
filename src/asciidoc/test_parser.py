@@ -1276,6 +1276,84 @@ class WelcomeNoteRoundTripTests(unittest.TestCase):
 
 
 # ---------------------------------------------------------------------------
+# Heterogeneous document composition
+# ---------------------------------------------------------------------------
+
+
+class DocumentCompositionTests(unittest.TestCase):
+    """Heterogeneous block composition in document order.
+
+    :class:`WelcomeNoteRoundTripTests` already proves that paragraphs,
+    sections, lists, and a code block coexist in one document. This
+    class adds the two shapes that one does not reach: a discarded
+    document-header attribute run sitting above a *top-level* table,
+    and an inline error raised from inside a list item.
+
+    Every individual construct here has focused coverage elsewhere
+    (header attributes, the cols directive, table arity, list and
+    section parsing). What these synthetic sources add — and the only
+    thing they are responsible for — is that the blocks compose in the
+    expected order rather than swallowing or reordering one another.
+    """
+
+    _SOURCE: str = (
+        "= Title\n"
+        ":author: Me\n"
+        ":tags: a, b\n"
+        "\n"
+        "A lead paragraph.\n"
+        "\n"
+        '[cols="3,1"]\n'
+        "|===\n"
+        "|Ingredient |Grams\n"
+        "|Flour |400\n"
+        "|===\n"
+        "\n"
+        "== One\n"
+        "\n"
+        "Body one.\n"
+        "\n"
+        "== Two\n"
+        "\n"
+        "Body two.\n"
+    )
+
+    def test_header_attrs_table_and_sections_compose_in_order(self) -> None:
+        doc = parse(self._SOURCE)
+        # The level-1 title is captured; the header attribute run that
+        # follows it is discarded rather than emitted as blocks.
+        self.assertIsNotNone(doc.title)
+        kinds = [type(block).__name__ for block in doc.blocks]
+        self.assertEqual(
+            kinds, ["Paragraph", "Table", "Section", "Section"]
+        )
+
+    def test_top_level_table_keeps_its_cols_directive(self) -> None:
+        # The cols directive sits *between* the lead paragraph and the
+        # first section; it is parsed in place, not absorbed by either
+        # neighbour.
+        doc = parse(self._SOURCE)
+        table = doc.blocks[1]
+        assert isinstance(table, Table)
+        self.assertEqual(table.column_proportions, (3, 1))
+        self.assertEqual(len(table.rows), 2)
+
+    def test_unsupported_link_scheme_in_list_item_reports_its_line(
+        self,
+    ) -> None:
+        # An inline error raised from inside a list item must surface
+        # with the *list item's* line number, not the document or list
+        # start. BAD_INLINE_SPAN in a list item is covered by ListTests;
+        # this adds the link-scheme variant on a non-first line.
+        with self.assertRaises(ParseError) as ctx:
+            parse("intro.\n\n* alpha\n* beta link:recipe://x[here]\n")
+        self.assertEqual(
+            ctx.exception.kind, ParseErrorKind.UNSUPPORTED_LINK_SCHEME
+        )
+        self.assertEqual(ctx.exception.line, 4)
+
+
+# ---------------------------------------------------------------------------
 # Document header attribute entries
 # ---------------------------------------------------------------------------
 
@@ -1372,9 +1450,7 @@ class MultiLineSingleAdmonitionTests(unittest.TestCase):
     into one paragraph inside the admonition.
 
     Without this rule, the second line would become a stray
-    paragraph *outside* the admonition box — the soft failure §S1
-    of the plan called out for the Sourdough fixture's NOTE / TIP
-    blocks.
+    paragraph *outside* the admonition box.
     """
 
     def test_two_line_note_absorbs_continuation(self) -> None:
