@@ -1531,5 +1531,113 @@ class MultiLineSingleAdmonitionTests(unittest.TestCase):
         self.assertEqual(len(bolds), 3)
 
 
+# ---------------------------------------------------------------------------
+# :tags: attribute parsing
+# ---------------------------------------------------------------------------
+
+
+class TagsAttributeHappyPathTests(unittest.TestCase):
+    """The ``:tags:`` header attribute populates :attr:`Document.tags`."""
+
+    def test_absent_tags_yields_empty_tuple(self) -> None:
+        doc = parse("= T\n\nbody\n")
+        self.assertEqual(doc.tags, ())
+
+    def test_single_tag(self) -> None:
+        doc = parse("= T\n:tags: baking\n\nbody\n")
+        self.assertEqual(doc.tags, ("baking",))
+
+    def test_multiple_tags(self) -> None:
+        doc = parse("= T\n:tags: baking, bread\n\nbody\n")
+        self.assertEqual(doc.tags, ("baking", "bread"))
+
+    def test_whitespace_around_entries_is_stripped(self) -> None:
+        doc = parse("= T\n:tags:  baking  ,   bread  \n\nbody\n")
+        self.assertEqual(doc.tags, ("baking", "bread"))
+
+    def test_trailing_comma_tolerated(self) -> None:
+        doc = parse("= T\n:tags: foo, bar,\n\nbody\n")
+        self.assertEqual(doc.tags, ("bar", "foo"))
+
+    def test_dedup_preserves_set(self) -> None:
+        doc = parse("= T\n:tags: bread, baking, bread, baking\n\nbody\n")
+        self.assertEqual(doc.tags, ("baking", "bread"))
+
+    def test_alphabetical_sort(self) -> None:
+        doc = parse("= T\n:tags: zeta, alpha, mu\n\nbody\n")
+        self.assertEqual(doc.tags, ("alpha", "mu", "zeta"))
+
+    def test_uppercase_is_folded_to_lowercase(self) -> None:
+        doc = parse("= T\n:tags: BAKING, Bread\n\nbody\n")
+        self.assertEqual(doc.tags, ("baking", "bread"))
+
+    def test_bare_setter_yields_empty(self) -> None:
+        doc = parse("= T\n:tags:\n\nbody\n")
+        self.assertEqual(doc.tags, ())
+
+    def test_whitespace_only_value_yields_empty(self) -> None:
+        # ``:tags:   `` after lexer right-strip becomes a bare setter
+        # too; both shapes resolve to ``()``.
+        doc = parse("= T\n:tags:   \n\nbody\n")
+        self.assertEqual(doc.tags, ())
+
+    def test_empty_entries_between_commas_dropped(self) -> None:
+        doc = parse("= T\n:tags: foo, , bar\n\nbody\n")
+        self.assertEqual(doc.tags, ("bar", "foo"))
+
+    def test_digits_and_hyphens_in_charset(self) -> None:
+        doc = parse("= T\n:tags: tag-1, 2024-recipe, plain\n\nbody\n")
+        self.assertEqual(doc.tags, ("2024-recipe", "plain", "tag-1"))
+
+
+class TagsAttributeRejectionTests(unittest.TestCase):
+    """Malformed individual tag values raise BAD_TAG_VALUE."""
+
+    def test_space_inside_tag_rejected(self) -> None:
+        with self.assertRaises(ParseError) as ctx:
+            parse("= T\n:tags: foo bar\n\nbody\n")
+        self.assertEqual(ctx.exception.kind, ParseErrorKind.BAD_TAG_VALUE)
+
+    def test_leading_hyphen_rejected(self) -> None:
+        with self.assertRaises(ParseError) as ctx:
+            parse("= T\n:tags: -foo\n\nbody\n")
+        self.assertEqual(ctx.exception.kind, ParseErrorKind.BAD_TAG_VALUE)
+
+    def test_underscore_rejected(self) -> None:
+        with self.assertRaises(ParseError) as ctx:
+            parse("= T\n:tags: foo_bar\n\nbody\n")
+        self.assertEqual(ctx.exception.kind, ParseErrorKind.BAD_TAG_VALUE)
+
+    def test_punctuation_rejected(self) -> None:
+        with self.assertRaises(ParseError) as ctx:
+            parse("= T\n:tags: foo.bar\n\nbody\n")
+        self.assertEqual(ctx.exception.kind, ParseErrorKind.BAD_TAG_VALUE)
+
+    def test_non_ascii_rejected(self) -> None:
+        with self.assertRaises(ParseError) as ctx:
+            parse("= T\n:tags: café\n\nbody\n")
+        self.assertEqual(ctx.exception.kind, ParseErrorKind.BAD_TAG_VALUE)
+
+
+class TagsAttributeDuplicateTests(unittest.TestCase):
+    """Two ``:tags:`` entries in the same header raise."""
+
+    def test_two_tags_entries_rejected(self) -> None:
+        with self.assertRaises(ParseError) as ctx:
+            parse("= T\n:tags: foo\n:tags: bar\n\nbody\n")
+        self.assertEqual(
+            ctx.exception.kind,
+            ParseErrorKind.DUPLICATE_TAG_ATTRIBUTE,
+        )
+
+    def test_two_tags_with_other_attr_between_rejected(self) -> None:
+        with self.assertRaises(ParseError) as ctx:
+            parse("= T\n:tags: foo\n:author: me\n:tags: bar\n\nbody\n")
+        self.assertEqual(
+            ctx.exception.kind,
+            ParseErrorKind.DUPLICATE_TAG_ATTRIBUTE,
+        )
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -17,10 +17,9 @@ from gi.repository import Gdk, Gio, Gtk  # noqa: E402
 
 from controllers.app_state import AppState
 from controllers.note_controller import NoteController
-from enums import NotebookIcon, ViewMode
+from enums import ViewMode
 from models.attachment import Attachment
 from models.note import Note
-from models.notebook import Notebook
 from ui.main_window import (
     MainWindow,
     _ARTICLE_SIDE_SLACK_PX,
@@ -91,8 +90,6 @@ class _FakeNoteRepository:
     def get(self, note_id: str) -> Note:
         return self.notes[note_id]
 
-    def list_by_notebook(self, notebook_id: str) -> list[Note]:
-        return [n for n in self.notes.values() if n.notebook_id == notebook_id]
 
     def list_modified_since(self, _since: datetime) -> list[Note]:
         raise NotImplementedError
@@ -120,50 +117,19 @@ class _FakeNoteRepository:
         self.notes[note_id] = Note(
             id=existing.id,
             title=existing.title,
-            notebook_id=existing.notebook_id,
             source=source,
             snippet=existing.snippet,
+            tags=existing.tags,
             created_at=existing.created_at,
             modified_at=modified_at,
         )
 
-    def update_notebook(self, _note_id: str, _notebook_id: str) -> None:
-        raise NotImplementedError
 
     def delete(self, _note_id: str) -> None:
         raise NotImplementedError
 
-
-class _FakeNotebookRepository:
-    notebooks: dict[str, Notebook]
-
-    def __init__(self) -> None:
-        self.notebooks = {}
-
-    def add(self, notebook: Notebook) -> None:
-        self.notebooks[notebook.id] = notebook
-
-    def list_all(self) -> list[Notebook]:
-        return list(self.notebooks.values())
-
-    def get(self, notebook_id: str) -> Notebook:
-        return self.notebooks[notebook_id]
-
-    def insert(self, _notebook: Notebook) -> None:
-        raise NotImplementedError
-
-    def rename(self, _notebook_id: str, _new_name: str) -> None:
-        raise NotImplementedError
-
-    def set_icon(self, _notebook_id: str, _icon: NotebookIcon) -> None:
-        raise NotImplementedError
-
-    def delete_and_reparent_notes(
-        self,
-        _notebook_id: str,
-        _target_id: str,
-    ) -> None:
-        raise NotImplementedError
+    def list_tags(self) -> tuple[tuple[str, int], ...]:
+        return ()
 
 
 class _FakeAttachmentStore:
@@ -262,21 +228,12 @@ class MainWindowConstructionTests(unittest.TestCase):
     ) -> MainWindow:
         application = _test_application()
         notes = _FakeNoteRepository()
-        notebooks = _FakeNotebookRepository()
-        notebooks.add(
-            Notebook(
-                id="nb-1",
-                name="Personal",
-                parent_id=None,
-                icon=NotebookIcon.HOME,
-            )
-        )
         notes.notes["n1"] = Note(
             id="n1",
             title="Hello",
-            notebook_id="nb-1",
             source="= Hello\n\nbody.\n",
             snippet="body.",
+            tags=(),
             created_at=_FIXED_NOW,
             modified_at=_FIXED_NOW,
         )
@@ -289,7 +246,6 @@ class MainWindowConstructionTests(unittest.TestCase):
         return MainWindow(
             application=application,
             note_repository=notes,
-            notebook_repository=notebooks,
             note_controller=controller,
             app_state=state,
         )
@@ -361,7 +317,6 @@ class MainWindowViewModeStackTests(unittest.TestCase):
     def _build_window(self, *, view_mode: ViewMode) -> MainWindow:
         application = _test_application()
         notes = _FakeNoteRepository()
-        notebooks = _FakeNotebookRepository()
         state = AppState(initial_view_mode=view_mode)
         controller = NoteController(
             repository=notes,
@@ -371,7 +326,6 @@ class MainWindowViewModeStackTests(unittest.TestCase):
         return MainWindow(
             application=application,
             note_repository=notes,
-            notebook_repository=notebooks,
             note_controller=controller,
             app_state=state,
         )
@@ -447,21 +401,12 @@ class MainWindowViewModeChangeFlushAndRefreshTests(unittest.TestCase):
         """
         application = _test_application()
         notes = _FakeNoteRepository()
-        notebooks = _FakeNotebookRepository()
-        notebooks.add(
-            Notebook(
-                id="nb-1",
-                name="Personal",
-                parent_id=None,
-                icon=NotebookIcon.HOME,
-            )
-        )
         notes.notes[note_id] = Note(
             id=note_id,
             title="Hello",
-            notebook_id="nb-1",
             source=source,
             snippet="body.",
+            tags=(),
             created_at=_FIXED_NOW,
             modified_at=_FIXED_NOW,
         )
@@ -481,7 +426,6 @@ class MainWindowViewModeChangeFlushAndRefreshTests(unittest.TestCase):
         window = MainWindow(
             application=application,
             note_repository=notes,
-            notebook_repository=notebooks,
             note_controller=controller,
             app_state=state,
         )
@@ -576,9 +520,9 @@ class MainWindowViewModeChangeFlushAndRefreshTests(unittest.TestCase):
         repo.notes["n1"] = Note(
             id=existing.id,
             title=existing.title,
-            notebook_id=existing.notebook_id,
             source="= new\n",
             snippet=existing.snippet,
+            tags=(),
             created_at=existing.created_at,
             modified_at=existing.modified_at,
         )

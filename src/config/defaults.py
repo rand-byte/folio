@@ -25,20 +25,13 @@ Principles & invariants
   are typography decisions — the live measurement happens once per font
   in the UI layer, the result is cached for the container's lifetime,
   and the values are intentionally not exposed in any settings panel.
-* :data:`SEED_NOTEBOOKS` and :data:`SEED_WELCOME_NOTE_SOURCE` are written
-  to a fresh database by the v1 migration. They are never re-applied: a
-  user who deletes the welcome note must not see it reappear on the next
-  launch. The migration's own version-tracking enforces this.
-* Seed notebook ids use a stable ``seed-…`` prefix so they remain
-  identifiable in the database for diagnostics and so they cannot collide
-  with the UUID-shaped ids the repository generates for user-created
-  notebooks.
+* :data:`SEED_WELCOME_NOTE_SOURCE` is written to a fresh database by the
+  v1 migration. It is never re-applied: a user who deletes the welcome
+  note must not see it reappear on the next launch. The migration's own
+  version-tracking enforces this.
 """
 
 from __future__ import annotations
-
-from enums import NotebookIcon
-from models.notebook import Notebook
 
 
 # ---------------------------------------------------------------------------
@@ -100,77 +93,16 @@ title, so the note list always has a non-empty title to show.
 # Seed identifiers
 # ---------------------------------------------------------------------------
 
-SEED_NOTEBOOK_ID_PERSONAL: str = "seed-personal"
-SEED_NOTEBOOK_ID_RECIPES: str = "seed-recipes"
-SEED_NOTEBOOK_ID_BAKING: str = "seed-baking"
-SEED_NOTEBOOK_ID_WEEKNIGHT: str = "seed-weeknight-dinners"
-SEED_NOTEBOOK_ID_TRAVEL: str = "seed-travel"
-SEED_NOTEBOOK_ID_LEARNING: str = "seed-learning"
-SEED_NOTEBOOK_ID_ARCHIVE: str = "seed-archive"
-
 SEED_WELCOME_NOTE_ID: str = "seed-welcome-note"
-
-
-# ---------------------------------------------------------------------------
-# Seed notebooks (top-level first, then children — preserves the SQL
-# insertion order so foreign-key references resolve)
-# ---------------------------------------------------------------------------
-
-SEED_NOTEBOOKS: tuple[Notebook, ...] = (
-    Notebook(
-        id=SEED_NOTEBOOK_ID_PERSONAL,
-        name="Personal",
-        parent_id=None,
-        icon=NotebookIcon.HOME,
-    ),
-    Notebook(
-        id=SEED_NOTEBOOK_ID_RECIPES,
-        name="Recipes",
-        parent_id=None,
-        icon=NotebookIcon.BOOK,
-    ),
-    Notebook(
-        id=SEED_NOTEBOOK_ID_BAKING,
-        name="Baking",
-        parent_id=SEED_NOTEBOOK_ID_RECIPES,
-        icon=NotebookIcon.BOOK,
-    ),
-    Notebook(
-        id=SEED_NOTEBOOK_ID_WEEKNIGHT,
-        name="Weeknight dinners",
-        parent_id=SEED_NOTEBOOK_ID_RECIPES,
-        icon=NotebookIcon.BOOK,
-    ),
-    Notebook(
-        id=SEED_NOTEBOOK_ID_TRAVEL,
-        name="Travel",
-        parent_id=None,
-        icon=NotebookIcon.MAP,
-    ),
-    Notebook(
-        id=SEED_NOTEBOOK_ID_LEARNING,
-        name="Learning",
-        parent_id=None,
-        icon=NotebookIcon.BRAIN,
-    ),
-    Notebook(
-        id=SEED_NOTEBOOK_ID_ARCHIVE,
-        name="Archive",
-        parent_id=None,
-        icon=NotebookIcon.ARCHIVE,
-    ),
-)
 
 
 # ---------------------------------------------------------------------------
 # Seed welcome note
 # ---------------------------------------------------------------------------
 
-SEED_WELCOME_NOTE_NOTEBOOK_ID: str = SEED_NOTEBOOK_ID_PERSONAL
-"""Notebook the welcome note is dropped into on a fresh database."""
-
 SEED_WELCOME_NOTE_SOURCE: str = """\
 = Welcome to your notes
+:tags: welcome
 
 This is your first note. You can keep it, edit it, or delete it.
 
@@ -187,7 +119,7 @@ type the markup directly.
 == Step-by-step lists
 
 . Click *New note* on the toolbar to create a note
-. Pick a notebook from the sidebar to organise it
+. Add a ``:tags: foo, bar`` line under the title to file it
 . Use the search box to find any note across the whole library
 
 == Code blocks

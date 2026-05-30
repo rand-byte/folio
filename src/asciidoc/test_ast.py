@@ -105,7 +105,7 @@ class AstNodeShapeTests(unittest.TestCase):
                 Blockquote,
                 {"author", "source", "blocks", "source_line"},
             ),
-            (Document, {"title", "blocks", "source_line"}),
+            (Document, {"title", "tags", "blocks", "source_line"}),
         )
         for cls, expected in cases:
             with self.subTest(cls=cls.__name__):
@@ -137,7 +137,7 @@ class AstFrozenTests(unittest.TestCase):
             section.level = 3  # type: ignore[misc]
 
     def test_document_is_frozen(self) -> None:
-        document = Document(title=None, blocks=(), source_line=1)
+        document = Document(title=None, tags=(), blocks=(), source_line=1)
         with self.assertRaises(FrozenInstanceError):
             document.blocks = ()  # type: ignore[misc]
 
@@ -221,14 +221,24 @@ class AstConstructionTests(unittest.TestCase):
         self.assertEqual(image.attrs, "alt=Cat")
 
     def test_document_title_optional(self) -> None:
-        without = Document(title=None, blocks=(), source_line=1)
+        without = Document(title=None, tags=(), blocks=(), source_line=1)
         with_title = Document(
             title=(_make_text("Title"),),
+            tags=(),
             blocks=(),
             source_line=1,
         )
         self.assertIsNone(without.title)
         self.assertIsNotNone(with_title.title)
+
+    def test_document_tags_field(self) -> None:
+        doc = Document(
+            title=None,
+            tags=("baking", "bread"),
+            blocks=(),
+            source_line=1,
+        )
+        self.assertEqual(doc.tags, ("baking", "bread"))
 
     def test_lists_hold_list_items(self) -> None:
         item = ListItem(inlines=(_make_text("x"),), source_line=2)

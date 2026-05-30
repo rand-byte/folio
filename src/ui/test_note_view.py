@@ -120,16 +120,16 @@ def _make_note(
     note_id: str,
     *,
     source: str = "= Hello\n\nbody.\n",
-    notebook_id: str = "nb-1",
+    tags: tuple[str, ...] = (),
     title: str | None = None,
 ) -> Note:
     """Build a deterministic :class:`Note` for tests."""
     return Note(
         id=note_id,
         title=title if title is not None else "Hello",
-        notebook_id=notebook_id,
         source=source,
         snippet="body.",
+        tags=tags,
         created_at=_FIXED_NOW,
         modified_at=_FIXED_NOW + timedelta(seconds=1),
     )
@@ -155,10 +155,6 @@ class _FakeNoteRepository:
         self.get_calls.append(note_id)
         return self.notes[note_id]
 
-    # Unused by the view, but the protocol requires them.
-    def list_by_notebook(self, _notebook_id: str) -> list[Note]:
-        raise NotImplementedError
-
     def list_modified_since(self, _since: datetime) -> list[Note]:
         raise NotImplementedError
 
@@ -179,11 +175,11 @@ class _FakeNoteRepository:
     ) -> None:
         raise NotImplementedError
 
-    def update_notebook(self, _note_id: str, _notebook_id: str) -> None:
-        raise NotImplementedError
-
     def delete(self, _note_id: str) -> None:
         raise NotImplementedError
+
+    def list_tags(self) -> tuple[tuple[str, int], ...]:
+        return ()
 
 
 class _FakeAttachmentStore:

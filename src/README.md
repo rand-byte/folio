@@ -93,7 +93,7 @@ Layers may only import **downward**. Every arrow below points from caller to cal
 | Add a parse error variant | `enums.py` `ParseErrorKind` → the parser site that detects it → `parser.py` tests | gutter rendering in `ui/note_view.py` |
 | Change DB schema | **new** `Migration` appended to `storage/migrations.py` `ALL_MIGRATIONS` — never edit a shipped one | the repository that reads/writes the new column |
 | Add a note-level user action | `controllers/note_controller.py` (mutate + emit signal) → caller in `ui/toolbar.py` or `ui/note_editor.py` | repository protocol if storage shape changes |
-| Add a notebook-level user action | `controllers/notebook_controller.py` → caller in `ui/sidebar.py` | `storage/notebook_repository.py` if storage shape changes |
+| Change tag parsing or validation | `asciidoc/parser.py` `parse_tags_value` (strict path used by the parser; raises `ParseError(BAD_TAG_VALUE)` / `DUPLICATE_TAG_ATTRIBUTE`) — the same helper is reused by the permissive `_fallback_tags` arm of `asciidoc/summary.py`, so a single charset / normalisation rule covers both | `asciidoc/test_parser.py` `Tags*Tests`; `asciidoc/test_summary.py` `DeriveSummaryTags*Tests`; if the rule change affects how existing notes parse, a `Migration` that re-derives `note_tags` |
 | Change rendered-view styling | `ui/note_render/tag_table.py` (tag definitions) — every visual style lives in exactly one place, including block-level paragraph styling for admonitions / blockquotes / code blocks. Block-level *tints* are painted at snapshot time by `_ArticleTextView` in `ui/note_view.py`, driven by `tag_table.build_wash_specs()` — see the next row for the constants. | rarely `ui/note_render/textbuffer_renderer.py` for layout (only table sizing escapes to widget land) |
 | Change block-level tint colours or insets | `ui/note_render/tag_table.py` — `_ADMONITION_TINTS`, `_BLOCKQUOTE_TINT`, `_CODE_BLOCK_TINT` for colours; `_ADMONITION_HMARGIN_PX`, `_BLOCKQUOTE_HMARGIN_PX`, `_BLOCKQUOTE_RIGHT_MARGIN_PX`, `_CODE_BLOCK_HMARGIN_PX` for insets. The same constants feed both the paragraph tag margins (text position, `accumulative-margin = True`) and the `WashSpec` records (wash painter), so the two cannot drift. | `test_tag_table.py` `WashSpecTests`, `test_note_view.py` `ArticleTextViewWashRectTests` |
 | Tune article column margins | `config/defaults.py` (the three `ARTICLE_*` multipliers) | none — `ui/note_view.py` reads the constants once at `NoteView.__init__` and applies them to the inner `Gtk.TextView`'s four margins |
@@ -103,7 +103,7 @@ Layers may only import **downward**. Every arrow below points from caller to cal
 | Change source-editor syntax highlight | `ui/language_spec.lang` (GtkSourceView grammar) | the grammar is compiled into `folio.gresource`, so rebuild it (`./run` / `make resource` / `make test` do this automatically) for edits to take effect; the `.xml` manifest only changes if you add/rename grammar files |
 | Tune a constant (sizes, quotas) | `config/defaults.py` | none — that is the point of this module |
 | Change paths / XDG behaviour | `config/paths.py` | tests under `config/test_paths.py` |
-| Add a new sort key / smart filter | `enums.py` (`NoteSortKey` / `SmartFilter`) → `search/note_filter.py` → `ui/note_list.py` (dropdown) | tests in `search/test_note_filter.py` |
+| Add a new sort key / smart filter | `enums.py` (`NoteSortKey` / `SmartFilter`, e.g. the existing `ALL` / `UNTAGGED`) → `search/note_filter.py` → `ui/note_list.py` (dropdown) and / or `ui/sidebar.py` (Library section row) | tests in `search/test_note_filter.py` |
 | Change the note-list row title/snippet | the *derivation* in `asciidoc/summary.py` (`derive_summary`); the *presentation* in `ui/note_list.py` `_make_note_row` + classes in `ui/css/app.css` (`.note-title` / `.note-snippet` / `.note-meta`) | `storage/note_repository.py` only if the cached-column contract changes; a backfill migration if existing rows must be rewritten |
 | Change selection / view-mode plumbing | `controllers/app_state.py` (add a field + signal). Every UI widget that reacts to it. **The MainWindow's `_on_view_mode_changed` handler is the single place that orchestrates editor-flush + view-refresh across the toggle — see the corresponding invariant in `ui/main_window.py`.** | every UI widget that reacts to it |
 | Add a new dialog | `ui/dialogs.py` | the controller or widget that opens it |
@@ -131,15 +131,14 @@ so top-level modules are imported by their bare names (`config`, `ui`, …).
 
 | File | LOC | One-line summary |
 | --- | ---: | --- |
-| `defaults.py` | 205 | Tunable constants (`MAX_ATTACHMENT_BYTES`, `TARGET_CHARS_PER_LINE`, the three `ARTICLE_*` margin multipliers, plus `SNIPPET_MAX_CHARS` and `UNTITLED` consumed by `asciidoc/summary.py`) and the seed `SEED_NOTEBOOKS` / `SEED_WELCOME_NOTE_SOURCE`. |
+| `defaults.py` | 134 | Tunable constants (`MAX_ATTACHMENT_BYTES`, `TARGET_CHARS_PER_LINE`, the three `ARTICLE_*` margin multipliers, plus `SNIPPET_MAX_CHARS` and `UNTITLED` consumed by `asciidoc/summary.py`) and `SEED_WELCOME_NOTE_SOURCE` (which now carries a `:tags: welcome` header so the seed note classifies on first launch). |
 | `paths.py` | 76 | `data_directory()`, `database_path()` — XDG-aware filesystem resolution. Each call is pure; mkdir is the only side effect. |
 
 ### `models/` — frozen dataclasses
 
 | File | LOC | One-line summary |
 | --- | ---: | --- |
-| `note.py` | 79 | `Note` dataclass + the frozen `NoteSummary` `(title, snippet)` value type. Both are frozen; updates produce new instances via the repository. Derivation lives in `asciidoc/summary.py`, not here (single classifier). |
-| `notebook.py` | 53 | `Notebook` dataclass. Two-level hierarchy invariant is enforced in `storage`, not here. |
+| `note.py` | 87 | `Note` dataclass + the frozen `NoteSummary` `(title, snippet, tags)` value type. Both are frozen; updates produce new instances via the repository. `tags` is a sorted lowercase `tuple[str, ...]` derived from the source's `:tags:` header. Derivation lives in `asciidoc/summary.py`, not here (single classifier). |
 | `attachment.py` | 56 | `Attachment` metadata — deliberately has **no `data` field**; bytes live only in the `attachments.data` BLOB column. |
 | `parse_error.py` | 58 | `ParseError`, the **only** exception type raised by the AsciiDoc lexer / parser / inline parser. Carries `kind: ParseErrorKind` + `line` + `column`. |
 
@@ -151,9 +150,9 @@ A **pure** format library: every module is GTK-free and storage-free, importing 
 | --- | ---: | --- |
 | `lexer.py` | 899 | `tokenize(source) -> tuple[Token, ...]`. **Line-based, context-free, permissive** — never raises on grammar issues; that is the parser's job. Public token dataclasses listed at the top. |
 | `inline_parser.py` | 790 | `parse_inline(line, line_no) -> tuple[InlineNode, ...]`. **Strict** — every formatting marker must be paired; otherwise raises `ParseErrorKind.BAD_INLINE_SPAN` (or `UNTERMINATED_MONOSPACE`). |
-| `parser.py` | 1353 | `parse(source) -> Document`. Recursive-descent, strict, exhaustive over tokens. Each syntactic failure maps to a specific `ParseErrorKind`. |
-| `ast.py` | 434 | Frozen dataclasses for every AST node (`Document`, `Section`, `Paragraph`, `OrderedList`, …, `Bold`, `Italic`, `Link`, …). Children are `tuple[...]` for true immutability. `BlockNode` and `InlineNode` are closed unions. |
-| `summary.py` | 267 | `derive_summary(source) -> NoteSummary`. Parses once and reads title + snippet off the AST (prose vs structure decided by an exhaustive `match`). **Never raises** — catches `ParseError` only and falls back to a permissive extraction so a mid-edit note stays saveable. The single source of truth for the note-list summary. |
+| `parser.py` | 1410 | `parse(source) -> Document`. Recursive-descent, strict, exhaustive over tokens. Each syntactic failure maps to a specific `ParseErrorKind`. Header-attribute consumption captures `:tags:` and validates it via the shared `parse_tags_value` helper (`BAD_TAG_VALUE` on a malformed entry, `DUPLICATE_TAG_ATTRIBUTE` on a repeated `:tags:`); every other attribute name is still discarded. |
+| `ast.py` | 460 | Frozen dataclasses for every AST node (`Document`, `Section`, `Paragraph`, `OrderedList`, …, `Bold`, `Italic`, `Link`, …). Children are `tuple[...]` for true immutability. `BlockNode` and `InlineNode` are closed unions. `Document` carries the parsed `tags: tuple[str, ...]` (sorted, lowercase, deduplicated) alongside `title` and `blocks`. |
+| `summary.py` | 320 | `derive_summary(source) -> NoteSummary`. Parses once and reads title + snippet + tags off the AST (prose vs structure decided by an exhaustive `match`). **Never raises** — catches `ParseError` only and falls back to a permissive extraction so a mid-edit note stays saveable; the tag arm of the fallback walks the lexer's `AttributeEntryToken` stream and re-uses `parse_tags_value`, resolving any failure to empty tags. The single source of truth for the note-list summary and tag classification. |
 
 ### `storage/` — SQLite persistence
 
@@ -161,26 +160,26 @@ A **pure** format library: every module is GTK-free and storage-free, importing 
 
 | File | LOC | One-line summary |
 | --- | ---: | --- |
-| `protocols.py` | 276 | `NoteRepositoryProtocol`, `NotebookRepositoryProtocol`, `AttachmentStoreProtocol` (now incl. `count_for_note` — a BLOB-free `SELECT COUNT(*)` for the note-list badge), `RendererProtocol`; the `AttachmentRejected` / `NestingTooDeep` exceptions; PEP 695 resolver aliases `ImageBytesResolver` / `ColumnWidthResolver`. **Pure typing — no `sqlite3` or `gi` at runtime.** |
+| `protocols.py` | 209 | `NoteRepositoryProtocol` (incl. `list_tags()` for the sidebar's *Tags* section), `AttachmentStoreProtocol` (now incl. `count_for_note` — a BLOB-free `SELECT COUNT(*)` for the note-list badge), `RendererProtocol`; the `AttachmentRejected` exception; PEP 695 resolver aliases `ImageBytesResolver` / `ColumnWidthResolver`. **Pure typing — no `sqlite3` or `gi` at runtime.** |
 | `database.py` | 170 | Owns the single `sqlite3.Connection`. `autocommit=True`, `PRAGMA foreign_keys=ON`, composable `transaction()` (nested calls become `SAVEPOINT`). |
-| `migrations.py` | 289 | All `CREATE TABLE` / `CREATE INDEX` / `CREATE TRIGGER` statements. Append-only `ALL_MIGRATIONS` tuple; `apply_pending()` is idempotent. v1 seeds notebooks + welcome note (title/snippet via `derive_summary`); v2 backfills every note's cached `title`/`snippet` from `derive_summary` (fallback-safe, leaves `modified_at` untouched). |
-| `note_repository.py` | 218 | SQLite-backed `NoteRepositoryProtocol`. **Single owner of the `source → cached columns` mapping**: both `insert` and `update_source` derive `title`/`snippet` from the source via `derive_summary`. Row↔dataclass conversion lives in one place per direction; timestamps round-trip via ISO-8601. |
-| `notebook_repository.py` | 187 | SQLite-backed `NotebookRepositoryProtocol`. Catches the `RAISE(ABORT, 'NestingTooDeep')` trigger and re-raises as `NestingTooDeep`. `delete_and_reparent_notes` is one transaction. |
+| `migrations.py` | 297 | All `CREATE TABLE` / `CREATE INDEX` / `CREATE TRIGGER` statements. Append-only `ALL_MIGRATIONS` tuple; `apply_pending()` is idempotent. v1 created the now-demolished notebooks schema + seed welcome note (title/snippet via `derive_summary`); v2 backfilled every note's cached `title`/`snippet` from `derive_summary`; v3 drops the notebook triggers / `notebook_id` column / `notebooks` table, creates the `note_tags` junction table, and re-derives every existing note's tag set via `derive_summary` to backfill `note_tags` (permissive — notes whose `:tags:` line is malformed land with zero tags). |
+| `note_repository.py` | 220 | SQLite-backed `NoteRepositoryProtocol`. **Single owner of the `source → cached state` mapping**: `insert` and `update_source` derive `title`/`snippet`/`tags` from the source via `derive_summary`, write the cached columns, and replace the note's rows in `note_tags` (DELETE + INSERT) in the same transaction. Reads join `note_tags` so `Note.tags` is populated in one round trip — no N+1. `list_tags()` returns `((tag, count), …)` alphabetically for the sidebar. Row↔dataclass conversion lives in one place per direction; timestamps round-trip via ISO-8601. |
 | `attachment_store.py` | 280 | BLOB-backed `AttachmentStoreProtocol`. Enforces `MAX_ATTACHMENT_BYTES` via `Path.stat()` **before** any bytes are read. Rejections raise `AttachmentRejected(reason=…)`. `count_for_note` is a BLOB-free `SELECT COUNT(*)` for the note-list badge. |
-| `_notebook_writes.py` | 55 | Private helper sharing the `INSERT INTO notebooks` statement between migrations and the repository. Do not import from outside the storage package. |
 
-**v1 schema (live in `migrations.py`):**
+**Live schema (post-v3, defined in `migrations.py`):**
 
-- `notebooks(id PK, name, parent_id FK→notebooks ON DELETE RESTRICT, icon, sort_order)` + two `BEFORE INSERT/UPDATE` triggers enforcing two-level depth.
-- `notes(id PK, title, notebook_id FK→notebooks ON DELETE RESTRICT, source, snippet, created_at, modified_at)` + indices on `notebook_id` and `modified_at DESC`.
+- `notes(id PK, title, source, snippet, created_at, modified_at)` + an index on `modified_at DESC`. No `notebook_id` column.
+- `note_tags(note_id FK→notes ON DELETE CASCADE, tag, PRIMARY KEY (note_id, tag))` + an index on `tag`. Populated by the repository on every `insert` / `update_source`; the `ON DELETE CASCADE` removes a note's tag rows when the note is deleted.
 - `attachments(id PK, note_id FK→notes ON DELETE CASCADE, filename, byte_size, mime_type, data BLOB)` + index on `note_id`.
-- `schema_version(version, applied_at)` records which migrations have been applied.
+- `schema_version(version PK)` records which migrations have been applied.
+
+The pre-v3 `notebooks` table and the `notes.notebook_id` column are gone; v1's CREATE statements still ship in `migrations.py` for the benefit of upgrade paths but are immediately undone by v3 on any database newer than v0.
 
 ### `search/` — pure filters
 
 | File | LOC | One-line summary |
 | --- | ---: | --- |
-| `note_filter.py` | 213 | `filter_by_selection`, `filter_by_query`, `sort_notes`. The `Selection` discriminated union (`SmartSelection` / `NotebookSelection`) lives here. `RECENT_WINDOW_DAYS = 7`. `now` is injected. |
+| `note_filter.py` | 192 | `filter_by_selection`, `filter_by_query`, `sort_notes`. The `Selection` discriminated union (`SmartSelection` over `SmartFilter.ALL` / `SmartFilter.UNTAGGED`, or `TagSelection` carrying a non-empty `frozenset[str]`) lives here. Multi-tag selection has **AND** semantics — a note appears iff every selected tag is on it. No clock dependency. |
 
 ### `controllers/` — UI⇄storage mediators
 
@@ -188,9 +187,8 @@ Controllers are the only place where storage calls + signal emission live togeth
 
 | File | LOC | One-line summary |
 | --- | ---: | --- |
-| `app_state.py` | 187 | `AppState` GObject. Holds the **only** in-memory navigational state: `selection`, `selected_note_id`, `view_mode`, `query`. Emits `selection-changed`, `selected-note-changed`, `view-mode-changed`, `query-changed` (all payload-free). |
-| `note_controller.py` | 379 | `create_note`, `duplicate_note`, `request_delete`, `update_source`, `move_to_notebook`, `add_attachment`, `remove_attachment`. Emits `notes-changed`, `attachment-rejected`, `storage-error`. Clock + id-gen are injected callables. |
-| `notebook_controller.py` | 208 | `create_notebook`, `rename`, `set_icon`, `delete` (with reparent). Emits `notebooks-changed`, `storage-error`. |
+| `app_state.py` | 220 | `AppState` GObject. Holds the **only** in-memory navigational state: `selection` (a `SmartSelection` / `TagSelection` union from `search.note_filter`), `selected_note_id`, `view_mode`, `query`. Selection mutators are restricted to `set_smart(SmartFilter)` and `toggle_tag(name)`; the controller owns the rules (smart filter wipes tag set; toggling the last tag off returns to `SmartSelection(ALL)`). Emits `selection-changed`, `selected-note-changed`, `view-mode-changed`, `query-changed` (all payload-free). |
+| `note_controller.py` | 391 | `create_note`, `duplicate_note`, `request_delete`, `update_source`, `add_attachment`, `remove_attachment`. Also exports the free function `make_initial_source(selection)` — returns a seed source pre-filled with `:tags: …` from the current `TagSelection` (or just a title line for a `SmartSelection`) so the toolbar's *+New* hands tag intent through to the new note. Emits `notes-changed`, `attachment-rejected`, `storage-error`. Clock + id-gen are injected callables. |
 | `_storage_errors.py` | 69 | Shared `capturing_storage_errors(emit)` context manager — single home for the *catch `sqlite3.DatabaseError`, emit a toast signal, re-raise* pattern. Private to the controllers package. |
 
 **Signal flow at a glance:**
@@ -201,8 +199,8 @@ user gesture (UI)
        ▼
 controller method
        │  ── storage call (in `capturing_storage_errors(...)`)
-       │  ── emit "(notes|notebooks)-changed"     ─► listeners re-query repository
-       │  ── mutate AppState                       ─► AppState emits its own signal
+       │  ── emit "notes-changed"                    ─► listeners re-query repository
+       │  ── mutate AppState                          ─► AppState emits its own signal
        ▼
 widgets refresh by reading from repositories + AppState
 ```
@@ -213,17 +211,17 @@ This is the only layer that owns widget trees. Every widget is thin and unit-tes
 
 | File | LOC | One-line summary |
 | --- | ---: | --- |
-| `application.py` | 286 | `NotesApplication(Gtk.Application)` — composes `Database`, repositories, `AttachmentStore`, `AppState`, controllers, then presents `MainWindow`. Single-instance via `FLAGS_NONE`. |
-| `main_window.py` | 328 | `MainWindow` — the three-pane shell: sidebar │ note list │ `Gtk.Stack(view ↔ editor)`. Toolbar is set as the title bar. The initial window width is derived from the rendered article column (`_default_window_width` + `NoteView.preferred_column_width_px()`) so the fixed-width column opens fully visible. |
-| `sidebar.py` | 846 | Notebook tree on the left, rendered with `Gtk.ListView` + `Gtk.TreeListModel` + `Gtk.TreeExpander` (one `ListView`/`SingleSelection` per section). Click → mutate `AppState.selection`. Expansion state is widget-local (intentional — different windows could disagree), snapshotted across `refresh()`. Icon-column alignment depends on the `treeexpander indent` rule in `css/app.css` — the two are a matched pair. |
-| `note_list.py` | 700 | Middle pane: header + sortable, filtered list. `compute_display_notes(...)` is a free function so tests don't need widgets. Each row has a bold title, a two-line dimmed snippet, and a right-aligned `📎 N \| date` meta line; per-note attachment counts come from the injected `AttachmentStoreProtocol` (`count_for_note`) without threading a new arg through `compute_display_notes`. |
-| `note_view.py` | 933 | Read pane. `ArticleContainer` enforces the fixed-width text column; `preferred_column_width_px()` exposes that column's outer width so `MainWindow` can size the initial window to it. Calls `TextBufferRenderer.render_into` on every change. `_ArticleTextView` paints the wider tinted wash behind admonition / blockquote / code-block paragraphs (see `tag_table.WashSpec`). |
-| `note_editor.py` | 1260 | Source pane (`GtkSource.View` + `GtkSource.Buffer`). Debounced autosave (`AUTOSAVE_DEBOUNCE_MS`). Stateless w.r.t. notes — reloads from repo on selection change. |
-| `toolbar.py` | 702 | Top `Gtk.HeaderBar` — *New* button, search entry, breadcrumb, View/Source toggle, More menu (Duplicate/Delete). `resolve_target_notebook`, `compute_breadcrumb`, `format_breadcrumb` are extracted as free functions. |
-| `dialogs.py` | 363 | Shared modal dialogs — confirm-delete (a callable matching `ConfirmDialogPresenter`) and `IconPickerPopover`. Production wires `Gtk.AlertDialog`; tests drive callbacks synchronously. |
+| `application.py` | 277 | `NotesApplication(Gtk.Application)` — composes `Database`, `NoteRepository`, `AttachmentStore`, `AppState`, `NoteController`, then presents `MainWindow`. Single-instance via `FLAGS_NONE`. |
+| `main_window.py` | 423 | `MainWindow` — the three-pane shell: sidebar │ note list │ `Gtk.Stack(view ↔ editor)`. Toolbar is set as the title bar. The initial window width is derived from the rendered article column (`_default_window_width` + `NoteView.preferred_column_width_px()`) so the fixed-width column opens fully visible. No notebook plumbing — the window is wired with the single note repository. |
+| `sidebar.py` | 697 | Flat library navigation. Two model-driven sections: **Library** (a `Gtk.SingleSelection` over a `Gio.ListStore` of `All notes` + `Untagged`) and **Tags** (a `Gtk.MultiSelection` over the alphabetised `note_repository.list_tags()` output). Selection in one section clears the other — the rule is owned by `AppState`, both `ListView`s observe it. The *Tags* header reads `"Tags (N selected)"` when N > 0, with the parenthetical styled via the `.selection-count` accent class. Tag rows reserve column width for the leading ✓ so labels stay aligned across selected and unselected rows. Refresh on `notes-changed` rebuilds the tag store and drops tags from the selection that no longer exist. |
+| `note_list.py` | 700 | Middle pane: header (`"{N} notes"` + sort dropdown — no notebook lead-in, no filter chips) and a sortable, filtered list. `compute_display_notes(...)` is a free function so tests don't need widgets. Each row has a bold title, a two-line dimmed snippet, an optional third line of dim `#tag` chips when `note.tags` is non-empty, and a right-aligned `📎 N │ date` meta line; per-note attachment counts come from the injected `AttachmentStoreProtocol` (`count_for_note`). |
+| `note_view.py` | 1482 | Read pane. `ArticleContainer` enforces the fixed-width text column; `preferred_column_width_px()` exposes that column's outer width so `MainWindow` can size the initial window to it. Calls `TextBufferRenderer.render_into` on every change. Under the title, in VIEW mode only, renders a row of pill chips (one per tag, `.tag-chip-article`) — hidden in SOURCE mode where the raw `:tags:` line is visible in the editor. `_ArticleTextView` paints the wider tinted wash behind admonition / blockquote / code-block paragraphs (see `tag_table.WashSpec`). |
+| `note_editor.py` | 1304 | Source pane (`GtkSource.View` + `GtkSource.Buffer`). Debounced autosave (`AUTOSAVE_DEBOUNCE_MS`). Stateless w.r.t. notes — reloads from repo on selection change. |
+| `toolbar.py` | 359 | Top `Gtk.HeaderBar` — *New* button (calls `make_initial_source(app_state.selection)` so the new note inherits the current tag selection's `:tags:` line), search entry, an empty centre slot (no breadcrumb in the flat library), View/Source toggle, More menu (Duplicate/Delete). |
+| `dialogs.py` | 124 | Shared modal dialogs — confirm-delete only (a callable matching `ConfirmDialogPresenter`). Production wires `Gtk.AlertDialog`; tests drive callbacks synchronously. The pre-tags `IconPickerPopover` is gone with the notebook UI. |
 | `link_handler.py` | 386 | `LinkHandler.install(textview, ...)` — wires `EventControllerMotion` (cursor) + `GestureClick` (open on `released`). URI is launched via an injected `UriLauncherProtocol`; allowlist is `enums.LinkScheme`. |
 | `_image_picker.py` | 152 | `FileDialogOpener` callable + `default_file_dialog_opener` wrapping `Gtk.FileDialog.open`. MIME filters mirror `enums.MimeKind`. Module is private so `note_editor.py` stays under pylint's `max-module-lines`. |
-| `css/app.css` | 118 | Application stylesheet — loaded by `NotesApplication`. Styles the note-view parse-error banner, the library sidebar, and the note-list rows (`.note-title` bold; `.note-snippet` / `.note-meta` / `.note-meta-separator` dimmed) — all palette-safe via geometry/opacity only. Read via `importlib.resources`; ships in `folio.pyz` because the zipapp archives `src/` directly. |
+| `css/app.css` | 163 | Application stylesheet — loaded by `NotesApplication`. Styles the note-view parse-error banner, the library sidebar (incl. `.selection-count`, `.tag-row-check`), the note-list rows (`.note-title` bold; `.note-snippet` / `.note-meta` / `.note-meta-separator` dimmed; `.tag-chip-row` dim third-line chips), and the article-view pill chips (`.tag-chip-article`) — all palette-safe via geometry/opacity only. Read via `importlib.resources`; ships in `folio.pyz` because the zipapp archives `src/` directly. |
 | `language_spec.lang` | 353 | GtkSourceView 5 grammar driving source-editor syntax highlighting. Pure data, but **not** loaded from disk: it is compiled into `folio.gresource` (via `folio.gresource.xml`) and loaded at runtime through a `resource:///` search path — see section 8 and the `note_editor.py` invariants. The raw `.lang` is a build input only; it is *not* shipped in the zipapp. |
 | `folio.gresource.xml` | 5 | Committed GResource manifest. Publishes `language_spec.lang` under `resource:///org/folio/language-specs`; `glib-compile-resources` compiles it to the generated (gitignored) `folio.gresource` that ships in the zipapp. |
 

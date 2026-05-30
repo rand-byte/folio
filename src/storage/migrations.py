@@ -10,25 +10,28 @@ Principles & invariants
   monotonically-increasing :attr:`Migration.version`. A shipped
   migration is never edited, removed, or re-numbered — only superseded
   by a later one. This is the contract that lets users upgrade across
-  releases without losing data.
+  releases without losing data. v1 (notebooks + welcome note) and v2
+  (cached-column backfill) are byte-identical to their shipped form;
+  v3 demolishes the notebook schema and introduces the ``note_tags``
+  junction table.
 * :func:`apply_pending` is idempotent: invoking it on a database that
   is already at the latest version is a no-op. Each migration runs
   inside its own transaction (composed via :meth:`Database.transaction`),
   so a partial failure leaves the database at the last successfully-
   applied version.
-* The seed data (notebooks + welcome note) is part of the v1 migration
-  and is applied **exactly once**: the ``schema_version`` table records
-  that v1 has run, and v1 is never replayed. A user who deletes the
-  welcome note will not see it reappear on the next launch.
+* The seed welcome note is part of the v1 migration and is applied
+  **exactly once**: the ``schema_version`` table records that v1 has
+  run, and v1 is never replayed. A user who deletes the welcome note
+  will not see it reappear on the next launch.
 * This module derives cached note columns through
-  :func:`asciidoc.summary.derive_summary` (the v1 seed and the
-  v2 backfill). ``storage`` is allowed to import the pure ``asciidoc``
-  core; the edge is acyclic because ``asciidoc`` imports nothing from
-  ``storage``.
-* The migration runner does not import from :mod:`storage.note_repository`
-  or :mod:`storage.notebook_repository`. The repositories
-  depend on the schema being in place; the schema is set up here. Going
-  the other way would create a cycle.
+  :func:`asciidoc.summary.derive_summary` (the v1 seed, the v2
+  backfill, and the v3 tag backfill). ``storage`` is allowed to import
+  the pure ``asciidoc`` core; the edge is acyclic because ``asciidoc``
+  imports nothing from ``storage``.
+* The migration runner does not import from
+  :mod:`storage.note_repository`. The repository depends on the schema
+  being in place; the schema is set up here. Going the other way would
+  create a cycle.
 """
 
 from __future__ import annotations
@@ -40,18 +43,20 @@ from datetime import UTC, datetime
 
 from asciidoc.summary import derive_summary
 from config.defaults import (
-    SEED_NOTEBOOKS,
     SEED_WELCOME_NOTE_ID,
-    SEED_WELCOME_NOTE_NOTEBOOK_ID,
     SEED_WELCOME_NOTE_SOURCE,
 )
-from storage._notebook_writes import insert_notebook_row
 from storage.database import Database
 
 
 # ---------------------------------------------------------------------------
 # v1 schema — every CREATE statement executed on a fresh database
 # ---------------------------------------------------------------------------
+#
+# NOTE: v1 ships forever as-is. v3 demolishes the notebooks table and
+# the ``notes.notebook_id`` column. We keep v1's original DDL intact so
+# upgrade paths from older databases run the same statements they
+# originally did, then have them undone by v3.
 
 _V1_SCHEMA: tuple[str, ...] = (
     """
@@ -63,9 +68,6 @@ _V1_SCHEMA: tuple[str, ...] = (
         sort_order  INTEGER NOT NULL DEFAULT 0
     )
     """,
-    # Triggers enforce the two-level depth invariant on both INSERT and
-    # UPDATE OF parent_id. SQLite CHECK constraints can't reference other
-    # rows, so triggers are the right shape here.
     """
     CREATE TRIGGER notebooks_no_deep_nesting_insert
     BEFORE INSERT ON notebooks
@@ -97,11 +99,6 @@ _V1_SCHEMA: tuple[str, ...] = (
     """,
     "CREATE INDEX idx_notes_notebook ON notes(notebook_id)",
     "CREATE INDEX idx_notes_modified ON notes(modified_at DESC)",
-    # Attachments table is created here, in v1, even though the
-    # AttachmentStore implementation arrives in build step 11. Creating
-    # it now means we don't need a v2 migration just to add a table —
-    # and the rest of the schema (notes.id with ON DELETE CASCADE) can
-    # rely on its existence from day one.
     """
     CREATE TABLE attachments (
         id          TEXT PRIMARY KEY,
@@ -113,6 +110,23 @@ _V1_SCHEMA: tuple[str, ...] = (
     )
     """,
     "CREATE INDEX idx_attachments_note ON attachments(note_id)",
+)
+
+
+# Notebook seed data is a v1 fixture; it lives here (not in
+# config/defaults.py) because every higher layer should have no
+# knowledge of notebooks. The v1 migration is the only consumer.
+_V1_SEED_NOTEBOOK_ID_PERSONAL: str = "seed-personal"
+_V1_SEED_NOTEBOOK_ROWS: tuple[
+    tuple[str, str, str | None, str], ...,
+] = (
+    (_V1_SEED_NOTEBOOK_ID_PERSONAL, "Personal", None, "home"),
+    ("seed-recipes", "Recipes", None, "book"),
+    ("seed-baking", "Baking", "seed-recipes", "book"),
+    ("seed-weeknight-dinners", "Weeknight dinners", "seed-recipes", "book"),
+    ("seed-travel", "Travel", None, "map"),
+    ("seed-learning", "Learning", None, "brain"),
+    ("seed-archive", "Archive", None, "archive"),
 )
 
 
@@ -151,11 +165,19 @@ def _apply_v1(connection: sqlite3.Connection, now: datetime) -> None:
     for statement in _V1_SCHEMA:
         connection.execute(statement)
 
-    # Seeds: top-level notebooks first, children second. The tuple in
-    # ``defaults`` is already in this order; ``enumerate`` gives every
-    # notebook a stable sort_order so the sidebar matches the design.
-    for sort_order, notebook in enumerate(SEED_NOTEBOOKS):
-        insert_notebook_row(connection, notebook, sort_order)
+    # Seeds: top-level notebooks first, children second (already in
+    # that order); ``enumerate`` gives every notebook a stable
+    # sort_order. v3 will drop all of this; the rows must be inserted
+    # under v1 so existing databases that upgrade across v1 → v3 see
+    # the same v1 state.
+    for sort_order, row in enumerate(_V1_SEED_NOTEBOOK_ROWS):
+        notebook_id, name, parent_id, icon = row
+        connection.execute(
+            "INSERT INTO notebooks "
+            "(id, name, parent_id, icon, sort_order) "
+            "VALUES (?, ?, ?, ?, ?)",
+            (notebook_id, name, parent_id, icon, sort_order),
+        )
 
     timestamp = now.isoformat()
     welcome_summary = derive_summary(SEED_WELCOME_NOTE_SOURCE)
@@ -166,7 +188,7 @@ def _apply_v1(connection: sqlite3.Connection, now: datetime) -> None:
         (
             SEED_WELCOME_NOTE_ID,
             welcome_summary.title,
-            SEED_WELCOME_NOTE_NOTEBOOK_ID,
+            _V1_SEED_NOTEBOOK_ID_PERSONAL,
             SEED_WELCOME_NOTE_SOURCE,
             welcome_summary.snippet,
             timestamp,
@@ -181,19 +203,7 @@ def _apply_v1(connection: sqlite3.Connection, now: datetime) -> None:
 
 
 def _apply_v2(connection: sqlite3.Connection, now: datetime) -> None:
-    """Rewrite every note's cached ``title`` / ``snippet`` columns.
-
-    The derivation moved to :func:`derive_summary` and now selects clean
-    prose (dropping document attribute entries, table markup, and list
-    bullets that the old prefix-scanner leaked), so cached values written
-    by earlier releases are stale. This migration re-derives both columns
-    from each note's stored source. ``derive_summary`` never raises, so
-    historical rows whose source no longer parses are handled by its
-    permissive fallback rather than aborting the migration.
-
-    ``now`` is unused: a backfill does not touch timestamps — rewriting
-    ``modified_at`` would lie about when the user last edited the note.
-    """
+    """Rewrite every note's cached ``title`` / ``snippet`` columns."""
     _ = now
     cursor = connection.execute("SELECT id, source FROM notes")
     rows = cursor.fetchall()
@@ -206,12 +216,77 @@ def _apply_v2(connection: sqlite3.Connection, now: datetime) -> None:
 
 
 # ---------------------------------------------------------------------------
+# v3 migration body — drop notebooks, introduce note_tags junction
+# ---------------------------------------------------------------------------
+
+
+_V3_DDL: tuple[str, ...] = (
+    # SQLite refuses to drop a column or table participating in a live
+    # FK relationship while ``PRAGMA foreign_keys = ON`` is enforcing
+    # each statement individually. The defer pragma postpones FK checks
+    # to COMMIT time; by COMMIT the FK column and the notebooks table
+    # are gone, so there is nothing left to enforce. The pragma is
+    # transaction-scoped (it resets to 0 when this transaction ends),
+    # so connection-wide FK behaviour outside the migration is
+    # unchanged.
+    "PRAGMA defer_foreign_keys = 1",
+    # Drop the notebook depth-enforcing triggers (created in v1).
+    "DROP TRIGGER IF EXISTS notebooks_no_deep_nesting_insert",
+    "DROP TRIGGER IF EXISTS notebooks_no_deep_nesting_update",
+    # Drop the notebook index on the notes table before dropping its column.
+    "DROP INDEX IF EXISTS idx_notes_notebook",
+    # Drop the notebook FK column on notes. SQLite >= 3.35 supports
+    # DROP COLUMN; the project ships against a recent SQLite.
+    "ALTER TABLE notes DROP COLUMN notebook_id",
+    # Drop the notebooks table itself.
+    "DROP TABLE IF EXISTS notebooks",
+    # Junction table: note ↔ tag. ``ON DELETE CASCADE`` removes a
+    # note's tag rows when the note row is removed.
+    """
+    CREATE TABLE note_tags (
+        note_id TEXT NOT NULL
+            REFERENCES notes(id) ON DELETE CASCADE,
+        tag     TEXT NOT NULL,
+        PRIMARY KEY (note_id, tag)
+    )
+    """,
+    "CREATE INDEX idx_note_tags_tag ON note_tags(tag)",
+)
+
+
+def _apply_v3(connection: sqlite3.Connection, now: datetime) -> None:
+    """Demolish the notebook schema; introduce ``note_tags`` + backfill.
+
+    After running the DDL we re-derive every existing note's tag set
+    via :func:`derive_summary` and insert one row per (note, tag) into
+    ``note_tags``. ``derive_summary`` never raises, so notes whose
+    ``:tags:`` header line is malformed quietly backfill with zero
+    tags — matching the rest of the cached-derivation contract.
+
+    ``now`` is unused: a tag backfill does not touch timestamps.
+    """
+    _ = now
+    for statement in _V3_DDL:
+        connection.execute(statement)
+    cursor = connection.execute("SELECT id, source FROM notes")
+    rows = cursor.fetchall()
+    for row in rows:
+        summary = derive_summary(row["source"])
+        for tag in summary.tags:
+            connection.execute(
+                "INSERT INTO note_tags (note_id, tag) VALUES (?, ?)",
+                (row["id"], tag),
+            )
+
+
+# ---------------------------------------------------------------------------
 # Migration registry — append-only
 # ---------------------------------------------------------------------------
 
 ALL_MIGRATIONS: tuple[Migration, ...] = (
     Migration(version=1, apply=_apply_v1),
     Migration(version=2, apply=_apply_v2),
+    Migration(version=3, apply=_apply_v3),
 )
 
 
@@ -228,27 +303,12 @@ def apply_pending(
     """Apply every migration whose version is above the current DB version.
 
     The first call on a fresh database creates ``schema_version`` and
-    every domain table, index, and trigger, then seeds notebooks and
-    the welcome note. Subsequent calls on a current database are a
-    no-op.
-
-    Parameters
-    ----------
-    database:
-        An open :class:`Database`. Migrations run in transactions
-        managed via :meth:`Database.transaction`.
-    now:
-        The timestamp used for any migration-generated timestamps —
-        currently the welcome note's ``created_at`` and ``modified_at``.
-        Defaults to ``datetime.now(UTC)``; tests pass a fixed value so
-        their assertions are deterministic.
+    every domain table, index, and trigger, then seeds the welcome
+    note. Subsequent calls on a current database are a no-op.
     """
     effective_now = datetime.now(UTC) if now is None else now
 
-    # Bootstrap: the version table is created outside a transaction so
-    # we can read it consistently below. ``IF NOT EXISTS`` keeps this
-    # idempotent even if a previous run died after creating the table
-    # but before applying v1.
+    # Bootstrap.
     database.connection.execute(_SCHEMA_VERSION_TABLE_SQL)
     cursor = database.connection.execute(
         "SELECT MAX(version) FROM schema_version"
@@ -268,12 +328,7 @@ def apply_pending(
 
 
 def current_schema_version(database: Database) -> int:
-    """Return the highest applied schema version, or 0 if none.
-
-    Useful for diagnostics and tests. If ``schema_version`` does not
-    exist yet (no migration ever applied), returns 0 without creating
-    the table.
-    """
+    """Return the highest applied schema version, or 0 if none."""
     cursor = database.connection.execute(
         "SELECT name FROM sqlite_master "
         "WHERE type = 'table' AND name = 'schema_version'"

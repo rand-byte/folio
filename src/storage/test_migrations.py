@@ -5,15 +5,8 @@ from __future__ import annotations
 import unittest
 from datetime import UTC, datetime
 
-from config.defaults import (
-    SEED_NOTEBOOKS,
-    SEED_NOTEBOOK_ID_PERSONAL,
-    SEED_NOTEBOOK_ID_RECIPES,
-    SEED_WELCOME_NOTE_ID,
-    SEED_WELCOME_NOTE_NOTEBOOK_ID,
-    SEED_WELCOME_NOTE_SOURCE,
-)
 from asciidoc.summary import derive_summary
+from config.defaults import SEED_WELCOME_NOTE_ID, SEED_WELCOME_NOTE_SOURCE
 from storage.database import Database
 from storage.migrations import (
     ALL_MIGRATIONS,
@@ -47,6 +40,11 @@ def _all_trigger_names(database: Database) -> set[str]:
     return {row[0] for row in cursor.fetchall()}
 
 
+def _column_names(database: Database, table: str) -> set[str]:
+    cursor = database.connection.execute(f"PRAGMA table_info({table})")
+    return {row[1] for row in cursor.fetchall()}
+
+
 # ---------------------------------------------------------------------------
 # Schema-version bookkeeping
 # ---------------------------------------------------------------------------
@@ -71,296 +69,191 @@ class SchemaVersionTests(unittest.TestCase):
         db = Database.in_memory()
         self.addCleanup(db.close)
         apply_pending(db, now=_FIXED_NOW)
-        # A second call must be a no-op: no extra schema_version row,
-        # no extra notebooks, no extra notes.
         apply_pending(db, now=_FIXED_NOW)
-
         self.assertEqual(
             current_schema_version(db),
             max(m.version for m in ALL_MIGRATIONS),
         )
-
-        notebook_count = db.connection.execute(
-            "SELECT COUNT(*) FROM notebooks"
-        ).fetchone()[0]
-        self.assertEqual(notebook_count, len(SEED_NOTEBOOKS))
-
-        note_count = db.connection.execute(
-            "SELECT COUNT(*) FROM notes"
-        ).fetchone()[0]
-        self.assertEqual(note_count, 1)
-
-        version_row_count = db.connection.execute(
-            "SELECT COUNT(*) FROM schema_version"
-        ).fetchone()[0]
-        self.assertEqual(version_row_count, len(ALL_MIGRATIONS))
-
-    def test_all_migrations_have_unique_versions(self) -> None:
-        versions = [m.version for m in ALL_MIGRATIONS]
-        self.assertEqual(len(versions), len(set(versions)))
-
-    def test_all_migrations_are_in_ascending_order(self) -> None:
-        versions = [m.version for m in ALL_MIGRATIONS]
-        self.assertEqual(versions, sorted(versions))
-
-
-# ---------------------------------------------------------------------------
-# v1 schema shape
-# ---------------------------------------------------------------------------
-
-
-class V1SchemaTests(unittest.TestCase):
-    db: Database
-
-    def setUp(self) -> None:
-        self.db = Database.in_memory()
-        self.addCleanup(self.db.close)
-        apply_pending(self.db, now=_FIXED_NOW)
-
-    def test_v1_creates_all_expected_tables(self) -> None:
-        tables = _all_table_names(self.db)
-        # schema_version is created by the runner; the rest by v1.
-        self.assertIn("schema_version", tables)
-        self.assertIn("notebooks", tables)
-        self.assertIn("notes", tables)
-        self.assertIn("attachments", tables)
-
-    def test_v1_creates_expected_indexes(self) -> None:
-        indexes = _all_index_names(self.db)
-        self.assertIn("idx_notes_notebook", indexes)
-        self.assertIn("idx_notes_modified", indexes)
-        self.assertIn("idx_attachments_note", indexes)
-
-    def test_v1_creates_expected_triggers(self) -> None:
-        triggers = _all_trigger_names(self.db)
-        self.assertIn("notebooks_no_deep_nesting_insert", triggers)
-        self.assertIn("notebooks_no_deep_nesting_update", triggers)
-
-
-# ---------------------------------------------------------------------------
-# Seed data
-# ---------------------------------------------------------------------------
-
-
-class SeedDataTests(unittest.TestCase):
-    db: Database
-
-    def setUp(self) -> None:
-        self.db = Database.in_memory()
-        self.addCleanup(self.db.close)
-        apply_pending(self.db, now=_FIXED_NOW)
-
-    def test_seeds_all_notebooks(self) -> None:
-        cursor = self.db.connection.execute(
-            "SELECT id, name, parent_id, icon, sort_order FROM notebooks "
-            "ORDER BY sort_order"
-        )
-        rows = cursor.fetchall()
-        self.assertEqual(len(rows), len(SEED_NOTEBOOKS))
-
-        seeded_ids = [row["id"] for row in rows]
-        expected_ids = [n.id for n in SEED_NOTEBOOKS]
-        self.assertEqual(seeded_ids, expected_ids)
-
-    def test_baking_and_weeknight_have_recipes_as_parent(self) -> None:
-        cursor = self.db.connection.execute(
-            "SELECT id, parent_id FROM notebooks WHERE parent_id IS NOT NULL"
-        )
-        children = {row["id"]: row["parent_id"] for row in cursor.fetchall()}
-        self.assertEqual(children.get("seed-baking"), SEED_NOTEBOOK_ID_RECIPES)
+        # Schema-version table has exactly one row per shipped migration.
+        cursor = db.connection.execute("SELECT version FROM schema_version")
+        versions = sorted(int(row[0]) for row in cursor.fetchall())
         self.assertEqual(
-            children.get("seed-weeknight-dinners"),
-            SEED_NOTEBOOK_ID_RECIPES,
+            versions, [m.version for m in ALL_MIGRATIONS],
         )
 
-    def test_top_level_seeds_have_null_parent(self) -> None:
-        cursor = self.db.connection.execute(
-            "SELECT id FROM notebooks WHERE parent_id IS NULL"
-        )
-        top_level = {row["id"] for row in cursor.fetchall()}
-        # Every seed except the two children of "Recipes" is top-level.
-        expected_top_level = {
-            n.id for n in SEED_NOTEBOOKS if n.parent_id is None
-        }
-        self.assertEqual(top_level, expected_top_level)
 
-    def test_welcome_note_in_personal_notebook(self) -> None:
-        cursor = self.db.connection.execute(
-            "SELECT id, notebook_id FROM notes"
-        )
-        rows = cursor.fetchall()
-        self.assertEqual(len(rows), 1)
-        self.assertEqual(rows[0]["id"], SEED_WELCOME_NOTE_ID)
-        self.assertEqual(rows[0]["notebook_id"], SEED_NOTEBOOK_ID_PERSONAL)
-        self.assertEqual(SEED_WELCOME_NOTE_NOTEBOOK_ID, SEED_NOTEBOOK_ID_PERSONAL)
+# ---------------------------------------------------------------------------
+# Post-migration shape: notes table, note_tags table, no notebooks
+# ---------------------------------------------------------------------------
 
-    def test_welcome_note_title_and_snippet_derived_from_source(self) -> None:
+
+class PostMigrationSchemaTests(unittest.TestCase):
+    """v3 demolished the notebook schema; v1's leftovers must be gone."""
+
+    def setUp(self) -> None:
+        self.db = Database.in_memory()
+        self.addCleanup(self.db.close)
+        apply_pending(self.db, now=_FIXED_NOW)
+
+    def test_notebooks_table_is_gone(self) -> None:
+        self.assertNotIn("notebooks", _all_table_names(self.db))
+
+    def test_notes_table_has_no_notebook_id(self) -> None:
+        self.assertNotIn("notebook_id", _column_names(self.db, "notes"))
+
+    def test_notes_table_keeps_core_columns(self) -> None:
+        self.assertEqual(
+            _column_names(self.db, "notes"),
+            {
+                "id", "title", "source", "snippet",
+                "created_at", "modified_at",
+            },
+        )
+
+    def test_note_tags_junction_table_present(self) -> None:
+        self.assertIn("note_tags", _all_table_names(self.db))
+        self.assertEqual(
+            _column_names(self.db, "note_tags"),
+            {"note_id", "tag"},
+        )
+
+    def test_note_tags_index_present(self) -> None:
+        self.assertIn("idx_note_tags_tag", _all_index_names(self.db))
+
+    def test_notebook_depth_triggers_dropped(self) -> None:
+        triggers = _all_trigger_names(self.db)
+        self.assertNotIn("notebooks_no_deep_nesting_insert", triggers)
+        self.assertNotIn("notebooks_no_deep_nesting_update", triggers)
+
+    def test_notebook_index_dropped(self) -> None:
+        self.assertNotIn("idx_notes_notebook", _all_index_names(self.db))
+
+
+# ---------------------------------------------------------------------------
+# Seed welcome note still lands; its tags backfill from :tags: welcome
+# ---------------------------------------------------------------------------
+
+
+class SeedWelcomeNoteTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.db = Database.in_memory()
+        self.addCleanup(self.db.close)
+        apply_pending(self.db, now=_FIXED_NOW)
+
+    def test_welcome_note_is_present(self) -> None:
         cursor = self.db.connection.execute(
-            "SELECT title, snippet, source FROM notes "
-            "WHERE id = ?",
+            "SELECT id, title, source FROM notes WHERE id = ?",
             (SEED_WELCOME_NOTE_ID,),
         )
         row = cursor.fetchone()
+        self.assertIsNotNone(row)
         expected = derive_summary(SEED_WELCOME_NOTE_SOURCE)
-        self.assertEqual(row["source"], SEED_WELCOME_NOTE_SOURCE)
         self.assertEqual(row["title"], expected.title)
-        self.assertEqual(row["snippet"], expected.snippet)
+        self.assertEqual(row["source"], SEED_WELCOME_NOTE_SOURCE)
 
-    def test_welcome_note_uses_supplied_now(self) -> None:
+    def test_welcome_note_has_welcome_tag(self) -> None:
         cursor = self.db.connection.execute(
-            "SELECT created_at, modified_at FROM notes WHERE id = ?",
+            "SELECT tag FROM note_tags WHERE note_id = ? ORDER BY tag",
             (SEED_WELCOME_NOTE_ID,),
         )
-        row = cursor.fetchone()
-        expected = _FIXED_NOW.isoformat()
-        self.assertEqual(row["created_at"], expected)
-        self.assertEqual(row["modified_at"], expected)
-
-    def test_default_now_is_used_when_not_supplied(self) -> None:
-        # We don't try to pin the value; we just confirm that calling
-        # apply_pending() without ``now=`` succeeds and writes a UTC
-        # ISO-8601 timestamp.
-        db = Database.in_memory()
-        self.addCleanup(db.close)
-        apply_pending(db)
-        cursor = db.connection.execute(
-            "SELECT modified_at FROM notes WHERE id = ?",
-            (SEED_WELCOME_NOTE_ID,),
-        )
-        row = cursor.fetchone()
-        # If parsing the value back round-trips to a timezone-aware
-        # datetime, we accept it as well-formed.
-        parsed = datetime.fromisoformat(row["modified_at"])
-        self.assertIsNotNone(parsed.tzinfo)
-
-    def test_seed_notebooks_get_consecutive_sort_orders(self) -> None:
-        cursor = self.db.connection.execute(
-            "SELECT id, sort_order FROM notebooks ORDER BY sort_order ASC"
-        )
-        rows = cursor.fetchall()
-        sort_orders = [row["sort_order"] for row in rows]
-        self.assertEqual(sort_orders, list(range(len(SEED_NOTEBOOKS))))
+        tags = [row[0] for row in cursor.fetchall()]
+        self.assertEqual(tags, ["welcome"])
 
 
 # ---------------------------------------------------------------------------
-# v2 backfill — title/snippet rewritten from derive_summary
+# v3 tag backfill exercises every note's :tags: header
 # ---------------------------------------------------------------------------
 
 
-class V2BackfillTests(unittest.TestCase):
-    """The v2 migration rewrites cached title/snippet for every note."""
+class V3TagBackfillTests(unittest.TestCase):
+    """A v2-shaped database upgraded to v3 has note_tags populated from
+    every note's source."""
 
-    def _fresh_v1_only_db(self) -> Database:
-        """A database with only v1 applied, so v2 is still pending.
-
-        Creates the schema by hand-running the first migration the same
-        way the runner does, then records v1 — without letting
-        ``apply_pending`` run v2 yet.
-        """
-        db = Database.in_memory()
-        self.addCleanup(db.close)
-        db.connection.execute(
+    def setUp(self) -> None:
+        self.db = Database.in_memory()
+        self.addCleanup(self.db.close)
+        # Run only the first two migrations to produce a v2-state DB.
+        v1_and_v2 = tuple(m for m in ALL_MIGRATIONS if m.version <= 2)
+        self.db.connection.execute(
             "CREATE TABLE IF NOT EXISTS schema_version "
             "(version INTEGER NOT NULL PRIMARY KEY)"
         )
-        v1 = next(m for m in ALL_MIGRATIONS if m.version == 1)
-        with db.transaction() as connection:
-            v1.apply(connection, _FIXED_NOW)
-            connection.execute(
-                "INSERT INTO schema_version (version) VALUES (1)"
+        for migration in v1_and_v2:
+            with self.db.transaction() as connection:
+                migration.apply(connection, _FIXED_NOW)
+                connection.execute(
+                    "INSERT INTO schema_version (version) VALUES (?)",
+                    (migration.version,),
+                )
+
+    def _insert_pre_v3_note(
+        self,
+        *,
+        note_id: str,
+        source: str,
+    ) -> None:
+        # Direct insert against the v1+v2 schema (with notebook_id).
+        summary = derive_summary(source)
+        timestamp = _FIXED_NOW.isoformat()
+        self.db.connection.execute(
+            "INSERT INTO notes "
+            "(id, title, notebook_id, source, snippet, created_at, modified_at) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?)",
+            (
+                note_id, summary.title, "seed-personal",
+                source, summary.snippet, timestamp, timestamp,
+            ),
+        )
+
+    def test_v3_backfills_tags_for_every_note(self) -> None:
+        self._insert_pre_v3_note(
+            note_id="n-baking",
+            source="= Sourdough\n:tags: baking, bread\n\nA loaf.",
+        )
+        self._insert_pre_v3_note(
+            note_id="n-untagged",
+            source="= No tags here\n\nbody only",
+        )
+        self._insert_pre_v3_note(
+            note_id="n-broken",
+            source="= Broken tag header\n:tags: foo bar\n\nbody",
+        )
+        # Now finish the upgrade.
+        apply_pending(self.db, now=_FIXED_NOW)
+
+        # n-baking has its two derived tags.
+        baking_tags = [
+            row[0] for row in self.db.connection.execute(
+                "SELECT tag FROM note_tags WHERE note_id = 'n-baking' "
+                "ORDER BY tag"
             )
-        return db
+        ]
+        self.assertEqual(baking_tags, ["baking", "bread"])
 
-    def test_backfill_rewrites_stale_snippet(self) -> None:
-        db = self._fresh_v1_only_db()
-        # Simulate a row written by an older release whose cached
-        # columns are stale / leaky relative to the new derivation.
-        source = (
-            "= Recipe\n"
-            ":author: Me\n"
-            "\n"
-            "A weekly bake.\n"
-        )
-        db.connection.execute(
-            "INSERT INTO notes "
-            "(id, title, notebook_id, source, snippet, "
-            " created_at, modified_at) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?)",
-            (
-                "stale-note",
-                "WRONG TITLE",
-                SEED_NOTEBOOK_ID_PERSONAL,
-                source,
-                ":author: Me A weekly bake.",  # leaky old-style snippet
-                _FIXED_NOW.isoformat(),
-                _FIXED_NOW.isoformat(),
-            ),
-        )
+        # n-untagged has none.
+        untagged_count = self.db.connection.execute(
+            "SELECT COUNT(*) FROM note_tags WHERE note_id = 'n-untagged'"
+        ).fetchone()[0]
+        self.assertEqual(untagged_count, 0)
 
-        apply_pending(db, now=_FIXED_NOW)
+        # n-broken (BAD_TAG_VALUE) backfills as untagged via the
+        # permissive fallback. The migration must not abort on it.
+        broken_count = self.db.connection.execute(
+            "SELECT COUNT(*) FROM note_tags WHERE note_id = 'n-broken'"
+        ).fetchone()[0]
+        self.assertEqual(broken_count, 0)
 
-        row = db.connection.execute(
-            "SELECT title, snippet FROM notes WHERE id = ?",
-            ("stale-note",),
-        ).fetchone()
-        expected = derive_summary(source)
-        self.assertEqual(row["title"], expected.title)
-        self.assertEqual(row["snippet"], expected.snippet)
-        self.assertNotIn(":author:", row["snippet"])
 
-    def test_backfill_does_not_touch_modified_at(self) -> None:
-        db = self._fresh_v1_only_db()
-        original_modified = datetime(2025, 6, 1, tzinfo=UTC)
-        db.connection.execute(
-            "INSERT INTO notes "
-            "(id, title, notebook_id, source, snippet, "
-            " created_at, modified_at) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?)",
-            (
-                "n",
-                "t",
-                SEED_NOTEBOOK_ID_PERSONAL,
-                "= T\n\nBody.",
-                "old",
-                _FIXED_NOW.isoformat(),
-                original_modified.isoformat(),
-            ),
-        )
+# ---------------------------------------------------------------------------
+# Migration registry shape
+# ---------------------------------------------------------------------------
 
-        apply_pending(db, now=_FIXED_NOW)
 
-        row = db.connection.execute(
-            "SELECT modified_at FROM notes WHERE id = ?", ("n",)
-        ).fetchone()
-        self.assertEqual(row["modified_at"], original_modified.isoformat())
-
-    def test_backfill_survives_unparseable_source(self) -> None:
-        db = self._fresh_v1_only_db()
-        db.connection.execute(
-            "INSERT INTO notes "
-            "(id, title, notebook_id, source, snippet, "
-            " created_at, modified_at) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?)",
-            (
-                "bad",
-                "t",
-                SEED_NOTEBOOK_ID_PERSONAL,
-                "= Draft\n\nThis *is unterminated",
-                "old",
-                _FIXED_NOW.isoformat(),
-                _FIXED_NOW.isoformat(),
-            ),
-        )
-
-        # Must not raise — derive_summary's fallback handles bad source.
-        apply_pending(db, now=_FIXED_NOW)
-
-        row = db.connection.execute(
-            "SELECT title, snippet FROM notes WHERE id = ?", ("bad",)
-        ).fetchone()
-        expected = derive_summary("= Draft\n\nThis *is unterminated")
-        self.assertEqual(row["title"], expected.title)
-        self.assertEqual(row["snippet"], expected.snippet)
+class MigrationRegistryTests(unittest.TestCase):
+    def test_versions_are_monotonic_and_one_indexed(self) -> None:
+        versions = [m.version for m in ALL_MIGRATIONS]
+        self.assertEqual(versions, sorted(versions))
+        self.assertEqual(versions[0], 1)
 
 
 if __name__ == "__main__":

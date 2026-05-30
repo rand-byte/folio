@@ -145,6 +145,14 @@ _IMAGE_OPEN_BRACKET: str = "["
 _IMAGE_CLOSE_BRACKET: str = "]"
 
 
+# Tag charset: lowercase letters, digits, and hyphens; must start with
+# a lowercase letter or digit. Validation runs *after* the per-entry
+# lowercasing in :func:`_parse_tags_value`, so the regex matches the
+# already-normalised form.
+_TAG_ATTRIBUTE_NAME: str = "tags"
+_TAG_VALIDATION_RE: re.Pattern[str] = re.compile(r"^[a-z0-9][a-z0-9-]*$")
+
+
 # ---------------------------------------------------------------------------
 # Public API
 # ---------------------------------------------------------------------------
@@ -194,16 +202,17 @@ class _Parser:
         """Parse the whole token stream into a :class:`Document`."""
         self._skip_blanks()
         title = self._try_consume_document_title()
-        self._consume_document_attributes()
+        tags = self._consume_document_attributes()
         blocks = self._parse_blocks(stop_at_heading_level=None)
         return Document(
             title=title,
+            tags=tags,
             blocks=tuple(blocks),
             source_line=_DOCUMENT_SOURCE_LINE,
         )
 
-    def _consume_document_attributes(self) -> None:
-        """Discard a contiguous run of header attribute entries.
+    def _consume_document_attributes(self) -> tuple[str, ...]:
+        """Consume a contiguous run of header attribute entries.
 
         The header attribute run sits between the optional level-1
         title and the first body block. It is a sequence of
@@ -212,21 +221,38 @@ class _Parser:
         header). The run ends at the first non-attribute,
         non-blank token.
 
-        Entries are *discarded*: the AST has no field for them
-        because no consumer in the application currently reads
-        attribute values. If/when one appears (search, sidebar
-        metadata, render-time substitution), this method is the
-        single place that needs to start populating a field on
-        :class:`Document`.
+        Most attribute names are discarded: the AST has no field for
+        them. The single exception is ``tags`` — when encountered,
+        its value is parsed and validated per the rules in
+        :func:`_parse_tags_value`, normalised (lowercased, trimmed,
+        deduplicated, sorted), and returned to :meth:`parse_document`
+        as the :attr:`Document.tags` tuple. A second ``:tags:`` entry
+        anywhere in the same header is rejected with
+        :class:`ParseErrorKind.DUPLICATE_TAG_ATTRIBUTE`.
 
         An :class:`AttributeEntryToken` reaching the parser anywhere
         *after* this consumption is rejected as
         :class:`ParseErrorKind.UNKNOWN_BLOCK` — see
         :meth:`_parse_non_heading_block`.
         """
+        tags: tuple[str, ...] = ()
+        tags_seen = False
         while self.pos < len(self.tokens):
             token = self.tokens[self.pos]
             if isinstance(token, AttributeEntryToken):
+                if token.name == _TAG_ATTRIBUTE_NAME:
+                    if tags_seen:
+                        raise ParseError(
+                            line=token.line,
+                            column=0,
+                            message=(
+                                "duplicate :tags: attribute in document "
+                                "header"
+                            ),
+                            kind=ParseErrorKind.DUPLICATE_TAG_ATTRIBUTE,
+                        )
+                    tags_seen = True
+                    tags = parse_tags_value(token.value, token.line)
                 self.pos += 1
                 continue
             if isinstance(token, BlankToken):
@@ -242,7 +268,8 @@ class _Parser:
                 ):
                     self.pos += 1
                     continue
-            return
+            return tags
+        return tags
 
     def _try_consume_document_title(self) -> tuple[InlineNode, ...] | None:
         """If the next token is a level-1 heading, consume it as the title.
@@ -1194,6 +1221,60 @@ class _Parser:
             and isinstance(self.tokens[self.pos], BlankToken)
         ):
             self.pos += 1
+
+
+# ---------------------------------------------------------------------------
+# Tag-value parsing helper
+# ---------------------------------------------------------------------------
+
+
+def parse_tags_value(
+    value: str | None,
+    line: int,
+) -> tuple[str, ...]:
+    """Parse a ``:tags:`` attribute value into a sorted tag tuple.
+
+    Shared between the strict parser (called from
+    :meth:`_Parser._consume_document_attributes`) and the permissive
+    fallback in :mod:`asciidoc.summary`. The normalisation is the same
+    in both call sites — only the error handling differs (strict
+    re-raises, fallback swallows).
+
+    Normalisation per entry, in order:
+
+    1. Split the raw value on ``","``.
+    2. Strip ASCII whitespace from each entry.
+    3. Lowercase the entry.
+    4. Drop empties (so ``"foo, , bar"`` parses to ``("bar", "foo")``).
+    5. Validate each remaining entry against the tag charset
+       (``[a-z0-9][a-z0-9-]*``); the first violation raises
+       :class:`ParseErrorKind.BAD_TAG_VALUE`.
+    6. Deduplicate (first-seen wins).
+    7. Sort alphabetically.
+
+    A bare ``:tags:`` setter (``value is None``) or a whitespace-only
+    value yields ``()`` with no error.
+    """
+    if value is None:
+        return ()
+    seen: set[str] = set()
+    normalised: list[str] = []
+    for raw in value.split(","):
+        entry = raw.strip().lower()
+        if not entry:
+            continue
+        if not _TAG_VALIDATION_RE.match(entry):
+            raise ParseError(
+                line=line,
+                column=0,
+                message=f"invalid tag value: {entry!r}",
+                kind=ParseErrorKind.BAD_TAG_VALUE,
+            )
+        if entry in seen:
+            continue
+        seen.add(entry)
+        normalised.append(entry)
+    return tuple(sorted(normalised))
 
 
 # ---------------------------------------------------------------------------

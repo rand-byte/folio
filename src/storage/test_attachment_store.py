@@ -84,15 +84,8 @@ class _TempFileFactory:
 
 def _build_database_with_note(
     note_id: str = "note-1",
-    *,
-    notebook_id: str = "seed-personal",
 ) -> Database:
-    """Open a fresh in-memory database, apply v1, insert one note.
-
-    The seed notebook ``seed-personal`` is created by the v1 migration
-    so referencing it for the note's ``notebook_id`` is safe without a
-    second insert.
-    """
+    """Open a fresh in-memory database, apply migrations, insert one note."""
     db = Database.in_memory()
     apply_pending(db, now=_FIXED_NOW)
     repo = NoteRepository(db)
@@ -100,9 +93,9 @@ def _build_database_with_note(
         Note(
             id=note_id,
             title="Title",
-            notebook_id=notebook_id,
             source="= Title\n\nbody.\n",
             snippet="body.",
+            tags=(),
             created_at=_FIXED_NOW,
             modified_at=_FIXED_NOW,
         )
@@ -593,9 +586,9 @@ class ListForNoteMetadataOnlyTests(unittest.TestCase):
             Note(
                 id="note-2",
                 title="Other",
-                notebook_id="seed-personal",
                 source="= Other\n",
                 snippet="",
+                tags=(),
                 created_at=_FIXED_NOW,
                 modified_at=_FIXED_NOW,
             )
@@ -731,9 +724,9 @@ class CascadeOnNoteDeleteTests(unittest.TestCase):
             Note(
                 id="note-2",
                 title="Other",
-                notebook_id="seed-personal",
                 source="= Other\n",
                 snippet="",
+                tags=(),
                 created_at=_FIXED_NOW,
                 modified_at=_FIXED_NOW,
             )

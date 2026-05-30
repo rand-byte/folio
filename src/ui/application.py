@@ -75,7 +75,6 @@ from storage.attachment_store import AttachmentStore
 from storage.database import Database
 from storage.migrations import apply_pending
 from storage.note_repository import NoteRepository
-from storage.notebook_repository import NotebookRepository
 from ui.main_window import MainWindow
 
 
@@ -121,7 +120,6 @@ class NotesApplication(Gtk.Application):
 
     _database: Database | None
     _note_repository: NoteRepository | None
-    _notebook_repository: NotebookRepository | None
     _attachment_store: AttachmentStore | None
     _app_state: AppState | None
     _note_controller: NoteController | None
@@ -133,7 +131,6 @@ class NotesApplication(Gtk.Application):
         )
         self._database = None
         self._note_repository = None
-        self._notebook_repository = None
         self._attachment_store = None
         self._app_state = None
         self._note_controller = None
@@ -180,7 +177,6 @@ class NotesApplication(Gtk.Application):
         self._database = Database(database_path())
         apply_pending(self._database)
         self._note_repository = NoteRepository(self._database)
-        self._notebook_repository = NotebookRepository(self._database)
         self._attachment_store = AttachmentStore(self._database)
         self._app_state = AppState()
         self._note_controller = NoteController(
@@ -206,7 +202,6 @@ class NotesApplication(Gtk.Application):
         # checker and documents the precondition that
         # :meth:`_initialise_runtime` ran first.
         assert self._note_repository is not None
-        assert self._notebook_repository is not None
         assert self._attachment_store is not None
         assert self._app_state is not None
         assert self._note_controller is not None
@@ -214,7 +209,6 @@ class NotesApplication(Gtk.Application):
         window = MainWindow(
             application=self,
             note_repository=self._note_repository,
-            notebook_repository=self._notebook_repository,
             note_controller=self._note_controller,
             app_state=self._app_state,
             attachment_store=self._attachment_store,

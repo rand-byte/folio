@@ -63,22 +63,12 @@
     padding: 4px 6px;
 }
 
-/* GTK 4 deliberately halved tree indentation (GNOME/gtk MR !6553,
- * "theme: Halve indentation of trees"), so the non-expandable indent
- * placeholder (node `indent`) renders at 8px while the expander arrow
- * (node `expander`) is 16px -- leaving leaf rows 8px left of their
- * expandable siblings even though `indent-for-icon` (default TRUE) does
- * insert the placeholder. Restore the placeholder to the full icon size
- * so every row shares one icon column. `-gtk-icon-size` is the lever the
- * theme change used, so it is the one that undoes it; this is the
- * GNOME-recommended fix (GNOME Discourse "How do I align tree labels in
- * a ListView with TreeExpander?"). This rule is a matched pair with the
- * TreeExpander construction in sidebar.py -- see that module's docstring. */
-.sidebar treeexpander indent {
-    -gtk-icon-size: 16px;
-}
+/* Sidebar rows are flat as of the tag migration. The previous
+ * ``treeexpander indent`` workaround (compensating for GTK 4's halved
+ * tree indentation) is gone — the sidebar no longer uses a
+ * Gtk.TreeListModel / Gtk.TreeExpander. */
 
-/* Section headers (Library / Notebooks): font treatment + dim via
+/* Section headers (Library / Tags): font treatment + dim via
  * opacity (keeps the theme foreground colour). */
 .sidebar .sidebar-section-header {
     font-size: 11px;
@@ -115,4 +105,58 @@
  * rather than competing with the count and date it sits between. */
 .note-meta-separator {
     opacity: 0.45;
+}
+
+/* Note-list row tag chips (third line of each row when tags non-empty).
+ *
+ * Dim ``#tagname`` labels rendered in a horizontal box, sitting below
+ * the snippet. Opacity-only dim keeps the colour theme-derived. The
+ * chips have no border or background — they read as a stripe of
+ * dimmed inline text, deliberately quieter than the snippet above
+ * them. The label classes are added in ui/note_list.py. */
+.tag-chip-row {
+    opacity: 0.55;
+    font-size: 90%;
+}
+
+/* Sidebar tag-row selected accent.
+ *
+ * The selected row already gets the theme's selection pill via the
+ * generic ``.sidebar row:selected`` rule; this class is added on the
+ * leading check-mark Gtk.Image inside selected tag rows so the icon
+ * does not inherit the dimming applied to the count label. */
+.tag-row-check {
+    opacity: 0.9;
+}
+
+/* Tags section header count parenthetical.
+ *
+ * Rendered next to the ``Tags`` label when N > 0. The colour is the
+ * GTK 4 accent / info colour, so the parenthetical reads as a "live"
+ * indicator without naming a literal blue. Falls back to the theme's
+ * blue via a CSS variable on themes that expose one; otherwise uses
+ * a neutral tint of the foreground (opacity-only) so it stays
+ * legible on any theme. */
+.selection-count {
+    color: @accent_color;
+    opacity: 0.85;
+}
+
+/* Article-view tag chips (under the rendered title in VIEW mode).
+ *
+ * Pill-shaped, palette-safe (theme background tinted). Margin matches
+ * the article's left padding so the row of chips aligns with the
+ * title above it. The ``ui/note_view.py`` chip-row builder applies
+ * this class to each chip label and a separate class to the row Box
+ * to control its horizontal spacing. */
+.tag-chip-article {
+    border-radius: 999px;
+    padding: 2px 8px;
+    background-color: alpha(currentColor, 0.10);
+    font-size: 90%;
+    opacity: 0.85;
+}
+
+.tag-chip-article-row {
+    margin-bottom: 8px;
 }

@@ -48,16 +48,15 @@ Principles & invariants
   blissfully unaware of it.
 * The construction signature is the long-term one: caller
   (:class:`NotesApplication`) passes ``application``,
-  ``note_repository``, ``notebook_repository``, ``note_controller``,
-  ``app_state``, and (from build step 11) ``attachment_store``, all
-  keyword-only. ``attachment_store`` is optional with a ``None``
-  default so the existing per-pane test suites that pre-date step
-  11 keep constructing :class:`MainWindow` without a fourth
-  injected dependency; in that mode :class:`NoteView` falls back
-  to its placeholder image resolver. Future build steps that add
-  toolbar / status-bar children extend the window's child set, but
-  leave its signal subscriptions confined to the same single
-  view-mode dispatch.
+  ``note_repository``, ``note_controller``, ``app_state``, and
+  ``attachment_store``, all keyword-only. ``attachment_store`` is
+  optional with a ``None`` default so the existing per-pane test
+  suites that pre-date the attachment build keep constructing
+  :class:`MainWindow` without that injected dependency; in that mode
+  :class:`NoteView` falls back to its placeholder image resolver.
+  Future build steps that add toolbar / status-bar children extend the
+  window's child set, but leave its signal subscriptions confined to
+  the same single view-mode dispatch.
 * The initial pane positions match the per-widget hints
   (:data:`_SIDEBAR_INITIAL_POSITION_PX`,
   :data:`_NOTE_LIST_INITIAL_POSITION_PX`), and the initial *window
@@ -95,7 +94,6 @@ from enums import ViewMode
 from storage.protocols import (
     AttachmentStoreProtocol,
     NoteRepositoryProtocol,
-    NotebookRepositoryProtocol,
 )
 from ui.note_editor import NoteEditor
 from ui.note_list import NoteList
@@ -262,7 +260,6 @@ class MainWindow(  # pylint: disable=too-many-instance-attributes
     """
 
     _note_repository: NoteRepositoryProtocol
-    _notebook_repository: NotebookRepositoryProtocol
     _note_controller: NoteController
     _app_state: AppState
     _attachment_store: AttachmentStoreProtocol | None
@@ -278,14 +275,12 @@ class MainWindow(  # pylint: disable=too-many-instance-attributes
         *,
         application: Gtk.Application,
         note_repository: NoteRepositoryProtocol,
-        notebook_repository: NotebookRepositoryProtocol,
         note_controller: NoteController,
         app_state: AppState,
         attachment_store: AttachmentStoreProtocol | None = None,
     ) -> None:
         super().__init__(application=application)
         self._note_repository = note_repository
-        self._notebook_repository = notebook_repository
         self._note_controller = note_controller
         self._app_state = app_state
         self._attachment_store = attachment_store
@@ -305,7 +300,6 @@ class MainWindow(  # pylint: disable=too-many-instance-attributes
         # automatically adds to its end.
         self._toolbar = Toolbar(
             note_repository=note_repository,
-            notebook_repository=notebook_repository,
             note_controller=note_controller,
             app_state=app_state,
         )
@@ -315,12 +309,10 @@ class MainWindow(  # pylint: disable=too-many-instance-attributes
         # the window does not arbitrate between them.
         self._sidebar = Sidebar(
             note_repository=note_repository,
-            notebook_repository=notebook_repository,
             app_state=app_state,
         )
         self._note_list = NoteList(
             note_repository=note_repository,
-            notebook_repository=notebook_repository,
             app_state=app_state,
             attachment_store=attachment_store,
         )

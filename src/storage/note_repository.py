@@ -8,35 +8,44 @@ Principles & invariants
   :meth:`Database.transaction` so they compose with any outer
   transaction the caller has already opened.
 * Conversion between :class:`Note` dataclasses and SQLite rows happens
-  in exactly one place: :func:`_row_to_note` (read) and the parameter
+  in exactly one place: :func:`_assemble_notes` (read) and the parameter
   tuples in each insert/update method (write). ``sqlite3.Row`` objects
   never escape this module.
 * Timestamps are persisted as ISO-8601 strings (timezone-aware UTC).
   Round-trip is :meth:`datetime.isoformat` / :meth:`datetime.fromisoformat`.
-* Title and snippet are derived from the source via
-  :func:`asciidoc.summary.derive_summary` in both
-  :meth:`insert` and :meth:`update_source`, so this repository is the
-  single owner of the ``source -> cached columns`` mapping. The
-  dataclass's own ``title`` / ``snippet`` fields are advisory only on
+* Title, snippet, and tags are derived from the source via
+  :func:`asciidoc.summary.derive_summary` in both :meth:`insert` and
+  :meth:`update_source`, so this repository is the single owner of the
+  ``source -> (cached columns + tag rows)`` mapping. The dataclass's
+  own ``title`` / ``snippet`` / ``tags`` fields are advisory only on
   insert — the columns always reflect a fresh derive from ``source``.
-* Methods that target a specific note (:meth:`get`, :meth:`update_source`,
-  :meth:`update_notebook`, :meth:`delete`) raise :class:`KeyError` when
-  the id is unknown. This matches the dict-like in-memory fake used by
-  controller tests so production and test code paths are interchangeable.
+  On update, the note's ``note_tags`` rows are replaced (deleted, then
+  re-inserted) in the same transaction; partial states are never
+  visible to other readers.
+* :meth:`get`, :meth:`update_source`, :meth:`delete` raise
+  :class:`KeyError` on an unknown id, matching the dict-like in-memory
+  fake used by controller tests so production and test code paths are
+  interchangeable.
 * Listing methods sort by ``modified_at DESC`` (the indexed column) so
-  the most-recently-edited note is first — matching the design's note
-  list. Further sorting (created date, title) is the responsibility of
-  :mod:`search.note_filter`, which composes on the
-  materialised list.
+  the most-recently-edited note is first. Further sorting (created date,
+  title) is the responsibility of :mod:`search.note_filter`, which
+  composes on the materialised list.
+* Tags are read by an outer join (``LEFT JOIN note_tags``) so a note
+  with zero tags still appears, and the list-builder gets all rows in
+  one round trip rather than firing an N+1 per-note query.
+* :meth:`list_tags` returns ``((tag, count), ...)`` for every distinct
+  tag in use, alphabetically ordered. Empty when no note has any tags.
 * Search is a substring match across ``title``, ``snippet``, and
   ``source``, case-insensitive for ASCII (SQLite ``LIKE`` default).
   User input is escape-quoted via :func:`_escape_like` so a literal
-  ``%`` or ``_`` in the query does not turn into a SQL wildcard.
+  ``%`` or ``_`` in the query does not turn into a SQL wildcard. Tags
+  are not searched; the *Tags* sidebar provides direct selection.
 """
 
 from __future__ import annotations
 
 import sqlite3
+from collections.abc import Iterable
 from datetime import datetime
 from typing import Final
 
@@ -45,17 +54,34 @@ from models.note import Note
 from storage.database import Database
 
 
-_SELECT_FIELDS: Final[str] = (
-    "id, title, notebook_id, source, snippet, created_at, modified_at"
-)
-"""Column list reused by every read query.
-
-Defined once so changes propagate uniformly and so the queries below
-remain narrowly scoped to the columns the dataclass actually carries.
-"""
-
 _LIKE_ESCAPE_CHAR: Final[str] = "\\"
 """Escape character announced via ``ESCAPE`` clauses in LIKE queries."""
+
+
+_NOTE_FIELDS: Final[str] = (
+    "n.id, n.title, n.source, n.snippet, n.created_at, n.modified_at"
+)
+"""Column list for the ``notes`` half of every read query.
+
+The tag column is added via a left join in :func:`_join_with_tags`.
+"""
+
+
+def _join_with_tags(where_clause: str, order_clause: str) -> str:
+    """Compose a query that joins ``notes`` with ``note_tags``.
+
+    The shape is: select the note columns plus the joined tag (or
+    NULL), apply ``WHERE``, and order by ``modified_at`` first (so
+    multi-tagged notes still cluster correctly under their note row in
+    insertion order).
+    """
+    return (
+        f"SELECT {_NOTE_FIELDS}, nt.tag AS tag "
+        "FROM notes AS n "
+        "LEFT JOIN note_tags AS nt ON nt.note_id = n.id "
+        f"{where_clause} "
+        f"{order_clause}"
+    )
 
 
 class NoteRepository:
@@ -68,75 +94,80 @@ class NoteRepository:
 
     def get(self, note_id: str) -> Note:
         cursor = self._db.connection.execute(
-            f"SELECT {_SELECT_FIELDS} FROM notes WHERE id = ?",
+            _join_with_tags(
+                "WHERE n.id = ?",
+                "ORDER BY tag ASC",
+            ),
             (note_id,),
         )
-        row = cursor.fetchone()
-        if row is None:
+        notes = _assemble_notes(cursor.fetchall())
+        if not notes:
             raise KeyError(note_id)
-        return _row_to_note(row)
-
-    def list_by_notebook(self, notebook_id: str) -> list[Note]:
-        cursor = self._db.connection.execute(
-            f"SELECT {_SELECT_FIELDS} FROM notes "
-            "WHERE notebook_id = ? ORDER BY modified_at DESC",
-            (notebook_id,),
-        )
-        return [_row_to_note(row) for row in cursor.fetchall()]
+        return notes[0]
 
     def list_modified_since(self, since: datetime) -> list[Note]:
         cursor = self._db.connection.execute(
-            f"SELECT {_SELECT_FIELDS} FROM notes "
-            "WHERE modified_at >= ? ORDER BY modified_at DESC",
+            _join_with_tags(
+                "WHERE n.modified_at >= ?",
+                "ORDER BY n.modified_at DESC, n.id, tag ASC",
+            ),
             (since.isoformat(),),
         )
-        return [_row_to_note(row) for row in cursor.fetchall()]
+        return _assemble_notes(cursor.fetchall())
 
     def list_all(self) -> list[Note]:
         cursor = self._db.connection.execute(
-            f"SELECT {_SELECT_FIELDS} FROM notes ORDER BY modified_at DESC"
+            _join_with_tags(
+                "",
+                "ORDER BY n.modified_at DESC, n.id, tag ASC",
+            )
         )
-        return [_row_to_note(row) for row in cursor.fetchall()]
+        return _assemble_notes(cursor.fetchall())
 
     def search(self, query: str) -> list[Note]:
         pattern = f"%{_escape_like(query)}%"
         cursor = self._db.connection.execute(
-            f"SELECT {_SELECT_FIELDS} FROM notes "
-            "WHERE title LIKE ? ESCAPE ? "
-            "OR snippet LIKE ? ESCAPE ? "
-            "OR source LIKE ? ESCAPE ? "
-            "ORDER BY modified_at DESC",
+            _join_with_tags(
+                "WHERE n.title LIKE ? ESCAPE ? "
+                "OR n.snippet LIKE ? ESCAPE ? "
+                "OR n.source LIKE ? ESCAPE ?",
+                "ORDER BY n.modified_at DESC, n.id, tag ASC",
+            ),
             (
                 pattern, _LIKE_ESCAPE_CHAR,
                 pattern, _LIKE_ESCAPE_CHAR,
                 pattern, _LIKE_ESCAPE_CHAR,
             ),
         )
-        return [_row_to_note(row) for row in cursor.fetchall()]
+        return _assemble_notes(cursor.fetchall())
 
     def insert(self, note: Note) -> None:
-        # Title and snippet are derived here from the note's source, not
-        # taken from the dataclass fields, so the repository is the one
-        # and only place that maps source to the cached columns (the same
-        # invariant ``update_source`` upholds). ``derive_summary`` never
-        # raises, so an unparseable in-progress note is still insertable.
+        # Title, snippet, and tags are derived here from the note's
+        # source, not taken from the dataclass fields, so the repository
+        # is the one and only place that maps source to cached state
+        # (the same invariant ``update_source`` upholds).
+        # ``derive_summary`` never raises, so an unparseable in-progress
+        # note is still insertable.
         summary = derive_summary(note.source)
         with self._db.transaction() as connection:
             connection.execute(
                 "INSERT INTO notes "
-                "(id, title, notebook_id, source, snippet, "
-                " created_at, modified_at) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?)",
+                "(id, title, source, snippet, created_at, modified_at) "
+                "VALUES (?, ?, ?, ?, ?, ?)",
                 (
                     note.id,
                     summary.title,
-                    note.notebook_id,
                     note.source,
                     summary.snippet,
                     note.created_at.isoformat(),
                     note.modified_at.isoformat(),
                 ),
             )
+            for tag in summary.tags:
+                connection.execute(
+                    "INSERT INTO note_tags (note_id, tag) VALUES (?, ?)",
+                    (note.id, tag),
+                )
 
     def update_source(
         self,
@@ -144,11 +175,11 @@ class NoteRepository:
         source: str,
         modified_at: datetime,
     ) -> None:
-        # Title and snippet are derived here, not in the controller, so
-        # there is exactly one place that owns the "source -> cached
-        # columns" mapping. A controller change can never forget to
-        # update one of them. ``derive_summary`` parses once and never
-        # raises, so a mid-edit unparseable note stays saveable.
+        # Title, snippet, and tags are derived here, not in the
+        # controller, so there is exactly one place that owns the
+        # "source -> cached state" mapping. ``derive_summary`` parses
+        # once and never raises, so a mid-edit unparseable note stays
+        # saveable.
         summary = derive_summary(source)
         with self._db.transaction() as connection:
             cursor = connection.execute(
@@ -165,17 +196,24 @@ class NoteRepository:
             )
             if cursor.rowcount == 0:
                 raise KeyError(note_id)
-
-    def update_notebook(self, note_id: str, notebook_id: str) -> None:
-        with self._db.transaction() as connection:
-            cursor = connection.execute(
-                "UPDATE notes SET notebook_id = ? WHERE id = ?",
-                (notebook_id, note_id),
+            # Tag rows are *replaced* on update so a removed ``:tags:``
+            # entry actually disappears from the junction. The DELETE
+            # + INSERT pair is atomic with the source UPDATE because
+            # all three statements sit inside the same transaction.
+            connection.execute(
+                "DELETE FROM note_tags WHERE note_id = ?",
+                (note_id,),
             )
-            if cursor.rowcount == 0:
-                raise KeyError(note_id)
+            for tag in summary.tags:
+                connection.execute(
+                    "INSERT INTO note_tags (note_id, tag) VALUES (?, ?)",
+                    (note_id, tag),
+                )
 
     def delete(self, note_id: str) -> None:
+        # ``note_tags.note_id`` is ``ON DELETE CASCADE``, so deleting
+        # the row in ``notes`` drops every tag pairing in one go — no
+        # extra DELETE here.
         with self._db.transaction() as connection:
             cursor = connection.execute(
                 "DELETE FROM notes WHERE id = ?",
@@ -184,32 +222,72 @@ class NoteRepository:
             if cursor.rowcount == 0:
                 raise KeyError(note_id)
 
+    def list_tags(self) -> tuple[tuple[str, int], ...]:
+        """Return every distinct tag with its note count, alphabetically.
 
-def _row_to_note(row: sqlite3.Row) -> Note:
-    """Build a :class:`Note` from a database row.
+        Driven by a plain ``GROUP BY`` on the junction table. The
+        sidebar reads this directly to populate its *Tags* section.
+        """
+        cursor = self._db.connection.execute(
+            "SELECT tag, COUNT(*) AS n "
+            "FROM note_tags "
+            "GROUP BY tag "
+            "ORDER BY tag ASC"
+        )
+        return tuple((row["tag"], int(row["n"])) for row in cursor.fetchall())
 
-    The conversion is the only place ISO-8601 timestamps become
-    :class:`datetime` and the only place ``sqlite3.Row`` is read. Both
-    inversions live in the public methods above.
+
+def _assemble_notes(rows: Iterable[sqlite3.Row]) -> list[Note]:
+    """Group joined ``(note × tag)`` rows into :class:`Note` instances.
+
+    The query in :func:`_join_with_tags` is a left join, so a note with
+    zero tags appears as exactly one row with ``tag`` IS NULL, and a
+    note with N tags appears as N rows (the note columns are repeated).
+    This function walks the rows in order, accumulating tags onto the
+    in-progress note, and emits one :class:`Note` per distinct note id.
+
+    The outer query orders by ``modified_at DESC, n.id, tag ASC`` so
+    the per-note row groups arrive contiguously in display order with
+    tags already alphabetical.
+    """
+    notes: list[Note] = []
+    current_id: str | None = None
+    current_row: sqlite3.Row | None = None
+    current_tags: list[str] = []
+    for row in rows:
+        row_id = row["id"]
+        if row_id != current_id:
+            if current_row is not None:
+                notes.append(_row_to_note(current_row, current_tags))
+            current_id = row_id
+            current_row = row
+            current_tags = []
+        tag = row["tag"]
+        if tag is not None:
+            current_tags.append(tag)
+    if current_row is not None:
+        notes.append(_row_to_note(current_row, current_tags))
+    return notes
+
+
+def _row_to_note(row: sqlite3.Row, tags: list[str]) -> Note:
+    """Build a :class:`Note` from a database row plus its tag list.
+
+    Tags arrive already sorted (the SQL ``ORDER BY tag ASC`` clause).
     """
     return Note(
         id=row["id"],
         title=row["title"],
-        notebook_id=row["notebook_id"],
         source=row["source"],
         snippet=row["snippet"],
+        tags=tuple(tags),
         created_at=datetime.fromisoformat(row["created_at"]),
         modified_at=datetime.fromisoformat(row["modified_at"]),
     )
 
 
 def _escape_like(text: str) -> str:
-    """Escape SQL ``LIKE`` wildcards so user input is treated as literal.
-
-    Escapes the escape character itself first to avoid double-processing,
-    then ``%`` (any-chars) and ``_`` (single-char). Used in conjunction
-    with an ``ESCAPE '\\\\'`` clause in the query.
-    """
+    """Escape SQL ``LIKE`` wildcards so user input is treated as literal."""
     return (
         text
         .replace(_LIKE_ESCAPE_CHAR, _LIKE_ESCAPE_CHAR + _LIKE_ESCAPE_CHAR)

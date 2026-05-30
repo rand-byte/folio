@@ -30,7 +30,10 @@ class DeriveSummaryTitleTests(unittest.TestCase):
 
     def test_empty_source(self) -> None:
         summary = derive_summary("")
-        self.assertEqual(summary, NoteSummary(title=UNTITLED, snippet=""))
+        self.assertEqual(
+            summary,
+            NoteSummary(title=UNTITLED, snippet="", tags=()),
+        )
 
 
 class DeriveSummarySnippetTests(unittest.TestCase):
@@ -165,6 +168,75 @@ class DeriveSummaryFallbackTests(unittest.TestCase):
 
     def test_returns_note_summary_instance(self) -> None:
         self.assertIsInstance(derive_summary("= ok\n"), NoteSummary)
+
+
+class DeriveSummaryTagsTests(unittest.TestCase):
+    """The tag tuple comes off the parsed Document on the happy path."""
+
+    def test_no_tags_attribute_yields_empty_tuple(self) -> None:
+        self.assertEqual(derive_summary("= T\n\nbody").tags, ())
+
+    def test_single_tag(self) -> None:
+        self.assertEqual(
+            derive_summary("= T\n:tags: baking\n\nbody").tags,
+            ("baking",),
+        )
+
+    def test_multiple_tags_sorted(self) -> None:
+        self.assertEqual(
+            derive_summary("= T\n:tags: zeta, alpha, beta\n\nbody").tags,
+            ("alpha", "beta", "zeta"),
+        )
+
+    def test_dedup_and_sort(self) -> None:
+        self.assertEqual(
+            derive_summary("= T\n:tags: bread, baking, bread\n\nbody").tags,
+            ("baking", "bread"),
+        )
+
+    def test_case_folded_to_lowercase(self) -> None:
+        self.assertEqual(
+            derive_summary("= T\n:tags: BAKING, Bread\n\nbody").tags,
+            ("baking", "bread"),
+        )
+
+    def test_whitespace_tolerance_and_trailing_comma(self) -> None:
+        self.assertEqual(
+            derive_summary("= T\n:tags:   foo ,  bar ,\n\nbody").tags,
+            ("bar", "foo"),
+        )
+
+
+class DeriveSummaryTagsFallbackTests(unittest.TestCase):
+    """The fallback walks the lexer's tokens so a broken body still
+    yields a valid tag tuple."""
+
+    def test_broken_body_still_extracts_tags(self) -> None:
+        # The body has an unterminated bold span — strict parser raises.
+        # The fallback's tag arm walks the lexer's tokens and still
+        # surfaces the ``:tags:`` line.
+        source = "= Draft\n:tags: foo, bar\n\nThis *is unterminated"
+        summary = derive_summary(source)
+        self.assertEqual(summary.tags, ("bar", "foo"))
+
+    def test_fallback_returns_empty_tags_when_tags_line_malformed(self) -> None:
+        # ``:tags: foo bar`` has a space — invalid charset. The fallback
+        # swallows the inner BAD_TAG_VALUE and returns no tags. The body
+        # also has an unterminated bold marker so the strict parser
+        # raises first; the fallback re-walks the header.
+        source = "= Draft\n:tags: foo bar\n\nThis *is unterminated"
+        summary = derive_summary(source)
+        self.assertEqual(summary.tags, ())
+
+    def test_fallback_returns_empty_tags_when_duplicate(self) -> None:
+        source = (
+            "= Draft\n"
+            ":tags: foo\n"
+            ":tags: bar\n"
+            "\n"
+            "This *is unterminated"
+        )
+        self.assertEqual(derive_summary(source).tags, ())
 
 
 if __name__ == "__main__":

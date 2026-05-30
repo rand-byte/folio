@@ -11,10 +11,10 @@ Principles & invariants
 * Every enum has stable, finite, well-known membership. Adding a member is
   a deliberate change that ripples to parsers, renderers, and storage; it
   is never a hotfix shortcut.
-* Enums whose values are persisted (``NotebookIcon``, ``MimeKind``,
-  ``LinkScheme``, ``AdmonitionKind``) inherit from ``StrEnum`` and use
-  explicit values that match what is written to disk or to source. Their
-  values must never change once shipped — migrations would be required.
+* Enums whose values are persisted (``MimeKind``, ``LinkScheme``,
+  ``AdmonitionKind``) inherit from ``StrEnum`` and use explicit values
+  that match what is written to disk or to source. Their values must
+  never change once shipped — migrations would be required.
 * Enums whose values are purely in-memory may use ``auto()``; their
   on-disk representation is undefined.
 """
@@ -40,37 +40,17 @@ class NoteSortKey(StrEnum):
 
 
 class SmartFilter(StrEnum):
-    """Built-in filters that surface notes across all notebooks."""
+    """Built-in filters that surface notes across all tags."""
 
     ALL = auto()
-    RECENT = auto()
+    UNTAGGED = auto()
 
 
 class SelectionKind(StrEnum):
     """Discriminator for what is currently selected in the sidebar."""
 
     SMART = auto()
-    NOTEBOOK = auto()
-
-
-class NotebookIcon(StrEnum):
-    """Symbolic icon attached to a notebook.
-
-    Values are persisted in the ``notebooks.icon`` column. Adding members is
-    fine; renaming or removing requires a schema migration.
-    """
-
-    HOME = auto()
-    BOOK = auto()
-    MAP = auto()
-    BRAIN = auto()
-    ARCHIVE = auto()
-    BRIEFCASE = auto()
-    HEART = auto()
-    STAR = auto()
-    FOLDER = auto()
-    INBOX = auto()
-    GRADUATION_CAP = auto()
+    TAG = auto()
 
 
 class NodeKind(StrEnum):
@@ -155,6 +135,8 @@ class ParseErrorKind(StrEnum):
     UNTERMINATED_PASSTHROUGH = auto()
     BAD_ATTRIBUTE_ENTRY = auto()
     BLOCK_INSIDE_INLINE_ONLY_CONTAINER = auto()
+    BAD_TAG_VALUE = auto()
+    DUPLICATE_TAG_ATTRIBUTE = auto()
 
 
 class AdmonitionKind(StrEnum):

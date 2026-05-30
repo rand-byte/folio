@@ -448,10 +448,20 @@ class Document:
     non-blank line; the parser raises :class:`ParseError` for level-0
     headings encountered later in the source.
 
+    ``tags`` is the sorted, lowercase, deduplicated tuple of tags
+    extracted from a single ``:tags:`` header attribute (the
+    right-hand side of ``:tags: foo, bar``). An absent / empty
+    ``:tags:`` line yields ``()``. The parser raises
+    :class:`ParseErrorKind.BAD_TAG_VALUE` on a malformed individual tag
+    and :class:`ParseErrorKind.DUPLICATE_TAG_ATTRIBUTE` when two
+    ``:tags:`` entries appear in the same header. Other header
+    attribute names continue to be discarded.
+
     ``source_line`` is always 1 — the document starts at the start of
     the source.
     """
 
     title: tuple[InlineNode, ...] | None
+    tags: tuple[str, ...]
     blocks: tuple[BlockNode, ...]
     source_line: int

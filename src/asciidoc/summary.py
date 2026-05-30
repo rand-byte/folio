@@ -1,24 +1,27 @@
-"""Derive a note's cached ``(title, snippet)`` summary from its source.
+"""Derive a note's cached ``(title, snippet, tags)`` summary from its source.
 
 Principles & invariants
 -----------------------
 * This module is the **single source of truth** for the note-list
-  summary. The title and snippet shown in the middle pane are computed
-  from the same parsed :class:`~asciidoc.ast.Document` that the
-  rendered view is built from, so the preview can never disagree with
-  what the note actually renders to. The former prefix-scanning
-  derivers in :mod:`models.note` (which leaked document
-  attribute entries and table markup into the snippet) are gone; this is
-  their principled replacement.
+  summary and for tag extraction. The title, snippet, and tag tuple
+  shown across the UI are all computed from the same parsed
+  :class:`~asciidoc.ast.Document` that the rendered view is built
+  from, so the preview can never disagree with what the note actually
+  renders to.
 * :func:`derive_summary` is pure and deterministic: a function of
-  ``source`` alone. It parses once and reads both fields off the
+  ``source`` alone. It parses once and reads all three fields off the
   resulting AST.
 * **Robustness invariant — :func:`derive_summary` never raises.** The
   parser is strict and raises :class:`ParseError` on invalid source, but
   a note must stay saveable while the user is mid-edit. On
   :class:`ParseError` — and *only* that one named exception, never a
   blanket ``except`` — the function falls back to a minimal permissive
-  extraction so the note list keeps showing something useful.
+  extraction so the note list keeps showing something useful. The
+  fallback's tag-extraction arm walks the (permissive) lexer's
+  :class:`AttributeEntryToken` stream in the document-header position
+  and applies the same normalisation as the strict parser via
+  :func:`asciidoc.parser.parse_tags_value`. Any failure in that arm
+  resolves to ``()`` rather than re-raising.
 * Classification is **exhaustive** over the closed
   :data:`~asciidoc.ast.BlockNode` and
   :data:`~asciidoc.ast.InlineNode` unions. Both walkers end in
@@ -30,11 +33,10 @@ Principles & invariants
   flattened text; section headings, code blocks, images, and tables are
   *structure* and contribute nothing (a section's nested blocks are
   still descended into to reach prose under deeper headings).
-* This module is pure: it imports only the parser, the AST, the
-  :class:`NoteSummary` value type, the :class:`ParseError` type, and the
-  ``config`` constants. No ``gi``, no ``storage`` — it is reusable by any
-  non-view consumer (the note-list summary today; structure-aware
-  indexing or export tomorrow).
+* This module is pure: it imports only the parser, the lexer (for the
+  fallback tag walk), the AST, the :class:`NoteSummary` value type, the
+  :class:`ParseError` type, and the ``config`` constants. No ``gi``, no
+  ``storage`` — it is reusable by any non-view consumer.
 """
 
 from __future__ import annotations
@@ -64,7 +66,13 @@ from asciidoc.ast import (
     Underline,
     UnorderedList,
 )
-from asciidoc.parser import parse
+from asciidoc.lexer import (
+    AttributeEntryToken,
+    BlankToken,
+    HeadingToken,
+    tokenize,
+)
+from asciidoc.parser import parse, parse_tags_value
 from config.defaults import SNIPPET_MAX_CHARS, UNTITLED
 from models.note import NoteSummary
 from models.parse_error import ParseError
@@ -86,9 +94,10 @@ from source that did not parse.
 def derive_summary(source: str) -> NoteSummary:
     """Return the cached :class:`NoteSummary` for ``source``.
 
-    Parses ``source`` once and computes the title (:func:`_title_of`)
-    and snippet (:func:`_snippet_of`) from the resulting
-    :class:`Document`. If the source does not parse, falls back to
+    Parses ``source`` once and computes the title (:func:`_title_of`),
+    the snippet (:func:`_snippet_of`), and the tag tuple (read straight
+    off :attr:`Document.tags`) from the resulting :class:`Document`.
+    If the source does not parse, falls back to
     :func:`_fallback_summary` so the call never raises — see the
     module's robustness invariant.
     """
@@ -99,6 +108,7 @@ def derive_summary(source: str) -> NoteSummary:
     return NoteSummary(
         title=_title_of(document),
         snippet=_snippet_of(document),
+        tags=document.tags,
     )
 
 
@@ -241,7 +251,13 @@ def _fallback_summary(source: str) -> NoteSummary:
       or :data:`UNTITLED` when that line is not a level-0 heading;
     * snippet — the first non-blank lines (the title line excepted),
       joined and ellipsised the same way the happy path bounds its
-      output.
+      output;
+    * tags — read off the lexer's :class:`AttributeEntryToken` stream
+      via :func:`_fallback_tags`. The lexer is permissive (never
+      raises), so even when the body fails to parse a valid
+      ``:tags:`` header line still yields tags. Any failure in that
+      tag extraction resolves to empty tags rather than re-raising;
+      the *"never raises"* invariant is preserved.
     """
     title = UNTITLED
     fragments: list[str] = []
@@ -264,4 +280,55 @@ def _fallback_summary(source: str) -> NoteSummary:
         if accumulated >= SNIPPET_MAX_CHARS:
             break
 
-    return NoteSummary(title=title, snippet=_join_and_truncate(fragments))
+    return NoteSummary(
+        title=title,
+        snippet=_join_and_truncate(fragments),
+        tags=_fallback_tags(source),
+    )
+
+
+def _fallback_tags(source: str) -> tuple[str, ...]:
+    """Best-effort tag extraction for a source that did not parse.
+
+    Walks the lexer's :class:`AttributeEntryToken` stream looking for
+    a single ``:tags:`` entry in the document-header position
+    (contiguous attribute entries / blanks at the start of the token
+    stream, after an optional level-1 heading), and applies the same
+    normalisation the strict parser does. Any failure — invalid
+    individual tag, duplicate ``:tags:``, or any other surprise —
+    resolves to ``()`` rather than re-raising.
+
+    The lexer is itself permissive: it classifies one line at a time
+    and never raises on grammar issues. So this function safely
+    extracts tags even from a source whose body fails to parse for
+    unrelated reasons (e.g. an unterminated code fence further down).
+    """
+    try:
+        tokens = tokenize(source)
+    except ParseError:
+        return ()
+    seen_tags = False
+    result: tuple[str, ...] = ()
+    pos = 0
+    # Skip the optional level-1 heading line so a header attribute
+    # immediately under the title is reached.
+    if pos < len(tokens) and isinstance(tokens[pos], HeadingToken):
+        pos += 1
+    while pos < len(tokens):
+        token = tokens[pos]
+        if isinstance(token, AttributeEntryToken):
+            if token.name == "tags":
+                if seen_tags:
+                    return ()
+                seen_tags = True
+                try:
+                    result = parse_tags_value(token.value, token.line)
+                except ParseError:
+                    return ()
+            pos += 1
+            continue
+        if isinstance(token, BlankToken):
+            pos += 1
+            continue
+        break
+    return result

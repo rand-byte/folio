@@ -3,21 +3,21 @@
 Principles & invariants
 -----------------------
 * This module is **pure typing** — it defines :class:`typing.Protocol`
-  interfaces, two type aliases for renderer resolvers, and the two
-  exceptions that those protocols' contracts mention. It never imports
+  interfaces, two type aliases for renderer resolvers, and the
+  exception that those protocols' contracts mention. It never imports
   from a higher layer (controllers, ui), and at runtime it never imports
   ``gi`` or ``sqlite3``. Concrete implementations live in sibling modules
-  (``note_repository.py``, ``notebook_repository.py``,
-  ``attachment_store.py``, ``ui/note_render/textbuffer_renderer.py``) and depend
-  on this module — never the other way round.
+  (``note_repository.py``, ``attachment_store.py``,
+  ``ui/note_render/textbuffer_renderer.py``) and depend on this module —
+  never the other way round.
 * Every method signature uses **specific** parameter and return types —
   no ``Any``, no ``object``. The protocol *is* the contract; vague types
   here propagate vagueness to every call site.
-* :class:`AttachmentRejected` and :class:`NestingTooDeep` are defined
-  here, not in a separate exceptions module, because they are part of the
-  call surface that callers need to catch. Putting them next to the
-  protocols means controllers, repositories, and tests have a single
-  import for "everything you need to talk to storage".
+* :class:`AttachmentRejected` is defined here, not in a separate
+  exceptions module, because it is part of the call surface that
+  callers need to catch. Putting it next to the protocols means
+  controllers, repositories, and tests have a single import for
+  "everything you need to talk to storage".
 * The rendering protocol references :class:`Gtk.TextBuffer` for type
   checking but never imports it at runtime. GTK is not a runtime
   dependency of this module — that arrives later in the build (step 8).
@@ -38,10 +38,9 @@ from datetime import datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, Protocol
 
-from enums import AttachmentRejectionReason, NotebookIcon
+from enums import AttachmentRejectionReason
 from models.attachment import Attachment
 from models.note import Note
-from models.notebook import Notebook
 
 if TYPE_CHECKING:
     # GTK is only a runtime dependency from build step 8 onwards. Pulling
@@ -103,19 +102,6 @@ class AttachmentRejected(Exception):
         self.reason = reason
 
 
-class NestingTooDeep(Exception):
-    """Raised by :meth:`NotebookRepositoryProtocol.insert` (and the SQL
-    triggers behind it) when a notebook's proposed ``parent_id`` refers
-    to a notebook that is itself a child.
-
-    The two-level hierarchy is a hard rule. UI code disables the *Add
-    child notebook* action on any notebook that already has a parent, so
-    in normal use this exception is unreachable; it is the defence-in-
-    depth for direct repository misuse and for bugs that bypass the UI
-    guard.
-    """
-
-
 # ---------------------------------------------------------------------------
 # Protocols
 # ---------------------------------------------------------------------------
@@ -126,14 +112,16 @@ class NoteRepositoryProtocol(Protocol):
 
     Every method is atomic with respect to the database. Returns are
     plain :class:`Note` dataclasses; ``sqlite3.Row`` objects never escape
-    the implementation. The query methods below pre-filter by notebook /
-    smart-filter / substring on the database side; further composition
-    (live search query, sort dropdown) happens in :mod:`search`.
+    the implementation. The query methods below pre-filter by smart-filter
+    / substring on the database side; further composition (tag AND,
+    live search query, sort dropdown) happens in :mod:`search`.
+
+    :meth:`list_tags` returns every distinct tag currently in use,
+    paired with its note count, alphabetically ordered. This is the
+    surface the sidebar's *Tags* section reads.
     """
 
     def get(self, note_id: str) -> Note: ...
-
-    def list_by_notebook(self, notebook_id: str) -> list[Note]: ...
 
     def list_modified_since(self, since: datetime) -> list[Note]: ...
 
@@ -150,44 +138,9 @@ class NoteRepositoryProtocol(Protocol):
         modified_at: datetime,
     ) -> None: ...
 
-    def update_notebook(self, note_id: str, notebook_id: str) -> None: ...
-
     def delete(self, note_id: str) -> None: ...
 
-
-class NotebookRepositoryProtocol(Protocol):
-    """The set of operations the controllers need on the notebooks table.
-
-    The two-level depth rule is enforced inside :meth:`insert` (and by
-    SQL triggers covering both ``INSERT`` and ``UPDATE OF parent_id``):
-    a notebook whose proposed parent already has a parent is rejected
-    with :class:`NestingTooDeep`. UI code never reaches that branch in
-    normal use because the *Add child notebook* action is greyed out on
-    children — this protocol method's contract is the defence-in-depth.
-    """
-
-    def list_all(self) -> list[Notebook]: ...
-
-    def get(self, notebook_id: str) -> Notebook: ...
-
-    def insert(self, notebook: Notebook) -> None:
-        """Persist a new notebook.
-
-        Raises :class:`NestingTooDeep` when ``notebook.parent_id`` refers
-        to a notebook that already has a non-``None`` ``parent_id``. The
-        check happens inside the same transaction as the insert, so
-        rejection is atomic with respect to the rest of the row.
-        """
-
-    def rename(self, notebook_id: str, new_name: str) -> None: ...
-
-    def set_icon(self, notebook_id: str, icon: NotebookIcon) -> None: ...
-
-    def delete_and_reparent_notes(
-        self,
-        notebook_id: str,
-        target_id: str,
-    ) -> None: ...
+    def list_tags(self) -> tuple[tuple[str, int], ...]: ...
 
 
 class AttachmentStoreProtocol(Protocol):

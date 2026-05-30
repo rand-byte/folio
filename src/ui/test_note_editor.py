@@ -74,14 +74,14 @@ def _make_note(
     note_id: str,
     *,
     source: str = "= Hello\n\nbody.\n",
-    notebook_id: str = "nb-1",
+    tags: tuple[str, ...] = (),
 ) -> Note:
     return Note(
         id=note_id,
         title="Hello",
-        notebook_id=notebook_id,
         source=source,
         snippet="body.",
+        tags=tags,
         created_at=_FIXED_NOW,
         modified_at=_FIXED_NOW + timedelta(seconds=1),
     )
@@ -102,9 +102,6 @@ class _FakeNoteRepository:
 
     def get(self, note_id: str) -> Note:
         return self.notes[note_id]
-
-    def list_by_notebook(self, _notebook_id: str) -> list[Note]:
-        raise NotImplementedError
 
     def list_modified_since(self, _since: datetime) -> list[Note]:
         raise NotImplementedError
@@ -129,18 +126,18 @@ class _FakeNoteRepository:
         self.notes[note_id] = Note(
             id=existing.id,
             title=existing.title,
-            notebook_id=existing.notebook_id,
             source=source,
             snippet=existing.snippet,
+            tags=existing.tags,
             created_at=existing.created_at,
             modified_at=modified_at,
         )
 
-    def update_notebook(self, _note_id: str, _notebook_id: str) -> None:
-        raise NotImplementedError
-
     def delete(self, _note_id: str) -> None:
         raise NotImplementedError
+
+    def list_tags(self) -> tuple[tuple[str, int], ...]:
+        return ()
 
 
 class _RaisingNoteRepository(  # pylint: disable=abstract-method

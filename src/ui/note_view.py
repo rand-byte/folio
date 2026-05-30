@@ -170,7 +170,7 @@ from config.defaults import (
     TARGET_CHARS_PER_LINE,
 )
 from controllers.app_state import AppState
-from enums import LinkScheme, ParseErrorKind
+from enums import LinkScheme, ParseErrorKind, ViewMode
 from models.parse_error import ParseError
 from storage.protocols import (
     AttachmentStoreProtocol,
@@ -226,6 +226,24 @@ stylesheet can style it (warning yellow background, padded
 inline-notice look). The class name is stable across releases — the
 stylesheet that targets it is shipped with the application.
 """
+
+
+_CHIP_CSS_CLASS: str = "tag-chip-article"
+"""CSS class applied to each pill chip under the article title. The
+bundled stylesheet's ``.tag-chip-article`` rule sets the rounded-pill
+treatment that matches the design."""
+
+_CHIP_INNER_SPACING_PX: int = 6
+"""Horizontal gap between adjacent chip pills."""
+
+_CHIP_ROW_TOP_MARGIN_PX: int = 4
+"""Space between the chip row and the title above it."""
+
+_CHIP_ROW_BOTTOM_MARGIN_PX: int = 4
+"""Space between the chip row and the article body below it."""
+
+_CHIP_PREFIX: str = "#"
+"""Visible prefix on each tag chip, matching the sidebar's tag rows."""
 
 
 _ALLOWED_SCHEMES_LIST: str = ", ".join(s.value for s in LinkScheme)
@@ -350,6 +368,17 @@ def _message_for(kind: ParseErrorKind, line: int) -> str:
                 f"Line {line}: this container only accepts paragraphs — "
                 "block-level constructs (headings, lists, code blocks, "
                 "tables, admonitions, blockquotes) cannot appear inside it."
+            )
+        case ParseErrorKind.BAD_TAG_VALUE:
+            return (
+                f"Line {line}: the `:tags:` line has an invalid tag value. "
+                "Tags use lowercase letters, digits, and hyphens, and must "
+                "start with a letter or digit."
+            )
+        case ParseErrorKind.DUPLICATE_TAG_ATTRIBUTE:
+            return (
+                f"Line {line}: this note has more than one `:tags:` line — "
+                "combine them into a single comma-separated list."
             )
 
 
@@ -905,8 +934,10 @@ class NoteView(Gtk.Box):
     _error_banner_revealer: Gtk.Revealer
     _error_banner_label: Gtk.Label
     _outer_column_width_px: int
+    _chip_row: Gtk.Box
+    _chip_row_align: Gtk.Box
 
-    def __init__(
+    def __init__(  # pylint: disable=too-many-locals,too-many-statements
         self,
         *,
         note_repository: NoteRepositoryProtocol,
@@ -1035,6 +1066,45 @@ class NoteView(Gtk.Box):
             ARTICLE_BOTTOM_MARGIN_LINES * article_container.line_height_px(),
         )
 
+        # ----- Tag chips -----
+        # Visible in VIEW mode when the current note has at least one
+        # tag. Sits *above* the article column inside the scroller so
+        # it scrolls with the document and so its left/right margins
+        # can be derived from the same M-width measurement as the
+        # column. The chip row is wrapped in an alignment box that
+        # constrains it to the article column's outer width and
+        # centres it horizontally — matching how
+        # :class:`ArticleContainer` centres its own child.
+        self._chip_row = Gtk.Box.new(
+            Gtk.Orientation.HORIZONTAL,
+            _CHIP_INNER_SPACING_PX,
+        )
+        self._chip_row.set_halign(Gtk.Align.START)
+        # Inset by the article's inner horizontal padding so chips
+        # align with the title text, not the column edge.
+        chip_inset = ARTICLE_INNER_HPADDING_CHARS * article_container.char_width_px()
+        self._chip_row.set_margin_start(chip_inset)
+        self._chip_row.set_margin_end(chip_inset)
+        self._chip_row.set_margin_top(_CHIP_ROW_TOP_MARGIN_PX)
+        self._chip_row.set_margin_bottom(_CHIP_ROW_BOTTOM_MARGIN_PX)
+
+        self._chip_row_align = Gtk.Box.new(Gtk.Orientation.HORIZONTAL, 0)
+        self._chip_row_align.set_halign(Gtk.Align.CENTER)
+        self._chip_row_align.set_size_request(self._outer_column_width_px, -1)
+        self._chip_row_align.append(self._chip_row)
+        # Hidden by default — :meth:`_refresh_chips` toggles visibility
+        # based on note tags + current view mode.
+        self._chip_row_align.set_visible(False)
+
+        # Wrap chip-row + article-container in a vertical Box that
+        # becomes the scroller's single child. The scroller scrolls
+        # this composite so chips travel with the document.
+        article_stack = Gtk.Box.new(Gtk.Orientation.VERTICAL, 0)
+        article_stack.append(self._chip_row_align)
+        article_stack.append(article_container)
+        article_stack.set_hexpand(True)
+        article_stack.set_vexpand(True)
+
         # The scroller: AUTOMATIC on both axes. Vertical scrolling is
         # the prose-reading direction; horizontal kicks in only when
         # the window is too narrow to fit the column at its target
@@ -1044,7 +1114,7 @@ class NoteView(Gtk.Box):
             Gtk.PolicyType.AUTOMATIC,
             Gtk.PolicyType.AUTOMATIC,
         )
-        scrolled_window.set_child(article_container)
+        scrolled_window.set_child(article_stack)
         scrolled_window.set_hexpand(True)
         scrolled_window.set_vexpand(True)
         self.append(scrolled_window)
@@ -1070,6 +1140,14 @@ class NoteView(Gtk.Box):
         self._app_state.connect(
             "selected-note-changed",
             self._on_selected_note_changed,
+        )
+        # The chip row's visibility depends on the view mode (hidden in
+        # EDIT, where the raw ``:tags:`` line is visible in the source
+        # editor). Subscribe so toggling View/Source refreshes the chips
+        # without going through the renderer.
+        self._app_state.connect(
+            "view-mode-changed",
+            self._on_view_mode_changed,
         )
 
         # Initial render: pick up whatever ``selected_note_id`` is set
@@ -1126,6 +1204,7 @@ class NoteView(Gtk.Box):
             self._current_note_id = None
             self._buffer.set_text("")
             self._hide_error_banner()
+            self._refresh_chips(())
             return
         try:
             note = self._note_repository.get(note_id)
@@ -1133,6 +1212,7 @@ class NoteView(Gtk.Box):
             self._current_note_id = None
             self._buffer.set_text("")
             self._hide_error_banner()
+            self._refresh_chips(())
             return
         # Update the resolver's view of "current note" BEFORE invoking
         # the renderer, so any image macro encountered during the
@@ -1156,9 +1236,13 @@ class NoteView(Gtk.Box):
             self._buffer.set_text("")
             self._error_banner_label.set_text(_message_for(exc.kind, exc.line))
             self._error_banner_revealer.set_reveal_child(True)
+            # An unparseable note has no valid tag tuple to surface —
+            # the chip row hides too, matching the empty buffer.
+            self._refresh_chips(())
             return
         # Render succeeded — make sure no stale banner remains visible.
         self._hide_error_banner()
+        self._refresh_chips(note.tags)
 
     def _hide_error_banner(self) -> None:
         """Hide the parse-error banner.
@@ -1172,6 +1256,52 @@ class NoteView(Gtk.Box):
         """
         self._error_banner_revealer.set_reveal_child(False)
         self._error_banner_label.set_text("")
+
+    def _refresh_chips(self, tags: tuple[str, ...]) -> None:
+        """Rebuild the chip-row labels and show / hide the row.
+
+        Visible iff the current note has at least one tag *and* the
+        app is in :data:`ViewMode.VIEW` (the editor mode shows the raw
+        ``:tags:`` line, so duplicating that as chips above is noise).
+        Cheap because the chip count is small — typically ≤5 per note —
+        so a full rebuild on every render is fine.
+        """
+        # Drop any existing chip labels.
+        child = self._chip_row.get_first_child()
+        while child is not None:
+            next_child = child.get_next_sibling()
+            self._chip_row.remove(child)
+            child = next_child
+
+        if not tags or self._app_state.view_mode is not ViewMode.VIEW:
+            self._chip_row_align.set_visible(False)
+            return
+
+        for tag in tags:
+            chip = Gtk.Label.new(f"{_CHIP_PREFIX}{tag}")
+            chip.add_css_class(_CHIP_CSS_CLASS)
+            chip.set_halign(Gtk.Align.START)
+            self._chip_row.append(chip)
+        self._chip_row_align.set_visible(True)
+
+    def _current_note_tags(self) -> tuple[str, ...]:
+        """Look up the current note's tags, returning ``()`` on miss.
+
+        Used by the chip refresh path and by the view-mode handler so
+        both share a single source of truth for "what tags should I
+        be showing right now".
+        """
+        if self._current_note_id is None:
+            return ()
+        try:
+            note = self._note_repository.get(self._current_note_id)
+        except KeyError:
+            return ()
+        return note.tags
+
+    def _on_view_mode_changed(self, _app_state: AppState) -> None:
+        """View / Source toggle changed — show or hide the chip row."""
+        self._refresh_chips(self._current_note_tags())
 
     # ------------------------------------------------------------------
     # Signal handlers
