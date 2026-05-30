@@ -1779,5 +1779,150 @@ class SoftBreakPangoMarkupTests(unittest.TestCase):
         self.assertEqual(markup, "a b")
 
 
+# ---------------------------------------------------------------------------
+# post_title_hook
+# ---------------------------------------------------------------------------
+
+
+_BLOCK_SEPARATOR_LEN: int = 2
+"""Length, in characters, of the renderer's inter-block separator.
+
+The renderer inserts ``"\\n\\n"`` after every block including the title;
+the post-title anchor sits *after* that separator. Tests assert anchor
+offsets relative to this length so a future change to the separator
+text fans out to exactly one place.
+"""
+
+
+@unittest.skipUnless(_display_available(), "no GDK display")
+class PostTitleHookTests(unittest.TestCase):
+    """``post_title_hook`` fires exactly once per render with an anchor
+    positioned at the title/body boundary (or at buffer-start when the
+    note has no title). Verified through small documents whose offsets
+    are easy to compute by hand.
+    """
+
+    def test_hook_fires_once_when_title_present(self) -> None:
+        renderer, buffer, _ = _build_renderer()
+        anchors: list[Gtk.TextChildAnchor] = []
+
+        renderer.render_into(
+            "= Welcome\n\nfirst.\n\nsecond.\n\nthird.\n",
+            buffer,
+            note_id="n1",
+            post_title_hook=anchors.append,
+        )
+
+        self.assertEqual(len(anchors), 1)
+        self.assertIsInstance(anchors[0], Gtk.TextChildAnchor)
+
+    def test_hook_fires_once_when_no_title(self) -> None:
+        renderer, buffer, _ = _build_renderer()
+        anchors: list[Gtk.TextChildAnchor] = []
+
+        renderer.render_into(
+            "just a body paragraph.\n",
+            buffer,
+            note_id="n1",
+            post_title_hook=anchors.append,
+        )
+
+        self.assertEqual(len(anchors), 1)
+        self.assertIsInstance(anchors[0], Gtk.TextChildAnchor)
+
+    def test_hook_anchor_offset_is_after_title(self) -> None:
+        renderer, buffer, _ = _build_renderer()
+        anchors: list[Gtk.TextChildAnchor] = []
+
+        renderer.render_into(
+            "= Welcome\n\nbody.\n",
+            buffer,
+            note_id="n1",
+            post_title_hook=anchors.append,
+        )
+
+        # The title text plus its trailing block separator is the
+        # offset the hook should receive — i.e. the anchor sits right
+        # before the first body block's text.
+        expected_offset = len("Welcome") + _BLOCK_SEPARATOR_LEN
+        anchor_iter = self._iter_for_anchor(buffer, anchors[0])
+        self.assertIsNotNone(anchor_iter)
+        assert anchor_iter is not None  # for mypy/pylint
+        self.assertEqual(anchor_iter.get_offset(), expected_offset)
+
+    def test_hook_anchor_offset_is_zero_when_no_title(self) -> None:
+        renderer, buffer, _ = _build_renderer()
+        anchors: list[Gtk.TextChildAnchor] = []
+
+        renderer.render_into(
+            "body only.\n",
+            buffer,
+            note_id="n1",
+            post_title_hook=anchors.append,
+        )
+
+        anchor_iter = self._iter_for_anchor(buffer, anchors[0])
+        self.assertIsNotNone(anchor_iter)
+        assert anchor_iter is not None  # for mypy/pylint
+        self.assertEqual(anchor_iter.get_offset(), 0)
+
+    def test_hook_not_called_when_parse_fails(self) -> None:
+        renderer, buffer, _ = _build_renderer()
+        anchors: list[Gtk.TextChildAnchor] = []
+
+        # An unterminated monospace span — guaranteed to raise
+        # ``ParseError`` during ``parse(source)`` at the top of
+        # ``render_into``, before any buffer mutation.
+        with self.assertRaises(ParseError):
+            renderer.render_into(
+                "an `unterminated monospace span\n",
+                buffer,
+                note_id="n1",
+                post_title_hook=anchors.append,
+            )
+
+        self.assertEqual(anchors, [])
+
+    def test_hook_omitted_runs_clean(self) -> None:
+        renderer, buffer, _ = _build_renderer()
+
+        # Omitting the kwarg must be a no-op: no exception, no
+        # stray anchor inserted into the buffer.
+        renderer.render_into(
+            "= Welcome\n\nbody.\n",
+            buffer,
+            note_id="n1",
+        )
+
+        # Walk every character offset and confirm no
+        # ``Gtk.TextChildAnchor`` is exposed by the iter — the
+        # renderer only creates anchors for tables (none here) and
+        # the optional post-title path.
+        iterator = buffer.get_start_iter()
+        while True:
+            self.assertIsNone(iterator.get_child_anchor())
+            if not iterator.forward_char():
+                break
+
+    @staticmethod
+    def _iter_for_anchor(
+        buffer: Gtk.TextBuffer,
+        anchor: Gtk.TextChildAnchor,
+    ) -> Gtk.TextIter | None:
+        """Return the iter at which ``anchor`` is embedded, or None.
+
+        ``Gtk.TextChildAnchor`` does not directly expose its buffer
+        position — it carries one only while inserted. We walk the
+        buffer once, comparing each iter's child anchor against the
+        target. Linear, but the buffers in these tests are tiny.
+        """
+        iterator = buffer.get_start_iter()
+        while True:
+            if iterator.get_child_anchor() is anchor:
+                return iterator
+            if not iterator.forward_char():
+                return None
+
+
 if __name__ == "__main__":
     unittest.main()

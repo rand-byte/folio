@@ -130,6 +130,21 @@ Principles & invariants
   the parser to this UI's tone. The mapping is *exhaustive* over
   :class:`ParseErrorKind` so adding a new error kind forces an
   update here — caught by a unit test that iterates the enum.
+* **Tag chip row.** The pill-shaped ``#tag`` chips that appear in
+  VIEW mode below the rendered title are held in :attr:`_chip_row`
+  and **anchored inside the rendered text view** via the renderer's
+  :data:`PostTitleHook`. The anchor sits immediately after the title
+  (or at buffer-start when the note has no title), so the row lays
+  out directly between the title and the first body block — the
+  same column inset as the title, no separate horizontal alignment
+  wrapper needed. :meth:`_attach_chip_row_after_title` performs the
+  re-anchoring on every successful render and calls
+  :meth:`Gtk.Widget.unparent` defensively before each attach to
+  preserve GTK's "a widget can have at most one parent" invariant
+  even if the renderer's anchor-disposal behaviour ever changes.
+  :meth:`_refresh_chips` only touches the chip *labels* and the
+  ``visible`` flag — it never reparents — so a View/Source toggle
+  refreshes labels without disturbing the anchor.
 """
 
 # pylint: disable=too-many-lines
@@ -935,9 +950,8 @@ class NoteView(Gtk.Box):
     _error_banner_label: Gtk.Label
     _outer_column_width_px: int
     _chip_row: Gtk.Box
-    _chip_row_align: Gtk.Box
 
-    def __init__(  # pylint: disable=too-many-locals,too-many-statements
+    def __init__(  # pylint: disable=too-many-statements
         self,
         *,
         note_repository: NoteRepositoryProtocol,
@@ -1068,42 +1082,27 @@ class NoteView(Gtk.Box):
 
         # ----- Tag chips -----
         # Visible in VIEW mode when the current note has at least one
-        # tag. Sits *above* the article column inside the scroller so
-        # it scrolls with the document and so its left/right margins
-        # can be derived from the same M-width measurement as the
-        # column. The chip row is wrapped in an alignment box that
-        # constrains it to the article column's outer width and
-        # centres it horizontally — matching how
-        # :class:`ArticleContainer` centres its own child.
+        # tag. **Anchored inside the rendered text view**, at the
+        # post-title anchor produced by
+        # :meth:`TextBufferRenderer.render_into`'s
+        # :data:`PostTitleHook`, so the row sits directly below the
+        # title and above the first body block. Because the text
+        # view's own left/right margins inset the anchored child, the
+        # chip row needs no horizontal margins of its own — only the
+        # vertical gaps that separate it from the title above and the
+        # first body block below.
         self._chip_row = Gtk.Box.new(
             Gtk.Orientation.HORIZONTAL,
             _CHIP_INNER_SPACING_PX,
         )
         self._chip_row.set_halign(Gtk.Align.START)
-        # Inset by the article's inner horizontal padding so chips
-        # align with the title text, not the column edge.
-        chip_inset = ARTICLE_INNER_HPADDING_CHARS * article_container.char_width_px()
-        self._chip_row.set_margin_start(chip_inset)
-        self._chip_row.set_margin_end(chip_inset)
         self._chip_row.set_margin_top(_CHIP_ROW_TOP_MARGIN_PX)
         self._chip_row.set_margin_bottom(_CHIP_ROW_BOTTOM_MARGIN_PX)
-
-        self._chip_row_align = Gtk.Box.new(Gtk.Orientation.HORIZONTAL, 0)
-        self._chip_row_align.set_halign(Gtk.Align.CENTER)
-        self._chip_row_align.set_size_request(self._outer_column_width_px, -1)
-        self._chip_row_align.append(self._chip_row)
         # Hidden by default — :meth:`_refresh_chips` toggles visibility
-        # based on note tags + current view mode.
-        self._chip_row_align.set_visible(False)
-
-        # Wrap chip-row + article-container in a vertical Box that
-        # becomes the scroller's single child. The scroller scrolls
-        # this composite so chips travel with the document.
-        article_stack = Gtk.Box.new(Gtk.Orientation.VERTICAL, 0)
-        article_stack.append(self._chip_row_align)
-        article_stack.append(article_container)
-        article_stack.set_hexpand(True)
-        article_stack.set_vexpand(True)
+        # based on note tags + current view mode. An invisible anchored
+        # widget consumes no visible space, so this is the correct
+        # initial state for an empty note view.
+        self._chip_row.set_visible(False)
 
         # The scroller: AUTOMATIC on both axes. Vertical scrolling is
         # the prose-reading direction; horizontal kicks in only when
@@ -1114,7 +1113,7 @@ class NoteView(Gtk.Box):
             Gtk.PolicyType.AUTOMATIC,
             Gtk.PolicyType.AUTOMATIC,
         )
-        scrolled_window.set_child(article_stack)
+        scrolled_window.set_child(article_container)
         scrolled_window.set_hexpand(True)
         scrolled_window.set_vexpand(True)
         self.append(scrolled_window)
@@ -1225,6 +1224,7 @@ class NoteView(Gtk.Box):
                 self._buffer,
                 note_id=note.id,
                 attach_widget=self._attach_child_widget,
+                post_title_hook=self._attach_chip_row_after_title,
             )
         except ParseError as exc:
             # Clear the buffer so a stale render from the previously
@@ -1265,6 +1265,14 @@ class NoteView(Gtk.Box):
         ``:tags:`` line, so duplicating that as chips above is noise).
         Cheap because the chip count is small — typically ≤5 per note —
         so a full rebuild on every render is fine.
+
+        The chip widget's *parent* is managed independently of its
+        contents and visibility: re-anchoring happens during a
+        :meth:`refresh` via :meth:`_attach_chip_row_after_title`, while
+        this method only touches labels and the ``set_visible`` flag.
+        That separation matters when the view mode toggles (View ↔
+        Source) without a re-render — :meth:`_refresh_chips` runs but
+        the renderer does not, so the existing anchor stays in place.
         """
         # Drop any existing chip labels.
         child = self._chip_row.get_first_child()
@@ -1274,7 +1282,7 @@ class NoteView(Gtk.Box):
             child = next_child
 
         if not tags or self._app_state.view_mode is not ViewMode.VIEW:
-            self._chip_row_align.set_visible(False)
+            self._chip_row.set_visible(False)
             return
 
         for tag in tags:
@@ -1282,7 +1290,7 @@ class NoteView(Gtk.Box):
             chip.add_css_class(_CHIP_CSS_CLASS)
             chip.set_halign(Gtk.Align.START)
             self._chip_row.append(chip)
-        self._chip_row_align.set_visible(True)
+        self._chip_row.set_visible(True)
 
     def _current_note_tags(self) -> tuple[str, ...]:
         """Look up the current note's tags, returning ``()`` on miss.
@@ -1332,6 +1340,26 @@ class NoteView(Gtk.Box):
         into the renderer's pure-AST interface.
         """
         self._text_view.add_child_at_anchor(widget, anchor)
+
+    def _attach_chip_row_after_title(
+        self,
+        anchor: Gtk.TextChildAnchor,
+    ) -> None:
+        """Adapter for the renderer's :data:`PostTitleHook` contract.
+
+        Re-anchors :attr:`_chip_row` at the post-title anchor the
+        renderer just created. The previous render's anchor (if any)
+        was destroyed by ``buffer.set_text("")`` at the start of
+        :meth:`TextBufferRenderer.render_into`, which also unparents
+        the chip widget — but a defensive :meth:`Gtk.Widget.unparent`
+        before the new attach guards against any unexpected parent
+        state and keeps the "a widget can have at most one parent"
+        GTK invariant locally enforced. No-op when the chip widget is
+        already unparented.
+        """
+        if self._chip_row.get_parent() is not None:
+            self._chip_row.unparent()
+        self._text_view.add_child_at_anchor(self._chip_row, anchor)
 
     def _resolve_image_bytes(self, filename: str) -> bytes:
         """The :data:`ImageBytesResolver` plugged into the renderer.

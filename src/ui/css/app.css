@@ -144,19 +144,18 @@
 
 /* Article-view tag chips (under the rendered title in VIEW mode).
  *
- * Pill-shaped, palette-safe (theme background tinted). Margin matches
- * the article's left padding so the row of chips aligns with the
- * title above it. The ``ui/note_view.py`` chip-row builder applies
- * this class to each chip label and a separate class to the row Box
- * to control its horizontal spacing. */
+ * Pill-shaped, palette-safe (theme background tinted). The chip row
+ * is anchored inside the rendered text view (see
+ * ``ui/note_view.py``'s post-title hook wiring), so the text view's
+ * own left/right margins inset the row — chips align with the title
+ * above without a separate row-level horizontal margin. The vertical
+ * gap to the title and the first body block is applied imperatively
+ * in Python (``_CHIP_ROW_TOP_MARGIN_PX`` / ``_CHIP_ROW_BOTTOM_MARGIN_PX``)
+ * so there is no row-level CSS class for those, either. */
 .tag-chip-article {
     border-radius: 999px;
     padding: 2px 8px;
     background-color: alpha(currentColor, 0.10);
     font-size: 90%;
     opacity: 0.85;
-}
-
-.tag-chip-article-row {
-    margin-bottom: 8px;
 }

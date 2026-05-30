@@ -73,6 +73,23 @@ Principles & invariants
   currently active. Because :class:`Monospace` carries its content as
   a single literal :class:`str` (not a list of further inline nodes),
   it never recurses through :meth:`_emit_inline`.
+* :meth:`render_into` accepts an optional :data:`PostTitleHook`. When
+  supplied, it is invoked **exactly once per render** with a freshly
+  created :class:`Gtk.TextChildAnchor` sitting at the boundary between
+  the rendered title and the first body block — i.e. immediately
+  after the title's :data:`_BLOCK_SEPARATOR` newline. When the
+  document has no title, the same hook fires with an anchor at
+  buffer-start. The hook fires *after* the buffer has been cleared
+  and the title (if any) has been emitted, but *before* any body
+  block is walked, so the caller observes the anchor in a stable
+  position. The renderer does not own the lifecycle of any widget
+  the caller attaches: the previous render's anchors are destroyed
+  by ``buffer.set_text("")``, which also unparents the attached
+  widget; the caller is responsible for re-attaching a fresh widget
+  (or, idiomatically, re-attaching the same widget) at the new
+  anchor. The hook is **not** invoked when :meth:`render_into`
+  raises a :class:`ParseError` — the buffer is unchanged by the
+  raise, and no anchor is leaked.
 """
 
 # The module's size reflects the breadth of block kinds the renderer
@@ -144,6 +161,23 @@ note-view widget. Tests pass a list-collector that records every
 been displayed without a live :class:`Gtk.TextView`. After block-level
 constructs other than tables moved into the buffer, this callback is
 only invoked for tables.
+"""
+
+
+type PostTitleHook = Callable[[Gtk.TextChildAnchor], None]
+"""Hook called once per render with the post-title anchor.
+
+The anchor sits at the boundary between the rendered document title
+and the first body block — immediately after the title's trailing
+block separator. When the document has no title, the anchor is at
+buffer-start. The caller is expected to attach a single, caller-owned
+widget to this anchor (typically via
+:meth:`Gtk.TextView.add_child_at_anchor`). Production wires this in
+:class:`ui.note_view.NoteView` to position the tag-chip row directly
+below the title; tests pass a list-collector that records each anchor
+to assert hook firing semantics. Unlike :data:`WidgetAttacher`, the
+renderer never produces the widget itself — the hook only exposes the
+anchor, and the caller owns the widget's lifecycle across renders.
 """
 
 
@@ -235,6 +269,7 @@ class TextBufferRenderer:
         *,
         note_id: str,  # pylint: disable=unused-argument
         attach_widget: WidgetAttacher | None = None,
+        post_title_hook: PostTitleHook | None = None,
     ) -> None:
         """Parse ``source`` and rebuild ``buffer`` to reflect the AST.
 
@@ -247,6 +282,16 @@ class TextBufferRenderer:
         ``None``, anchors are still created but the produced widgets
         are dropped on the floor — useful for text/tag-only assertions
         that do not care about the embedded table widgets.
+
+        ``post_title_hook`` is an optional callback invoked exactly
+        once per render with a :class:`Gtk.TextChildAnchor` positioned
+        immediately after the rendered title (or at buffer-start when
+        ``document.title is None``). Production wires this to anchor
+        the tag-chip row directly below the title — see the
+        :data:`PostTitleHook` docstring for the contract. The hook is
+        only fired on a successful parse; if :func:`parse` raises a
+        :class:`ParseError`, the buffer is left untouched and the hook
+        is never invoked.
         """
         document = parse(source)  # may raise ParseError
         attacher = attach_widget if attach_widget is not None else _noop_attacher
@@ -261,6 +306,15 @@ class TextBufferRenderer:
         self._clear_link_url_tags()
         if document.title is not None:
             self._emit_heading(buffer, document.title, level=0)
+        # The post-title anchor: sits at the boundary between the
+        # title's trailing block separator and the first body block,
+        # or at buffer-start when there is no title. Created on every
+        # render so its lifetime is tied to the buffer's current
+        # contents (``set_text("")`` above destroys any prior anchor
+        # along with the deleted text).
+        if post_title_hook is not None:
+            anchor = buffer.create_child_anchor(buffer.get_end_iter())
+            post_title_hook(anchor)
         for block in document.blocks:
             self._emit_block(buffer, block, attacher)
         self._strip_trailing_blank(buffer)

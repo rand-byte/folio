@@ -1654,6 +1654,128 @@ class ArticleTextViewMutualExclusionTests(unittest.TestCase):
             text_view._compute_wash_rects()
 
 
+@unittest.skipUnless(_display_available(), "no GDK display")
+class NoteViewChipPlacementTests(unittest.TestCase):
+    """The tag-chip row is anchored *inside* the rendered text view at
+    the renderer's post-title anchor, not as a sibling of the article
+    column. These tests pin the new wiring: chip-row parent, absence
+    of a separate vertical stack inside the scroller, and re-anchor
+    behaviour across renders.
+    """
+
+    def _build_view(
+        self,
+        repo: _FakeNoteRepository,
+        state: AppState,
+    ) -> NoteView:
+        """Build a :class:`NoteView` with stubbed font measurers.
+
+        Mirrors the construction pattern used by
+        :class:`NoteViewMarginWiringTests` — see that class for the
+        rationale. The deterministic font dimensions are irrelevant to
+        the chip-row tests, but using the stubbed factory keeps the
+        widget tree free of Pango / theme dependencies.
+        """
+        with mock.patch.object(
+            note_view_module,
+            "_build_font_measurers",
+            _stub_font_measurers_factory(char_w=10, line_h=20),
+        ):
+            return NoteView(note_repository=repo, app_state=state)
+
+    def test_chip_row_is_a_child_of_the_text_view_after_render(self) -> None:
+        repo = _FakeNoteRepository()
+        repo.notes["note-A"] = _make_note(
+            "note-A",
+            source="= Hello\n:tags: foo, bar\n\nbody.\n",
+            tags=("bar", "foo"),
+        )
+        state = AppState()
+        state.set_selected_note_id("note-A")
+        view = self._build_view(repo, state)
+
+        # The chip row's parent is the inner text view — not a Box,
+        # not the ArticleContainer, not the ScrolledWindow.
+        self.assertIs(view._chip_row.get_parent(), view._text_view)
+
+    def test_chip_row_is_no_longer_in_the_scroller_vertical_stack(self) -> None:
+        # With the new layout, the scroller's child path is
+        # Viewport → ArticleContainer → TextView. The chip row must
+        # NOT appear anywhere in the (pre-text-view) widget chain.
+        repo = _FakeNoteRepository()
+        repo.notes["note-A"] = _make_note(
+            "note-A",
+            source="= Hello\n:tags: foo\n\nbody.\n",
+            tags=("foo",),
+        )
+        state = AppState()
+        state.set_selected_note_id("note-A")
+        view = self._build_view(repo, state)
+
+        # Collect every widget on the path from NoteView down to (but
+        # excluding) the inner TextView. The chip row must not be in
+        # that set — its parent is the text view itself, reached via
+        # ``add_child_at_anchor`` rather than the box-sibling chain.
+        chain: list[Gtk.Widget] = []
+        node: Gtk.Widget | None = view.get_first_child()
+        while node is not None and not isinstance(node, Gtk.TextView):
+            chain.append(node)
+            if hasattr(node, "get_child"):
+                child = node.get_child() if callable(getattr(node, "get_child", None)) else None
+            else:
+                child = None
+            if child is None:
+                child = node.get_first_child()
+            node = child
+
+        self.assertNotIn(view._chip_row, chain)
+
+    def test_chip_row_unparented_on_re_render(self) -> None:
+        # Two consecutive renders must end with the chip row parented
+        # to the text view exactly once. A double-parent attempt would
+        # raise / warn at the GTK level — the assertion below catches
+        # the steady-state result either way.
+        repo = _FakeNoteRepository()
+        repo.notes["note-A"] = _make_note(
+            "note-A",
+            source="= Hello\n:tags: foo\n\nbody.\n",
+            tags=("foo",),
+        )
+        repo.notes["note-B"] = _make_note(
+            "note-B",
+            source="= Other\n:tags: bar\n\nelsewhere.\n",
+            tags=("bar",),
+        )
+        state = AppState()
+        state.set_selected_note_id("note-A")
+        view = self._build_view(repo, state)
+
+        # First render done by construction. Trigger a second render
+        # by switching the selection.
+        state.set_selected_note_id("note-B")
+
+        self.assertIs(view._chip_row.get_parent(), view._text_view)
+
+    def test_chip_row_hidden_when_no_tags_but_still_anchored(self) -> None:
+        # An untagged note: the chip row is invisible (no chips to
+        # show, no horizontal gap to insert) but remains parented to
+        # the text view at the post-title anchor, so a subsequent
+        # tag-set update can simply toggle visibility without a
+        # re-anchor.
+        repo = _FakeNoteRepository()
+        repo.notes["note-A"] = _make_note(
+            "note-A",
+            source="= Hello\n\nbody.\n",
+            tags=(),
+        )
+        state = AppState()
+        state.set_selected_note_id("note-A")
+        view = self._build_view(repo, state)
+
+        self.assertFalse(view._chip_row.is_visible())
+        self.assertIs(view._chip_row.get_parent(), view._text_view)
+
+
 class RgbaFromTintTests(unittest.TestCase):
     """The tint→Gdk.RGBA helper is pure and display-independent."""
 
