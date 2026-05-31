@@ -130,21 +130,25 @@ Principles & invariants
   the parser to this UI's tone. The mapping is *exhaustive* over
   :class:`ParseErrorKind` so adding a new error kind forces an
   update here — caught by a unit test that iterates the enum.
-* **Tag chip row.** The pill-shaped ``#tag`` chips that appear in
-  VIEW mode below the rendered title are held in :attr:`_chip_row`
-  and **anchored inside the rendered text view** via the renderer's
-  :data:`PostTitleHook`. The anchor sits immediately after the title
-  (or at buffer-start when the note has no title), so the row lays
-  out directly between the title and the first body block — the
-  same column inset as the title, no separate horizontal alignment
-  wrapper needed. :meth:`_attach_chip_row_after_title` performs the
-  re-anchoring on every successful render and calls
-  :meth:`Gtk.Widget.unparent` defensively before each attach to
-  preserve GTK's "a widget can have at most one parent" invariant
-  even if the renderer's anchor-disposal behaviour ever changes.
-  :meth:`_refresh_chips` only touches the chip *labels* and the
-  ``visible`` flag — it never reparents — so a View/Source toggle
-  refreshes labels without disturbing the anchor.
+* **Metadata line.** Directly under the rendered title the view
+  inserts a dim-grey metadata line — ``Created <date>  ·  Modified
+  <date>  ·  #tag …`` — as **plain text in the buffer**, carrying the
+  :data:`ui.note_render.tag_table.TagName.METADATA` character tag. It
+  is not a widget: there is no anchored child and no separate
+  visibility toggle. The text is inserted by
+  :meth:`NoteView._insert_metadata_after_title`, wired as the
+  renderer's :data:`PostTitleHook`; the dates come from the
+  :class:`Note` already fetched in :meth:`refresh` (stored on
+  :attr:`_current_note` before the render so the hook can read it).
+  A note with no tags shows only the two dates. A thin horizontal rule
+  separating the metadata from the body is painted by
+  :class:`_ArticleTextView` as the ``hairline`` wash for the metadata
+  tag (see :func:`ui.note_render.tag_table.build_wash_specs`), so the
+  whole rendered-view styling stays in the tag table / wash painter
+  and introduces no child widget. Because the right pane is a
+  :class:`Gtk.Stack` that hides the whole :class:`NoteView` in SOURCE
+  mode (where the raw ``:tags:`` line is visible in the editor), the
+  buffer-resident metadata needs no view-mode toggle.
 """
 
 # pylint: disable=too-many-lines
@@ -161,6 +165,7 @@ from __future__ import annotations
 
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
+from datetime import datetime
 
 import gi
 
@@ -173,11 +178,13 @@ gi.require_version("Gdk", "4.0")
 from gi.repository import Gdk, Graphene, Gsk, Gtk  # noqa: E402
 
 from ui.note_render.tag_table import (
+    TagName,
     WashSpec,
     build_tag_table,
     build_wash_specs,
 )
 from ui.note_render.textbuffer_renderer import TextBufferRenderer
+from ui._dates import format_date_long
 from config.defaults import (
     ARTICLE_BOTTOM_MARGIN_LINES,
     ARTICLE_INNER_HPADDING_CHARS,
@@ -185,7 +192,8 @@ from config.defaults import (
     TARGET_CHARS_PER_LINE,
 )
 from controllers.app_state import AppState
-from enums import LinkScheme, ParseErrorKind, ViewMode
+from enums import LinkScheme, ParseErrorKind
+from models.note import Note
 from models.parse_error import ParseError
 from storage.protocols import (
     AttachmentStoreProtocol,
@@ -243,22 +251,31 @@ stylesheet that targets it is shipped with the application.
 """
 
 
-_CHIP_CSS_CLASS: str = "tag-chip-article"
-"""CSS class applied to each pill chip under the article title. The
-bundled stylesheet's ``.tag-chip-article`` rule sets the rounded-pill
-treatment that matches the design."""
+_METADATA_SEPARATOR: str = "  \u00b7  "
+"""Separator between the Created date, Modified date, and tags on the
+metadata line. A middle dot (``·``) padded with two spaces on each
+side, matching the design target
+``Created … · Modified … · #tag …``."""
 
-_CHIP_INNER_SPACING_PX: int = 6
-"""Horizontal gap between adjacent chip pills."""
+_METADATA_TAG_PREFIX: str = "#"
+"""Visible prefix on each tag in the metadata line, matching the
+sidebar's tag rows and the note-list row chips."""
 
-_CHIP_ROW_TOP_MARGIN_PX: int = 4
-"""Space between the chip row and the title above it."""
+_METADATA_TAG_JOINER: str = "  "
+"""Spacing between adjacent ``#tag`` entries within the metadata
+line's tag run."""
 
-_CHIP_ROW_BOTTOM_MARGIN_PX: int = 4
-"""Space between the chip row and the article body below it."""
+_METADATA_CREATED_LABEL: str = "Created "
+"""Leader before the created-at date on the metadata line."""
 
-_CHIP_PREFIX: str = "#"
-"""Visible prefix on each tag chip, matching the sidebar's tag rows."""
+_METADATA_MODIFIED_LABEL: str = "Modified "
+"""Leader before the modified-at date on the metadata line."""
+
+_HAIRLINE_THICKNESS_PX: int = 1
+"""Height, in pixels, of the hairline rule the wash painter draws at
+the bottom of a :class:`WashSpec` flagged ``hairline`` (the metadata
+line's divider). Painted as a 1-px band rather than a full-height
+fill — see :meth:`_ArticleTextView._wash_rect_for_line`."""
 
 
 _ALLOWED_SCHEMES_LIST: str = ", ".join(s.value for s in LinkScheme)
@@ -553,7 +570,9 @@ class _ArticleTextView(Gtk.TextView):
         buffer-coordinate y into widget-coordinate y via
         :meth:`Gtk.TextView.buffer_to_window_coords` — the same
         translation a manual draw against the text window would
-        perform.
+        perform. A :class:`WashSpec` flagged ``hairline`` paints a
+        1-px rule at the line's bottom instead of a full-height fill;
+        every other spec fills the full vertical extent of the line.
         """
         ok, line_iter = buffer.get_iter_at_line(line_no)
         if not ok:
@@ -574,9 +593,23 @@ class _ArticleTextView(Gtk.TextView):
             - spec.box_right_inset_px
         )
         rect = Graphene.Rect()
-        rect.init(
-            float(box_x), float(line_y_widget), float(box_w), float(line_h),
-        )
+        if spec.hairline:
+            # A 1-px rule at the bottom of the line rather than a
+            # full-height fill: the divider between the metadata line
+            # and the body. ``pixels-below-lines`` on the metadata tag
+            # opens the gap above it, so the rule sits clear of the
+            # text.
+            rect.init(
+                float(box_x),
+                float(line_y_widget + line_h - _HAIRLINE_THICKNESS_PX),
+                float(box_w),
+                float(_HAIRLINE_THICKNESS_PX),
+            )
+        else:
+            rect.init(
+                float(box_x), float(line_y_widget),
+                float(box_w), float(line_h),
+            )
         return _rgba_from_tint(spec.tint), rect
 
     def _spec_at_iter(self, line_iter: Gtk.TextIter) -> WashSpec | None:
@@ -600,6 +633,35 @@ class _ArticleTextView(Gtk.TextView):
                 "violates the paragraph-tag mutual-exclusion invariant"
             )
         return matching[0]
+
+
+def _format_metadata_line(
+    created_at: datetime,
+    modified_at: datetime,
+    tags: tuple[str, ...],
+) -> str:
+    """Build the metadata line under the title.
+
+    Returns ``Created <date>  ·  Modified <date>`` followed, when
+    ``tags`` is non-empty, by a third ``·``-separated segment of
+    ``#tag`` entries (e.g.
+    ``Created May 26, 2026  ·  Modified May 30, 2026  ·  #nothing  #test``).
+    Pure and display-free so the ordering / tagless-note behaviour is
+    unit-testable without building a widget. Dates are formatted via
+    :func:`ui._dates.format_date_long` (locale-independent, with the
+    year) so the rendered string is stable across environments.
+    """
+    segments = [
+        f"{_METADATA_CREATED_LABEL}{format_date_long(created_at)}",
+        f"{_METADATA_MODIFIED_LABEL}{format_date_long(modified_at)}",
+    ]
+    if tags:
+        segments.append(
+            _METADATA_TAG_JOINER.join(
+                f"{_METADATA_TAG_PREFIX}{tag}" for tag in tags
+            )
+        )
+    return _METADATA_SEPARATOR.join(segments)
 
 
 def _rgba_from_tint(tint: tuple[float, float, float, float]) -> Gdk.RGBA:
@@ -946,12 +1008,12 @@ class NoteView(Gtk.Box):
     _text_view: _ArticleTextView
     _renderer: TextBufferRenderer
     _current_note_id: str | None
+    _current_note: Note | None
     _error_banner_revealer: Gtk.Revealer
     _error_banner_label: Gtk.Label
     _outer_column_width_px: int
-    _chip_row: Gtk.Box
 
-    def __init__(  # pylint: disable=too-many-statements
+    def __init__(
         self,
         *,
         note_repository: NoteRepositoryProtocol,
@@ -968,6 +1030,10 @@ class NoteView(Gtk.Box):
         # attachments. ``refresh`` updates it on every render so the
         # closure always sees the current note context.
         self._current_note_id = None
+        # The :class:`Note` whose source is presently rendered. Stored
+        # so the post-title metadata hook can read its timestamps and
+        # tags during a render without a second repository round-trip.
+        self._current_note = None
 
         # Build the parse-error banner and prepend it to the vertical
         # stack. The revealer hides itself by default with a 0 ms
@@ -1080,29 +1146,13 @@ class NoteView(Gtk.Box):
             ARTICLE_BOTTOM_MARGIN_LINES * article_container.line_height_px(),
         )
 
-        # ----- Tag chips -----
-        # Visible in VIEW mode when the current note has at least one
-        # tag. **Anchored inside the rendered text view**, at the
-        # post-title anchor produced by
-        # :meth:`TextBufferRenderer.render_into`'s
-        # :data:`PostTitleHook`, so the row sits directly below the
-        # title and above the first body block. Because the text
-        # view's own left/right margins inset the anchored child, the
-        # chip row needs no horizontal margins of its own — only the
-        # vertical gaps that separate it from the title above and the
-        # first body block below.
-        self._chip_row = Gtk.Box.new(
-            Gtk.Orientation.HORIZONTAL,
-            _CHIP_INNER_SPACING_PX,
-        )
-        self._chip_row.set_halign(Gtk.Align.START)
-        self._chip_row.set_margin_top(_CHIP_ROW_TOP_MARGIN_PX)
-        self._chip_row.set_margin_bottom(_CHIP_ROW_BOTTOM_MARGIN_PX)
-        # Hidden by default — :meth:`_refresh_chips` toggles visibility
-        # based on note tags + current view mode. An invisible anchored
-        # widget consumes no visible space, so this is the correct
-        # initial state for an empty note view.
-        self._chip_row.set_visible(False)
+        # ----- Metadata line -----
+        # The dim-grey metadata line (Created · Modified · #tags) is
+        # inserted as plain tagged text directly under the title by the
+        # renderer's post-title hook (see
+        # :meth:`_insert_metadata_after_title`). There is no widget to
+        # build here — the text lives in the buffer and the hairline
+        # rule below it is painted by :class:`_ArticleTextView`.
 
         # The scroller: AUTOMATIC on both axes. Vertical scrolling is
         # the prose-reading direction; horizontal kicks in only when
@@ -1139,14 +1189,6 @@ class NoteView(Gtk.Box):
         self._app_state.connect(
             "selected-note-changed",
             self._on_selected_note_changed,
-        )
-        # The chip row's visibility depends on the view mode (hidden in
-        # EDIT, where the raw ``:tags:`` line is visible in the source
-        # editor). Subscribe so toggling View/Source refreshes the chips
-        # without going through the renderer.
-        self._app_state.connect(
-            "view-mode-changed",
-            self._on_view_mode_changed,
         )
 
         # Initial render: pick up whatever ``selected_note_id`` is set
@@ -1201,30 +1243,33 @@ class NoteView(Gtk.Box):
         note_id = self._app_state.selected_note_id
         if note_id is None:
             self._current_note_id = None
+            self._current_note = None
             self._buffer.set_text("")
             self._hide_error_banner()
-            self._refresh_chips(())
             return
         try:
             note = self._note_repository.get(note_id)
         except KeyError:
             self._current_note_id = None
+            self._current_note = None
             self._buffer.set_text("")
             self._hide_error_banner()
-            self._refresh_chips(())
             return
         # Update the resolver's view of "current note" BEFORE invoking
         # the renderer, so any image macro encountered during the
         # render walk sees the right scope. Updating after would race
-        # with the renderer's own image-resolver calls.
+        # with the renderer's own image-resolver calls. ``_current_note``
+        # is set alongside so the post-title metadata hook can read the
+        # note's timestamps and tags during the render.
         self._current_note_id = note.id
+        self._current_note = note
         try:
             self._renderer.render_into(
                 note.source,
                 self._buffer,
                 note_id=note.id,
                 attach_widget=self._attach_child_widget,
-                post_title_hook=self._attach_chip_row_after_title,
+                post_title_hook=self._insert_metadata_after_title,
             )
         except ParseError as exc:
             # Clear the buffer so a stale render from the previously
@@ -1232,17 +1277,15 @@ class NoteView(Gtk.Box):
             # show the banner with a user-facing message keyed by the
             # error's kind. This is the failure mode the plan calls
             # out: without these two lines the user sees the previous
-            # note's content for a note that doesn't parse.
+            # note's content for a note that doesn't parse. The metadata
+            # hook never fired (the renderer raised before reaching it),
+            # so the buffer is genuinely empty.
             self._buffer.set_text("")
             self._error_banner_label.set_text(_message_for(exc.kind, exc.line))
             self._error_banner_revealer.set_reveal_child(True)
-            # An unparseable note has no valid tag tuple to surface —
-            # the chip row hides too, matching the empty buffer.
-            self._refresh_chips(())
             return
         # Render succeeded — make sure no stale banner remains visible.
         self._hide_error_banner()
-        self._refresh_chips(note.tags)
 
     def _hide_error_banner(self) -> None:
         """Hide the parse-error banner.
@@ -1257,59 +1300,31 @@ class NoteView(Gtk.Box):
         self._error_banner_revealer.set_reveal_child(False)
         self._error_banner_label.set_text("")
 
-    def _refresh_chips(self, tags: tuple[str, ...]) -> None:
-        """Rebuild the chip-row labels and show / hide the row.
+    def _insert_metadata_after_title(self, buffer: Gtk.TextBuffer) -> None:
+        """Insert the dim-grey metadata line as the renderer's post-title hook.
 
-        Visible iff the current note has at least one tag *and* the
-        app is in :data:`ViewMode.VIEW` (the editor mode shows the raw
-        ``:tags:`` line, so duplicating that as chips above is noise).
-        Cheap because the chip count is small — typically ≤5 per note —
-        so a full rebuild on every render is fine.
-
-        The chip widget's *parent* is managed independently of its
-        contents and visibility: re-anchoring happens during a
-        :meth:`refresh` via :meth:`_attach_chip_row_after_title`, while
-        this method only touches labels and the ``set_visible`` flag.
-        That separation matters when the view mode toggles (View ↔
-        Source) without a re-render — :meth:`_refresh_chips` runs but
-        the renderer does not, so the existing anchor stays in place.
+        Wired as :data:`PostTitleHook`, so the renderer calls this once
+        per successful render with ``buffer`` positioned (at its end
+        iter) immediately below the title. Inserts
+        ``Created <date>  ·  Modified <date>  ·  #tag …`` as plain text
+        carrying the :data:`TagName.METADATA` character tag; the
+        renderer then drops a blank line and the body below. The dates
+        and tags come from :attr:`_current_note`, set by
+        :meth:`refresh` before the render. When there is no current note
+        the hook inserts nothing — but :meth:`refresh` only fires the
+        hook on a successful render with a note in hand, so this guard
+        is purely defensive. A note with no tags yields just the two
+        dates.
         """
-        # Drop any existing chip labels.
-        child = self._chip_row.get_first_child()
-        while child is not None:
-            next_child = child.get_next_sibling()
-            self._chip_row.remove(child)
-            child = next_child
-
-        if not tags or self._app_state.view_mode is not ViewMode.VIEW:
-            self._chip_row.set_visible(False)
+        note = self._current_note
+        if note is None:
             return
-
-        for tag in tags:
-            chip = Gtk.Label.new(f"{_CHIP_PREFIX}{tag}")
-            chip.add_css_class(_CHIP_CSS_CLASS)
-            chip.set_halign(Gtk.Align.START)
-            self._chip_row.append(chip)
-        self._chip_row.set_visible(True)
-
-    def _current_note_tags(self) -> tuple[str, ...]:
-        """Look up the current note's tags, returning ``()`` on miss.
-
-        Used by the chip refresh path and by the view-mode handler so
-        both share a single source of truth for "what tags should I
-        be showing right now".
-        """
-        if self._current_note_id is None:
-            return ()
-        try:
-            note = self._note_repository.get(self._current_note_id)
-        except KeyError:
-            return ()
-        return note.tags
-
-    def _on_view_mode_changed(self, _app_state: AppState) -> None:
-        """View / Source toggle changed — show or hide the chip row."""
-        self._refresh_chips(self._current_note_tags())
+        line = _format_metadata_line(
+            note.created_at, note.modified_at, note.tags,
+        )
+        buffer.insert_with_tags_by_name(
+            buffer.get_end_iter(), line, TagName.METADATA.value,
+        )
 
     # ------------------------------------------------------------------
     # Signal handlers
@@ -1340,26 +1355,6 @@ class NoteView(Gtk.Box):
         into the renderer's pure-AST interface.
         """
         self._text_view.add_child_at_anchor(widget, anchor)
-
-    def _attach_chip_row_after_title(
-        self,
-        anchor: Gtk.TextChildAnchor,
-    ) -> None:
-        """Adapter for the renderer's :data:`PostTitleHook` contract.
-
-        Re-anchors :attr:`_chip_row` at the post-title anchor the
-        renderer just created. The previous render's anchor (if any)
-        was destroyed by ``buffer.set_text("")`` at the start of
-        :meth:`TextBufferRenderer.render_into`, which also unparents
-        the chip widget — but a defensive :meth:`Gtk.Widget.unparent`
-        before the new attach guards against any unexpected parent
-        state and keeps the "a widget can have at most one parent"
-        GTK invariant locally enforced. No-op when the chip widget is
-        already unparented.
-        """
-        if self._chip_row.get_parent() is not None:
-            self._chip_row.unparent()
-        self._text_view.add_child_at_anchor(self._chip_row, anchor)
 
     def _resolve_image_bytes(self, filename: str) -> bytes:
         """The :data:`ImageBytesResolver` plugged into the renderer.

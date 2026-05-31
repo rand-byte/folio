@@ -1784,158 +1784,130 @@ class SoftBreakPangoMarkupTests(unittest.TestCase):
 # ---------------------------------------------------------------------------
 
 
-_BLOCK_SEPARATOR_LEN: int = 2
-"""Length, in characters, of the renderer's inter-block separator.
-
-The renderer inserts ``"\\n\\n"`` after most blocks. The document
-**title**, however, emits only a single newline, and the renderer
-inserts this block separator *after* the post-title anchor so the chip
-row hugs the title while the body drops a clear line below the chips.
-Tests assert anchor / body offsets relative to this length so a future
-change to the separator text fans out to exactly one place.
-"""
-
 _TITLE_TRAILING_LEN: int = 1
 """Length, in characters, of the title's single trailing newline.
 
 The titled document emits ``HeadingTrailing.SINGLE_NEWLINE`` after the
-title text, so the post-title anchor sits exactly this many characters
-beyond the title text.
+title text, so the post-title insertion point sits exactly this many
+characters beyond the title text.
+"""
+
+
+_SENTINEL: str = "<<META>>"
+"""A marker the test hook inserts at the post-title insertion point so
+the tests can locate where the hook ran relative to the title and body.
+Chosen to be a substring that never occurs in the surrounding rendered
+text.
 """
 
 
 @unittest.skipUnless(_display_available(), "no GDK display")
 class PostTitleHookTests(unittest.TestCase):
-    """``post_title_hook`` fires exactly once per render with an anchor
-    positioned at the title/body boundary (or at buffer-start when the
-    note has no title). Verified through small documents whose offsets
-    are easy to compute by hand.
+    """``post_title_hook`` fires exactly once per render with the
+    ``buffer`` positioned (at its end iter) at the title/body boundary
+    (or at buffer-start when the note has no title). The hook inserts
+    text there; the renderer drops a block separator and the body
+    after it. No child anchor is created on this path.
     """
 
-    def test_hook_fires_once_when_title_present(self) -> None:
+    def test_hook_fires_once_with_the_buffer(self) -> None:
         renderer, buffer, _ = _build_renderer()
-        anchors: list[Gtk.TextChildAnchor] = []
+        calls: list[Gtk.TextBuffer] = []
 
         renderer.render_into(
-            "= Welcome\n\nfirst.\n\nsecond.\n\nthird.\n",
+            "= Welcome\n\nfirst.\n\nsecond.\n",
             buffer,
             note_id="n1",
-            post_title_hook=anchors.append,
+            post_title_hook=calls.append,
         )
 
-        self.assertEqual(len(anchors), 1)
-        self.assertIsInstance(anchors[0], Gtk.TextChildAnchor)
+        self.assertEqual(len(calls), 1)
+        # The hook receives the buffer being rendered into, not a copy.
+        self.assertIs(calls[0], buffer)
 
     def test_hook_fires_once_when_no_title(self) -> None:
         renderer, buffer, _ = _build_renderer()
-        anchors: list[Gtk.TextChildAnchor] = []
+        calls: list[Gtk.TextBuffer] = []
 
         renderer.render_into(
             "just a body paragraph.\n",
             buffer,
             note_id="n1",
-            post_title_hook=anchors.append,
+            post_title_hook=calls.append,
         )
 
-        self.assertEqual(len(anchors), 1)
-        self.assertIsInstance(anchors[0], Gtk.TextChildAnchor)
+        self.assertEqual(len(calls), 1)
+        self.assertIs(calls[0], buffer)
 
-    def test_hook_anchor_offset_is_after_title(self) -> None:
+    def test_inserted_text_lands_after_title_and_before_body(self) -> None:
+        # The hook inserts at the buffer end iter, which sits one
+        # newline past the title text. After the renderer drops the
+        # block separator and body, the sentinel must appear between
+        # the title and the body.
         renderer, buffer, _ = _build_renderer()
-        anchors: list[Gtk.TextChildAnchor] = []
+
+        def hook(buf: Gtk.TextBuffer) -> None:
+            buf.insert(buf.get_end_iter(), _SENTINEL)
 
         renderer.render_into(
             "= Welcome\n\nbody.\n",
             buffer,
             note_id="n1",
-            post_title_hook=anchors.append,
+            post_title_hook=hook,
         )
 
-        # The title emits only a SINGLE trailing newline so the chip
-        # row hugs it: the anchor sits one newline past the title text,
-        # NOT a full block separator past it. The remaining block-gap
-        # newline is inserted after the anchor (see the body-offset
-        # test below).
-        expected_offset = len("Welcome") + _TITLE_TRAILING_LEN
-        anchor_iter = self._iter_for_anchor(buffer, anchors[0])
-        self.assertIsNotNone(anchor_iter)
-        assert anchor_iter is not None  # for mypy/pylint
-        self.assertEqual(anchor_iter.get_offset(), expected_offset)
+        text = _full_text(buffer)
+        title_at = text.index("Welcome")
+        sentinel_at = text.index(_SENTINEL)
+        body_at = text.index("body.")
+        self.assertLess(title_at, sentinel_at)
+        self.assertLess(sentinel_at, body_at)
+        # The sentinel hugs the title — exactly the title's single
+        # trailing newline separates them.
+        self.assertEqual(
+            sentinel_at, title_at + len("Welcome") + _TITLE_TRAILING_LEN,
+        )
 
-    def test_block_separator_follows_anchor_when_title_present(self) -> None:
-        # The inter-block gap is completed AFTER the anchor: the first
-        # body block starts a full block separator beyond the anchor
-        # character, so the body drops a clear blank line below the
-        # chip row rather than hugging it.
+    def test_inserted_text_lands_at_start_when_no_title(self) -> None:
         renderer, buffer, _ = _build_renderer()
-        anchors: list[Gtk.TextChildAnchor] = []
+
+        def hook(buf: Gtk.TextBuffer) -> None:
+            buf.insert(buf.get_end_iter(), _SENTINEL)
+
+        renderer.render_into(
+            "body only.\n",
+            buffer,
+            note_id="n1",
+            post_title_hook=hook,
+        )
+
+        text = _full_text(buffer)
+        # No title: the insertion point is buffer-start, so the sentinel
+        # opens the buffer and the body follows a block separator below.
+        self.assertTrue(text.startswith(_SENTINEL))
+        self.assertLess(text.index(_SENTINEL), text.index("body only."))
+
+    def test_no_child_anchor_created_on_post_title_path(self) -> None:
+        # The metadata hook inserts plain text, not a widget — the
+        # renderer must create no child anchor on this path. (Tables
+        # still anchor, but there are none in this document.)
+        renderer, buffer, _ = _build_renderer()
+
+        def hook(buf: Gtk.TextBuffer) -> None:
+            buf.insert(buf.get_end_iter(), _SENTINEL)
 
         renderer.render_into(
             "= Welcome\n\nbody.\n",
             buffer,
             note_id="n1",
-            post_title_hook=anchors.append,
+            post_title_hook=hook,
         )
 
-        anchor_iter = self._iter_for_anchor(buffer, anchors[0])
-        self.assertIsNotNone(anchor_iter)
-        assert anchor_iter is not None  # for mypy/pylint
-        # One anchor character plus the block separator separate the
-        # anchor from the first body character.
-        body_offset = anchor_iter.get_offset() + 1 + _BLOCK_SEPARATOR_LEN
-        body_start = buffer.get_iter_at_offset(body_offset)
-        self.assertEqual(
-            buffer.get_text(body_start, buffer.get_end_iter(), False),
-            "body.",
-        )
-
-    def test_block_separator_follows_anchor_when_no_title(self) -> None:
-        # A titleless note also suffered the chips-inline-with-body bug,
-        # so the block separator is inserted after the anchor here too:
-        # the chip row sits alone on the buffer's first line and the
-        # body drops a clear line below it (chips → gap → body).
-        renderer, buffer, _ = _build_renderer()
-        anchors: list[Gtk.TextChildAnchor] = []
-
-        renderer.render_into(
-            "body only.\n",
-            buffer,
-            note_id="n1",
-            post_title_hook=anchors.append,
-        )
-
-        anchor_iter = self._iter_for_anchor(buffer, anchors[0])
-        self.assertIsNotNone(anchor_iter)
-        assert anchor_iter is not None  # for mypy/pylint
-        # Anchor at buffer-start; body follows one anchor char plus the
-        # block separator later.
-        self.assertEqual(anchor_iter.get_offset(), 0)
-        body_offset = anchor_iter.get_offset() + 1 + _BLOCK_SEPARATOR_LEN
-        body_start = buffer.get_iter_at_offset(body_offset)
-        self.assertEqual(
-            buffer.get_text(body_start, buffer.get_end_iter(), False),
-            "body only.",
-        )
-
-    def test_hook_anchor_offset_is_zero_when_no_title(self) -> None:
-        renderer, buffer, _ = _build_renderer()
-        anchors: list[Gtk.TextChildAnchor] = []
-
-        renderer.render_into(
-            "body only.\n",
-            buffer,
-            note_id="n1",
-            post_title_hook=anchors.append,
-        )
-
-        anchor_iter = self._iter_for_anchor(buffer, anchors[0])
-        self.assertIsNotNone(anchor_iter)
-        assert anchor_iter is not None  # for mypy/pylint
-        self.assertEqual(anchor_iter.get_offset(), 0)
+        self.assertEqual(_anchor_offsets(buffer), [])
 
     def test_hook_not_called_when_parse_fails(self) -> None:
         renderer, buffer, _ = _build_renderer()
-        anchors: list[Gtk.TextChildAnchor] = []
+        calls: list[Gtk.TextBuffer] = []
 
         # An unterminated monospace span — guaranteed to raise
         # ``ParseError`` during ``parse(source)`` at the top of
@@ -1945,10 +1917,10 @@ class PostTitleHookTests(unittest.TestCase):
                 "an `unterminated monospace span\n",
                 buffer,
                 note_id="n1",
-                post_title_hook=anchors.append,
+                post_title_hook=calls.append,
             )
 
-        self.assertEqual(anchors, [])
+        self.assertEqual(calls, [])
 
     def test_hook_omitted_runs_clean(self) -> None:
         renderer, buffer, _ = _build_renderer()
@@ -1961,34 +1933,7 @@ class PostTitleHookTests(unittest.TestCase):
             note_id="n1",
         )
 
-        # Walk every character offset and confirm no
-        # ``Gtk.TextChildAnchor`` is exposed by the iter — the
-        # renderer only creates anchors for tables (none here) and
-        # the optional post-title path.
-        iterator = buffer.get_start_iter()
-        while True:
-            self.assertIsNone(iterator.get_child_anchor())
-            if not iterator.forward_char():
-                break
-
-    @staticmethod
-    def _iter_for_anchor(
-        buffer: Gtk.TextBuffer,
-        anchor: Gtk.TextChildAnchor,
-    ) -> Gtk.TextIter | None:
-        """Return the iter at which ``anchor`` is embedded, or None.
-
-        ``Gtk.TextChildAnchor`` does not directly expose its buffer
-        position — it carries one only while inserted. We walk the
-        buffer once, comparing each iter's child anchor against the
-        target. Linear, but the buffers in these tests are tiny.
-        """
-        iterator = buffer.get_start_iter()
-        while True:
-            if iterator.get_child_anchor() is anchor:
-                return iterator
-            if not iterator.forward_char():
-                return None
+        self.assertEqual(_anchor_offsets(buffer), [])
 
 
 if __name__ == "__main__":

@@ -43,10 +43,13 @@ from ui.note_view import (
     _ArticleTextView,
     _FALLBACK_CHAR_WIDTH_PX,
     _FALLBACK_LINE_HEIGHT_PX,
+    _HAIRLINE_THICKNESS_PX,
+    _format_metadata_line,
     _message_for,
     _placeholder_image_bytes,
     _rgba_from_tint,
 )
+from ui._dates import format_date_long
 
 
 # ---------------------------------------------------------------------------
@@ -1630,6 +1633,33 @@ class ArticleTextViewWashRectTests(unittest.TestCase):
         # No specs installed → painter never finds a matching tag.
         self.assertEqual(text_view._compute_wash_rects(), [])
 
+    def test_metadata_line_produces_a_one_px_hairline_at_line_bottom(
+        self,
+    ) -> None:
+        # The metadata tag's wash is a hairline: a 1-px rule painted at
+        # the *bottom* of the line, not a full-height fill. Assert the
+        # rect's height is the hairline thickness and that it sits at
+        # the line's bottom edge.
+        text_view, buffer, _table = _build_article_text_view_with_buffer()
+        buffer.set_text("Created Apr 28, 2026  \u00b7  Modified Apr 28, 2026\n")
+        _apply_tag_across_line(buffer, 0, TagName.METADATA.value)
+        rects = text_view._compute_wash_rects()
+        self.assertEqual(len(rects), 1)
+        _color, rect = rects[0]
+        self.assertEqual(rect.get_height(), float(_HAIRLINE_THICKNESS_PX))
+        # Recompute the line's bottom the same way the painter does and
+        # confirm the rule sits there.
+        ok, line_iter = buffer.get_iter_at_line(0)
+        self.assertTrue(ok)
+        line_y_buffer, line_h = text_view.get_line_yrange(line_iter)
+        _, line_y_widget = text_view.buffer_to_window_coords(
+            Gtk.TextWindowType.TEXT, 0, line_y_buffer,
+        )
+        self.assertEqual(
+            rect.get_y(),
+            float(line_y_widget + line_h - _HAIRLINE_THICKNESS_PX),
+        )
+
 
 @unittest.skipUnless(_display_available(), "no GDK display")
 class ArticleTextViewMutualExclusionTests(unittest.TestCase):
@@ -1654,13 +1684,20 @@ class ArticleTextViewMutualExclusionTests(unittest.TestCase):
             text_view._compute_wash_rects()
 
 
+def _buffer_text(buffer: Gtk.TextBuffer) -> str:
+    """Whole buffer text (no anchors on the metadata path)."""
+    text: str = buffer.get_text(
+        buffer.get_start_iter(), buffer.get_end_iter(), False,
+    )
+    return text
+
+
 @unittest.skipUnless(_display_available(), "no GDK display")
-class NoteViewChipPlacementTests(unittest.TestCase):
-    """The tag-chip row is anchored *inside* the rendered text view at
-    the renderer's post-title anchor, not as a sibling of the article
-    column. These tests pin the new wiring: chip-row parent, absence
-    of a separate vertical stack inside the scroller, and re-anchor
-    behaviour across renders.
+class NoteViewMetadataTests(unittest.TestCase):
+    """The metadata line is inserted as plain tagged text directly under
+    the title — ``Created … · Modified … · #tag …`` — not as an
+    anchored chip widget. These tests pin its placement, tag, ordering,
+    the tagless form, and the absence of any anchored widget.
     """
 
     def _build_view(
@@ -1671,10 +1708,10 @@ class NoteViewChipPlacementTests(unittest.TestCase):
         """Build a :class:`NoteView` with stubbed font measurers.
 
         Mirrors the construction pattern used by
-        :class:`NoteViewMarginWiringTests` — see that class for the
-        rationale. The deterministic font dimensions are irrelevant to
-        the chip-row tests, but using the stubbed factory keeps the
-        widget tree free of Pango / theme dependencies.
+        :class:`NoteViewMarginWiringTests`: the deterministic font
+        dimensions are irrelevant to the metadata text, but the stubbed
+        factory keeps the widget tree free of Pango / theme
+        dependencies.
         """
         with mock.patch.object(
             note_view_module,
@@ -1683,25 +1720,22 @@ class NoteViewChipPlacementTests(unittest.TestCase):
         ):
             return NoteView(note_repository=repo, app_state=state)
 
-    def test_chip_row_is_a_child_of_the_text_view_after_render(self) -> None:
+    def test_metadata_line_sits_immediately_under_the_title(self) -> None:
         repo = _FakeNoteRepository()
         repo.notes["note-A"] = _make_note(
             "note-A",
-            source="= Hello\n:tags: foo, bar\n\nbody.\n",
+            source="= Hello\n:tags: bar, foo\n\nbody.\n",
             tags=("bar", "foo"),
         )
         state = AppState()
         state.set_selected_note_id("note-A")
         view = self._build_view(repo, state)
 
-        # The chip row's parent is the inner text view — not a Box,
-        # not the ArticleContainer, not the ScrolledWindow.
-        self.assertIs(view._chip_row.get_parent(), view._text_view)
+        text = _buffer_text(view._buffer)
+        # Title, then the metadata line on the very next line.
+        self.assertTrue(text.startswith("Hello\nCreated "))
 
-    def test_chip_row_is_no_longer_in_the_scroller_vertical_stack(self) -> None:
-        # With the new layout, the scroller's child path is
-        # Viewport → ArticleContainer → TextView. The chip row must
-        # NOT appear anywhere in the (pre-text-view) widget chain.
+    def test_metadata_line_carries_the_metadata_tag(self) -> None:
         repo = _FakeNoteRepository()
         repo.notes["note-A"] = _make_note(
             "note-A",
@@ -1712,56 +1746,30 @@ class NoteViewChipPlacementTests(unittest.TestCase):
         state.set_selected_note_id("note-A")
         view = self._build_view(repo, state)
 
-        # Collect every widget on the path from NoteView down to (but
-        # excluding) the inner TextView. The chip row must not be in
-        # that set — its parent is the text view itself, reached via
-        # ``add_child_at_anchor`` rather than the box-sibling chain.
-        chain: list[Gtk.Widget] = []
-        node: Gtk.Widget | None = view.get_first_child()
-        while node is not None and not isinstance(node, Gtk.TextView):
-            chain.append(node)
-            if hasattr(node, "get_child"):
-                child = node.get_child() if callable(getattr(node, "get_child", None)) else None
-            else:
-                child = None
-            if child is None:
-                child = node.get_first_child()
-            node = child
+        text = _buffer_text(view._buffer)
+        tag = view._buffer.get_tag_table().lookup(TagName.METADATA.value)
+        self.assertIsNotNone(tag)
+        meta_iter = view._buffer.get_iter_at_offset(text.index("Created"))
+        self.assertTrue(meta_iter.has_tag(tag))
 
-        self.assertNotIn(view._chip_row, chain)
-
-    def test_chip_row_unparented_on_re_render(self) -> None:
-        # Two consecutive renders must end with the chip row parented
-        # to the text view exactly once. A double-parent attempt would
-        # raise / warn at the GTK level — the assertion below catches
-        # the steady-state result either way.
+    def test_metadata_order_is_created_modified_tags(self) -> None:
         repo = _FakeNoteRepository()
         repo.notes["note-A"] = _make_note(
             "note-A",
-            source="= Hello\n:tags: foo\n\nbody.\n",
-            tags=("foo",),
-        )
-        repo.notes["note-B"] = _make_note(
-            "note-B",
-            source="= Other\n:tags: bar\n\nelsewhere.\n",
-            tags=("bar",),
+            source="= Hello\n:tags: bar, foo\n\nbody.\n",
+            tags=("bar", "foo"),
         )
         state = AppState()
         state.set_selected_note_id("note-A")
         view = self._build_view(repo, state)
 
-        # First render done by construction. Trigger a second render
-        # by switching the selection.
-        state.set_selected_note_id("note-B")
+        text = _buffer_text(view._buffer)
+        self.assertLess(text.index("Created"), text.index("Modified"))
+        self.assertLess(text.index("Modified"), text.index("#bar"))
+        # Both tags appear, in the note's (sorted) order.
+        self.assertLess(text.index("#bar"), text.index("#foo"))
 
-        self.assertIs(view._chip_row.get_parent(), view._text_view)
-
-    def test_chip_row_hidden_when_no_tags_but_still_anchored(self) -> None:
-        # An untagged note: the chip row is invisible (no chips to
-        # show, no horizontal gap to insert) but remains parented to
-        # the text view at the post-title anchor, so a subsequent
-        # tag-set update can simply toggle visibility without a
-        # re-anchor.
+    def test_tagless_note_shows_only_the_two_dates(self) -> None:
         repo = _FakeNoteRepository()
         repo.notes["note-A"] = _make_note(
             "note-A",
@@ -1772,8 +1780,61 @@ class NoteViewChipPlacementTests(unittest.TestCase):
         state.set_selected_note_id("note-A")
         view = self._build_view(repo, state)
 
-        self.assertFalse(view._chip_row.is_visible())
-        self.assertIs(view._chip_row.get_parent(), view._text_view)
+        text = _buffer_text(view._buffer)
+        # The metadata line is the second line of the buffer.
+        metadata_line = text.split("\n")[1]
+        self.assertIn("Created", metadata_line)
+        self.assertIn("Modified", metadata_line)
+        # No tag run when the note is untagged.
+        self.assertNotIn("#", metadata_line)
+
+    def test_no_chip_widget_is_anchored_in_the_text_view(self) -> None:
+        # The metadata is plain text — there must be no child anchor in
+        # the buffer (the note has no table, the only other anchor
+        # source), and the view holds no chip-row widget.
+        repo = _FakeNoteRepository()
+        repo.notes["note-A"] = _make_note(
+            "note-A",
+            source="= Hello\n:tags: foo\n\nbody.\n",
+            tags=("foo",),
+        )
+        state = AppState()
+        state.set_selected_note_id("note-A")
+        view = self._build_view(repo, state)
+
+        iterator = view._buffer.get_start_iter()
+        while True:
+            self.assertIsNone(iterator.get_child_anchor())
+            if not iterator.forward_char():
+                break
+        self.assertFalse(hasattr(view, "_chip_row"))
+
+
+class FormatMetadataLineTests(unittest.TestCase):
+    """:func:`_format_metadata_line` is pure and display-independent."""
+
+    def test_includes_both_dates_in_order(self) -> None:
+        created = datetime(2026, 5, 26, tzinfo=UTC)
+        modified = datetime(2026, 5, 30, tzinfo=UTC)
+        line = _format_metadata_line(created, modified, ())
+        self.assertEqual(
+            line,
+            f"Created {format_date_long(created)}"
+            f"  \u00b7  Modified {format_date_long(modified)}",
+        )
+
+    def test_appends_tag_run_when_tags_present(self) -> None:
+        created = datetime(2026, 5, 26, tzinfo=UTC)
+        modified = datetime(2026, 5, 30, tzinfo=UTC)
+        line = _format_metadata_line(created, modified, ("nothing", "test"))
+        self.assertTrue(line.endswith("#nothing  #test"))
+        # The tag run is its own ``·``-separated segment.
+        self.assertIn("\u00b7  #nothing", line)
+
+    def test_no_tag_run_when_tagless(self) -> None:
+        created = datetime(2026, 5, 26, tzinfo=UTC)
+        modified = datetime(2026, 5, 30, tzinfo=UTC)
+        self.assertNotIn("#", _format_metadata_line(created, modified, ()))
 
 
 class RgbaFromTintTests(unittest.TestCase):

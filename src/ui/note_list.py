@@ -27,7 +27,10 @@ Principles & invariants
   horizontal :class:`Gtk.Box` of :class:`Gtk.Label` widgets keyed off
   the ``.tag-chip-row`` CSS class for the dim opacity treatment.
 * Date formatting is intentionally minimal — month abbreviation +
-  day. Locale-aware formatting is a future polish item.
+  day — and lives in the shared :mod:`ui._dates` helper
+  (:func:`ui._dates.format_date_short`) so the note-list meta line and
+  the rendered-view metadata line agree on it without cross-importing.
+  Locale-aware formatting is a future polish item.
 * GTK 4 currency: :meth:`Gtk.Box.append`, :meth:`Gtk.ListBox.append`,
   :class:`Gtk.DropDown`, ``row-activated``.
 """
@@ -49,6 +52,7 @@ from gi.repository import Gtk, Pango  # noqa: E402
 from controllers.app_state import AppState
 from enums import NoteSortKey
 from models.note import Note
+from ui._dates import format_date_short
 from search.note_filter import (
     Selection,
     filter_by_query,
@@ -113,11 +117,6 @@ _CHIP_CSS_CLASS: Final[str] = "tag-chip-row"
 _PAPERCLIP: Final[str] = "\U0001f4ce"
 _META_SEPARATOR: Final[str] = "|"
 
-_MONTH_ABBREVIATIONS: Final[tuple[str, ...]] = (
-    "Jan", "Feb", "Mar", "Apr", "May", "Jun",
-    "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
-)
-
 _NOTES_LABEL_TEMPLATE: Final[str] = "{n} notes"
 """Header text on the left — ``"N notes"`` regardless of selection.
 
@@ -138,11 +137,6 @@ def _default_clock() -> datetime:
 # ---------------------------------------------------------------------------
 # Pure helpers
 # ---------------------------------------------------------------------------
-
-
-def format_date_short(value: datetime) -> str:
-    """Return a short, locale-independent date string like ``Apr 14``."""
-    return f"{_MONTH_ABBREVIATIONS[value.month - 1]} {value.day}"
 
 
 def compute_display_notes(

@@ -63,21 +63,6 @@
     padding: 4px 6px;
 }
 
-/* Tags list: selection must read as the leading ✓, not the theme's bold
- * accent fill. Scoped to the Tags Gtk.ListView via the `.tag-list` class
- * (added in ui/sidebar.py) so the Library list keeps its theme pill.
- *
- * The bold fill is replaced by a quiet, palette-safe tint (opacity-only
- * via `alpha(currentColor, …)`, so no literal colour is named and the
- * highlight tracks the theme). The `color: inherit` reset is essential:
- * the `:selected` state also flips the foreground to the theme's
- * selected-foreground (white on most themes), which would make the label
- * and ✓ vanish against the faint tint. */
-.sidebar .tag-list row:selected {
-    background-color: alpha(currentColor, 0.06);
-    color: inherit;
-}
-
 /* Sidebar rows are flat as of the tag migration. The previous
  * ``treeexpander indent`` workaround (compensating for GTK 4's halved
  * tree indentation) is gone — the sidebar no longer uses a
@@ -134,16 +119,6 @@
     font-size: 90%;
 }
 
-/* Sidebar tag-row selected accent.
- *
- * The selected row already gets the theme's selection pill via the
- * generic ``.sidebar row:selected`` rule; this class is added on the
- * leading check-mark Gtk.Image inside selected tag rows so the icon
- * does not inherit the dimming applied to the count label. */
-.tag-row-check {
-    opacity: 0.9;
-}
-
 /* Tags section header count parenthetical.
  *
  * Rendered next to the ``Tags`` label when N > 0.
@@ -168,22 +143,4 @@
     color: @folio_selection_accent;
     font-size: 11px;          /* match .sidebar-section-header → aligns with "Tags" */
     letter-spacing: 0.06em;   /* same tracking as the header */
-}
-
-/* Article-view tag chips (under the rendered title in VIEW mode).
- *
- * Pill-shaped, palette-safe (theme background tinted). The chip row
- * is anchored inside the rendered text view (see
- * ``ui/note_view.py``'s post-title hook wiring), so the text view's
- * own left/right margins inset the row — chips align with the title
- * above without a separate row-level horizontal margin. The vertical
- * gap to the title and the first body block is applied imperatively
- * in Python (``_CHIP_ROW_TOP_MARGIN_PX`` / ``_CHIP_ROW_BOTTOM_MARGIN_PX``)
- * so there is no row-level CSS class for those, either. */
-.tag-chip-article {
-    border-radius: 999px;
-    padding: 2px 8px;
-    background-color: alpha(currentColor, 0.10);
-    font-size: 90%;
-    opacity: 0.85;
 }

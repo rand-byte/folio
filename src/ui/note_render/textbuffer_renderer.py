@@ -74,28 +74,25 @@ Principles & invariants
   a single literal :class:`str` (not a list of further inline nodes),
   it never recurses through :meth:`_emit_inline`.
 * :meth:`render_into` accepts an optional :data:`PostTitleHook`. When
-  supplied, it is invoked **exactly once per render** with a freshly
-  created :class:`Gtk.TextChildAnchor` sitting at the boundary between
-  the rendered title and the first body block. The title emits only a
-  **single** trailing newline (:data:`HeadingTrailing.SINGLE_NEWLINE`)
-  so the anchored widget hugs the title on the next line; the renderer
-  then inserts the remaining :data:`_BLOCK_SEPARATOR` newline *after*
-  the anchor, so the first body block drops a clear blank line below
-  the anchored widget. When the document has no title, the same hook
-  fires with an anchor at buffer-start; the block separator is still
-  inserted after it, so the chip row sits alone on the first line and
-  the body drops a clear line below it — fixing the same
-  chips-share-a-line-with-body bug for titleless notes. The hook fires *after* the buffer has
-  been cleared and the title (if any) has been emitted, but *before*
-  any body block is walked, so the caller observes the anchor in a
-  stable position. The renderer does not own the lifecycle of any
-  widget the caller attaches: the previous render's anchors are
-  destroyed by ``buffer.set_text("")``, which also unparents the
-  attached widget; the caller is responsible for re-attaching a fresh
-  widget (or, idiomatically, re-attaching the same widget) at the new
-  anchor. The hook is **not** invoked when :meth:`render_into` raises a
-  :class:`ParseError` — the buffer is unchanged by the raise, and no
-  anchor is leaked.
+  supplied, it is invoked **exactly once per render** with the
+  ``buffer`` whose insertion point (end iter) sits at the boundary
+  between the rendered title and the first body block. The title emits
+  only a **single** trailing newline (:data:`HeadingTrailing.SINGLE_NEWLINE`)
+  so the hook's inserted text hugs the title on the next line; the
+  renderer then inserts the remaining :data:`_BLOCK_SEPARATOR` newline
+  *after* the hook's text, so the first body block drops a clear blank
+  line below it. When the document has no title, the same hook fires
+  with the insertion point at buffer-start; the block separator is
+  still inserted after it, so the inserted text sits alone on the first
+  line and the body drops a clear line below it. The hook fires *after*
+  the buffer has been cleared and the title (if any) has been emitted,
+  but *before* any body block is walked, so the caller observes a
+  stable insertion point. The renderer creates **no** child anchor on
+  this path — the previous render's contents are destroyed by
+  ``buffer.set_text("")``, and the caller inserts plain (tagged) text
+  rather than anchoring a widget. The hook is **not** invoked when
+  :meth:`render_into` raises a :class:`ParseError` — the buffer is
+  unchanged by the raise.
 """
 
 # The module's size reflects the breadth of block kinds the renderer
@@ -171,22 +168,23 @@ only invoked for tables.
 """
 
 
-type PostTitleHook = Callable[[Gtk.TextChildAnchor], None]
-"""Hook called once per render with the post-title anchor.
+type PostTitleHook = Callable[[Gtk.TextBuffer], None]
+"""Hook called once per render with the buffer positioned after the title.
 
-The anchor sits at the boundary between the rendered document title
-and the first body block — immediately after the title's *single*
-trailing newline, with the renderer inserting the block-separating
-newline after the anchor so the body drops a clear line below the
-attached widget. When the document has no title, the anchor is at
-buffer-start. The caller is expected to attach a single, caller-owned
-widget to this anchor (typically via
-:meth:`Gtk.TextView.add_child_at_anchor`). Production wires this in
-:class:`ui.note_view.NoteView` to position the tag-chip row directly
-below the title; tests pass a list-collector that records each anchor
-to assert hook firing semantics. Unlike :data:`WidgetAttacher`, the
-renderer never produces the widget itself — the hook only exposes the
-anchor, and the caller owns the widget's lifecycle across renders.
+The buffer's insertion point (``buffer.get_end_iter()``) sits at the
+boundary between the rendered document title and the first body block —
+immediately after the title's *single* trailing newline, or at
+buffer-start when the document has no title. The caller is expected to
+**insert text** at that point (typically the dim-grey metadata line,
+via :meth:`Gtk.TextBuffer.insert` /
+:meth:`Gtk.TextBuffer.insert_with_tags_by_name`). The renderer then
+inserts the block-separating newline *after* whatever the hook added,
+so the body drops a clear line below the inserted text. Production
+wires this in :class:`ui.note_view.NoteView` to insert the note's
+metadata line directly below the title; tests pass a collector that
+records each call (and may insert a sentinel) to assert hook-firing
+semantics. The renderer creates **no** child anchor on this path —
+anchors remain only for tables.
 """
 
 
@@ -293,15 +291,16 @@ class TextBufferRenderer:
         that do not care about the embedded table widgets.
 
         ``post_title_hook`` is an optional callback invoked exactly
-        once per render with a :class:`Gtk.TextChildAnchor` positioned
+        once per render with the ``buffer`` positioned (at its end iter)
         immediately after the rendered title's single trailing newline
         (or at buffer-start when ``document.title is None``). Production
-        wires this to anchor the tag-chip row directly below the title,
-        with the body block then dropping a blank line below the
-        anchored row — see the :data:`PostTitleHook` docstring and the
-        module docstring for the contract. The hook is only fired on a
-        successful parse; if :func:`parse` raises a :class:`ParseError`,
-        the buffer is left untouched and the hook is never invoked.
+        wires this to insert the note's metadata line directly below the
+        title, with the body block then dropping a blank line below the
+        inserted text — see the :data:`PostTitleHook` docstring and the
+        module docstring for the contract. No child anchor is created on
+        this path. The hook is only fired on a successful parse; if
+        :func:`parse` raises a :class:`ParseError`, the buffer is left
+        untouched and the hook is never invoked.
         """
         document = parse(source)  # may raise ParseError
         attacher = attach_widget if attach_widget is not None else _noop_attacher
@@ -315,11 +314,11 @@ class TextBufferRenderer:
             )
         self._clear_link_url_tags()
         if document.title is not None:
-            # Emit the title with only a SINGLE newline so the tag-chip
-            # row, anchored on the next line below, hugs the title. The
+            # Emit the title with only a SINGLE newline so the metadata
+            # line, inserted on the next line below, hugs the title. The
             # remaining newline that completes the inter-block gap is
-            # inserted *after* the anchor (below), so the body drops a
-            # clear blank line beneath the chips. Body-section headings
+            # inserted *after* the metadata text (below), so the body
+            # drops a clear blank line beneath it. Body-section headings
             # keep the default full block separator.
             self._emit_heading(
                 buffer,
@@ -327,25 +326,22 @@ class TextBufferRenderer:
                 level=0,
                 trailing=HeadingTrailing.SINGLE_NEWLINE,
             )
-        # The post-title anchor: sits at the boundary between the
-        # title's single trailing newline and the block separator that
-        # follows it, or at buffer-start when there is no title. Created
-        # on every render so its lifetime is tied to the buffer's current
-        # contents (``set_text("")`` above destroys any prior anchor
-        # along with the deleted text).
+        # The post-title insertion point sits at the boundary between
+        # the title's single trailing newline and the block separator
+        # that follows it, or at buffer-start when there is no title.
+        # The hook inserts its text (the metadata line) at the buffer's
+        # end iter; the renderer then completes the inter-block gap
+        # *after* it so the first body block starts a clear line below.
         if post_title_hook is not None:
-            anchor = buffer.create_child_anchor(buffer.get_end_iter())
-            post_title_hook(anchor)
-            # Complete the inter-block gap *after* the chip anchor so the
-            # first body block starts a clear line below the chip row.
-            # This runs whenever a hook is present, titled or not: a
-            # titled note's single leading newline (above) puts the chip
-            # row on its own line and this separator drops the body a
-            # blank line below; a titleless note has the anchor at
-            # buffer-start, so this separator is the sole gap and the
-            # body again sits a clear line below the chip row. Either way
-            # the chip row never shares a line with body text — the bug
-            # this fix addresses.
+            post_title_hook(buffer)
+            # Complete the inter-block gap *after* the hook's insertion
+            # so the first body block starts a clear line below the
+            # metadata line. This runs whenever a hook is present, titled
+            # or not: a titled note's single leading newline (above) puts
+            # the metadata on its own line and this separator drops the
+            # body a blank line below; a titleless note has the metadata
+            # at buffer-start, so this separator is the sole gap and the
+            # body again sits a clear line below it.
             buffer.insert(buffer.get_end_iter(), _BLOCK_SEPARATOR)
         for block in document.blocks:
             self._emit_block(buffer, block, attacher)
@@ -456,9 +452,10 @@ class TextBufferRenderer:
     ) -> None:
         # ``trailing`` controls what follows the heading text. Body
         # headings keep the default full block separator; the document
-        # title passes ``SINGLE_NEWLINE`` so the tag-chip anchor (emitted
-        # by ``render_into``) can sit on the immediately following line,
-        # with the renderer completing the block gap after that anchor.
+        # title passes ``SINGLE_NEWLINE`` so the metadata line (inserted
+        # by ``render_into``'s post-title hook) can sit on the
+        # immediately following line, with the renderer completing the
+        # block gap after that inserted text.
         heading_tag = self._tag(heading_tag_name(level))
         start_offset = buffer.get_end_iter().get_offset()
         for inline in title_inlines:

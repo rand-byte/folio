@@ -30,16 +30,27 @@ Principles & invariants
   selection (and vice versa) — the controller / app-state owns the
   rule, so both ListViews observe the truth from :class:`AppState`
   rather than coordinating with each other.
+* A selected tag row reads as the **theme selection pill** — the same
+  highlight the Library list uses. Tag rows carry no special
+  selection styling of their own; they fall through to the generic
+  ``.sidebar row:selected`` path, so the selected row matches the
+  Library list exactly under any theme.
+* A plain **single click** on a tag row toggles that tag into / out of
+  the selection **additively** — no Shift / Ctrl modifier needed and
+  the other selected tags are untouched. A per-row
+  :class:`Gtk.GestureClick` claims the click and calls
+  :meth:`Sidebar._on_tag_row_clicked`, which uses
+  ``select_item(pos, unselect_rest=False)`` / ``unselect_item(pos)``
+  on the :class:`Gtk.MultiSelection` instead of GTK's default
+  replace-selection. Selected tags still **AND** together, and the
+  selection truth still flows through :class:`AppState` (the model's
+  ``selection-changed`` is mirrored into it by
+  :meth:`_on_tag_selection_changed`).
 * Programmatic ``set_selected`` / ``select_item`` calls on a
   :class:`Gtk.SingleSelection` / :class:`Gtk.MultiSelection` emit
   ``selection-changed``, so the highlight-application path is fenced
   behind :attr:`_suppress_selection_events` to avoid loops between
   AppState ⇄ widget.
-* Each tag row carries a leading ``✓`` icon whose visibility tracks
-  whether the row is in the multiselection model's current set. The
-  icon column is reserved-width even when the icon is hidden, so the
-  ``#tagname`` labels stay aligned across selected and unselected
-  rows.
 * :meth:`refresh` rebuilds the tag store from
   :meth:`NoteRepositoryProtocol.list_tags`. The current tag selection
   is snapshotted by tag name across rebuilds: tags that no longer
@@ -59,9 +70,10 @@ from typing import Final
 import gi
 
 gi.require_version("Gtk", "4.0")
+gi.require_version("Gdk", "4.0")
 gi.require_version("Pango", "1.0")
 # pylint: disable=wrong-import-position
-from gi.repository import Gio, GObject, Gtk, Pango  # noqa: E402
+from gi.repository import Gdk, Gio, GObject, Gtk, Pango  # noqa: E402
 
 from controllers.app_state import AppState
 from enums import SmartFilter
@@ -69,11 +81,12 @@ from search.note_filter import SmartSelection, TagSelection
 from storage.protocols import NoteRepositoryProtocol
 
 
-type _TagSelectionProbe = Callable[[str], bool]
-"""Returns ``True`` when the named tag is currently in the
-multiselection model's selection. Passed to the tag-row factory so the
-factory does not have to reach back into the widget to render the
-leading ✓."""
+type _TagRowClickHandler = Callable[[int], None]
+"""Invoked with a tag row's live model position when the row is
+clicked. Passed to the tag-row factory so the factory's per-row click
+gesture can call back into the sidebar without holding a widget
+reference. The sidebar's handler performs the additive multi-select
+toggle against the :class:`Gtk.MultiSelection`."""
 
 
 # ---------------------------------------------------------------------------
@@ -112,19 +125,6 @@ the actual SVGs. ``tag-symbolic`` doubles as a "no tags" indicator
 since the row matches notes with an empty tag set.
 """
 
-_TAG_CHECK_ICON_NAME: Final[str] = "object-select-symbolic"
-"""Leading ✓ shown on a tag row when the row is currently selected.
-
-``object-select-symbolic`` is the canonical GTK "selected" checkmark and
-is compiled into GTK itself, so it always resolves to a clean ✓. The
-former ``emblem-ok-symbolic`` ships only with the full Adwaita icon-theme
-package; where that set is not indexed GTK falls back to the broken-image
-triangle-with-``!`` glyph.
-
-Hidden via ``Gtk.Widget.set_opacity(0)`` (not ``set_visible``) so the
-icon column reserves the same width whether or not the row is
-selected — see the row factory below."""
-
 _ROW_SPACING_PX: Final[int] = 6
 """Horizontal spacing inside a row, between icon, label, and count."""
 
@@ -136,16 +136,6 @@ _DEFAULT_PANE_WIDTH_PX: Final[int] = 220
 
 _SIDEBAR_CSS_CLASS: Final[str] = "sidebar"
 """Class on the :class:`Sidebar` box that the stylesheet keys off."""
-
-_TAG_LIST_CSS_CLASS: Final[str] = "tag-list"
-"""Class on the Tags :class:`Gtk.ListView` so the softened-selection
-rule (``.sidebar .tag-list row:selected``) is scoped to tag rows only,
-leaving the Library list's theme pill intact."""
-
-_TAG_ROW_CHECK_CSS_CLASS: Final[str] = "tag-row-check"
-"""Class on the leading ✓ :class:`Gtk.Image` so ``app.css`` owns its
-styling. Visibility stays imperative — opacity 0 reserves the column
-width when the row is unselected (see the row factory below)."""
 
 _SECTION_HEADER_CSS_CLASS: Final[str] = "sidebar-section-header"
 """Class on each section-header label (font treatment + dim)."""
@@ -159,7 +149,8 @@ _COUNT_CSS_CLASS: Final[str] = "sidebar-count"
 
 _TAG_PREFIX: Final[str] = "#"
 """Visible prefix on every tag row's label. Stored once so the
-note-view chip styling and the sidebar agree on the literal."""
+sidebar, the note-list row chips, and the note-view metadata line
+agree on the literal."""
 
 
 # ---------------------------------------------------------------------------
@@ -357,35 +348,29 @@ def _on_smart_factory_bind(
 
 
 def _make_tag_row_factory(
-    is_selected: _TagSelectionProbe,
+    on_row_clicked: _TagRowClickHandler,
 ) -> Gtk.SignalListItemFactory:
     """Build the tag-row factory.
 
-    The leading ``✓`` icon's visibility is driven by ``is_selected``,
-    a callable the sidebar passes in that reads the live
-    :class:`Gtk.MultiSelection`. The factory does not hold widget
-    state itself; it just renders what the probe reports at bind time.
+    Each row carries a :class:`Gtk.GestureClick` whose ``released``
+    handler calls ``on_row_clicked`` with the row's live model
+    position and then claims the gesture, so a plain single click
+    toggles the tag additively (see :meth:`Sidebar._on_tag_row_clicked`)
+    rather than letting GTK's default replace-selection handler run.
+    The factory holds no widget state itself.
     """
     factory = Gtk.SignalListItemFactory.new()
-    factory.connect("setup", _on_tag_factory_setup)
-    factory.connect("bind", _on_tag_factory_bind, is_selected)
+    factory.connect("setup", _on_tag_factory_setup, on_row_clicked)
+    factory.connect("bind", _on_tag_factory_bind)
     return factory
 
 
 def _on_tag_factory_setup(
     _factory: Gtk.SignalListItemFactory,
     list_item: Gtk.ListItem,
+    on_row_clicked: _TagRowClickHandler,
 ) -> None:
     box = Gtk.Box.new(Gtk.Orientation.HORIZONTAL, _ROW_SPACING_PX)
-
-    # Leading ✓ — visibility-by-opacity so the column reserves width
-    # whether or not the row is selected. The two halves of the tag
-    # list (selected, unselected) stay column-aligned this way. The
-    # ``.tag-row-check`` class lets app.css own its styling.
-    check = Gtk.Image.new_from_icon_name(_TAG_CHECK_ICON_NAME)
-    check.add_css_class(_TAG_ROW_CHECK_CSS_CLASS)
-    check.set_opacity(0.0)
-    box.append(check)
 
     label = Gtk.Label.new("")
     label.set_halign(Gtk.Align.START)
@@ -398,22 +383,57 @@ def _on_tag_factory_setup(
     count_label.add_css_class(_COUNT_CSS_CLASS)
     box.append(count_label)
 
+    # A per-row primary-button click gesture. On release it toggles the
+    # tag additively and claims the sequence; because the gesture sits
+    # on the row's own box (inner to the ListView's selection gesture),
+    # the default BUBBLE phase delivers the event here first, so the
+    # claim preempts GTK's replace-selection behaviour. The closure
+    # captures ``list_item`` so the handler can read the row's *live*
+    # position (rows are recycled, so the position is read at click
+    # time, not bind time).
+    gesture = Gtk.GestureClick.new()
+    gesture.set_button(Gdk.BUTTON_PRIMARY)
+    gesture.connect(
+        "released",
+        _on_tag_row_gesture_released,
+        list_item,
+        on_row_clicked,
+    )
+    box.add_controller(gesture)
+
     list_item.set_child(box)
+
+
+def _on_tag_row_gesture_released(
+    gesture: Gtk.GestureClick,
+    _n_press: int,
+    _x: float,
+    _y: float,
+    list_item: Gtk.ListItem,
+    on_row_clicked: _TagRowClickHandler,
+) -> None:
+    """Translate a plain click into an additive tag toggle.
+
+    Reads the row's live position from ``list_item`` (rows are
+    recycled, so the bind-time position would be stale), invokes the
+    sidebar callback, and claims the gesture so GTK's default
+    replace-selection handler does not also run.
+    """
+    position = list_item.get_position()
+    if position != Gtk.INVALID_LIST_POSITION:
+        on_row_clicked(position)
+    gesture.set_state(Gtk.EventSequenceState.CLAIMED)
 
 
 def _on_tag_factory_bind(
     _factory: Gtk.SignalListItemFactory,
     list_item: Gtk.ListItem,
-    is_selected: _TagSelectionProbe,
 ) -> None:
     item = list_item.get_item()
     box = list_item.get_child()
     if not isinstance(item, _TagItem) or not isinstance(box, Gtk.Box):
         return
-    check = box.get_first_child()
-    if isinstance(check, Gtk.Image):
-        check.set_opacity(1.0 if is_selected(item.name) else 0.0)
-    label = check.get_next_sibling() if check is not None else None
+    label = box.get_first_child()
     if isinstance(label, Gtk.Label):
         label.set_text(f"{_TAG_PREFIX}{item.name}")
     count_label = box.get_last_child()
@@ -485,9 +505,8 @@ class Sidebar(  # pylint: disable=too-many-instance-attributes
         self._tag_selection = Gtk.MultiSelection.new(self._tag_store)
         self._tag_list_view = Gtk.ListView.new(
             self._tag_selection,
-            _make_tag_row_factory(self._is_tag_selected),
+            _make_tag_row_factory(self._on_tag_row_clicked),
         )
-        self._tag_list_view.add_css_class(_TAG_LIST_CSS_CLASS)
         tag_scroller = Gtk.ScrolledWindow()
         tag_scroller.set_propagate_natural_height(True)
         tag_scroller.set_vexpand(True)
@@ -622,10 +641,6 @@ class Sidebar(  # pylint: disable=too-many-instance-attributes
                         Gtk.INVALID_LIST_POSITION,
                     )
                     self._select_tag_rows(tags)
-            # Re-render every tag row so the leading-✓ opacity tracks
-            # the new selection state.
-            self._tag_list_view.queue_draw()
-            self._rebind_visible_tag_rows()
         finally:
             self._suppress_selection_events = False
 
@@ -652,37 +667,6 @@ class Sidebar(  # pylint: disable=too-many-instance-attributes
             else:
                 self._tag_selection.unselect_item(index)
 
-    def _rebind_visible_tag_rows(self) -> None:
-        """Force every tag row to re-render its leading ✓.
-
-        Trick: removing and re-inserting each store entry is the
-        cheapest way to make the factory's bind handler re-fire on
-        every visible row. The selection state is restored straight
-        after by the caller (still inside the suppression fence).
-        """
-        # Snapshot, clear, refill in one go.
-        snapshot: list[_TagItem] = []
-        n = self._tag_store.get_n_items()
-        for index in range(n):
-            item = self._tag_store.get_item(index)
-            if isinstance(item, _TagItem):
-                snapshot.append(item)
-        if not snapshot:
-            return
-        selected_names: set[str] = set()
-        for index in range(n):
-            if self._tag_selection.is_selected(index):
-                item = self._tag_store.get_item(index)
-                if isinstance(item, _TagItem):
-                    selected_names.add(item.name)
-        self._tag_store.remove_all()
-        for item in snapshot:
-            self._tag_store.append(item)
-        for index in range(self._tag_store.get_n_items()):
-            item = self._tag_store.get_item(index)
-            if isinstance(item, _TagItem) and item.name in selected_names:
-                self._tag_selection.select_item(index, False)
-
     def _refresh_tags_header(self) -> None:
         accent = self._tags_header_box.get_last_child()
         if not isinstance(accent, Gtk.Label):
@@ -696,15 +680,27 @@ class Sidebar(  # pylint: disable=too-many-instance-attributes
         accent.set_visible(bool(text))
 
     # ------------------------------------------------------------------
-    # Probes used by the row factory
+    # Tag-row click handling
     # ------------------------------------------------------------------
 
-    def _is_tag_selected(self, tag_name: str) -> bool:
-        for index in range(self._tag_store.get_n_items()):
-            item = self._tag_store.get_item(index)
-            if isinstance(item, _TagItem) and item.name == tag_name:
-                return bool(self._tag_selection.is_selected(index))
-        return False
+    def _on_tag_row_clicked(self, position: int) -> None:
+        """Additive single-click toggle on the tag row at ``position``.
+
+        A plain click toggles that one tag into / out of the selection
+        **without clearing the others** — no Shift / Ctrl needed. This
+        is the ``unselect_rest=False`` arm of
+        :meth:`Gtk.SelectionModel.select_item` (GTK's built-in click
+        handler passes ``True``, replacing the selection; the row
+        gesture claims the click so that default never runs). Mutating
+        the model fires ``selection-changed``, which
+        :meth:`_on_tag_selection_changed` mirrors into :class:`AppState`
+        via its symmetric-difference toggle — so the AND-filter truth
+        updates automatically with no extra wiring here.
+        """
+        if self._tag_selection.is_selected(position):
+            self._tag_selection.unselect_item(position)
+        else:
+            self._tag_selection.select_item(position, False)
 
     # ------------------------------------------------------------------
     # Read-only properties exposed for tests

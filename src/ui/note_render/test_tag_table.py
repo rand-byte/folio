@@ -124,6 +124,7 @@ class TagNameTests(unittest.TestCase):
             "BLOCKQUOTE_BODY",
             "BLOCKQUOTE_ATTRIBUTION",
             "CODE_BLOCK",
+            "METADATA",
         }
         self.assertEqual(set(TagName.__members__), expected)
 
@@ -634,6 +635,22 @@ class WashSpecTests(unittest.TestCase):
         for name in _PARAGRAPH_BACKGROUND_TAGS:
             with self.subTest(name=name):
                 self.assertIn(name, self.specs)
+
+    def test_metadata_wash_spec_is_present_and_hairline(self) -> None:
+        # The metadata line under the title gets a hairline rule — a
+        # 1-px divider drawn at the bottom of the line — rather than a
+        # full-height fill. Its wash spec must therefore be present and
+        # carry ``hairline=True``.
+        self.assertIn(TagName.METADATA, self.specs)
+        self.assertTrue(self.specs[TagName.METADATA].hairline)
+
+    def test_only_metadata_is_a_hairline_spec(self) -> None:
+        # Every other wash-bearing tag paints a full-height tinted
+        # block, not a hairline. Guards against a future block kind
+        # accidentally inheriting the hairline flag.
+        for name, spec in self.specs.items():
+            with self.subTest(name=name):
+                self.assertEqual(spec.hairline, name is TagName.METADATA)
 
 
 if __name__ == "__main__":

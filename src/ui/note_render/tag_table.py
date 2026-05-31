@@ -53,7 +53,11 @@ Principles & invariants
   records the article TextView paints. Tag names that don't paint a
   wash (e.g. :data:`TagName.BLOCKQUOTE_ATTRIBUTION`) are absent from
   the returned dict on purpose — the painter must paint nothing
-  behind them.
+  behind them. The :data:`TagName.METADATA` line is the one *hairline*
+  wash: its :class:`WashSpec` carries ``hairline = True`` so the
+  painter draws a thin 1-px rule at the bottom of the line (the
+  divider between the metadata and the body) rather than a full-height
+  tinted fill.
 * This module imports ``gi`` because the tag table *is* a GTK object —
   there is no useful pure-Python representation of a tag. The renderer
   is the only other place in :mod:`asciidoc` that imports
@@ -116,6 +120,16 @@ class TagName(StrEnum):
     :data:`CODE_BLOCK` is the paragraph tag carrying the code-block's
     left/right paragraph margins; monospace family comes from the
     shared :data:`MONOSPACE` tag, layered on top by the renderer.
+
+    :data:`METADATA` is the character/paragraph tag applied to the
+    dim-grey metadata line the rendered view inserts directly under the
+    title (``Created … · Modified … · #tag …``). It carries a dim grey
+    foreground, a slightly reduced scale, and ``pixels-below-lines`` to
+    open a gap between the metadata text and the thin horizontal rule
+    that the wash painter draws at the bottom of the line (see the
+    ``hairline`` :class:`WashSpec` returned for it by
+    :func:`build_wash_specs`). It is a :class:`Gtk.TextTag` name only —
+    it is never persisted to disk, so it needs no migration.
     """
 
     BOLD = "bold"
@@ -153,6 +167,8 @@ class TagName(StrEnum):
     BLOCKQUOTE_ATTRIBUTION = "blockquote_attribution"
     # Code-block paragraph tag.
     CODE_BLOCK = "code_block"
+    # Metadata line under the document title (Created / Modified / tags).
+    METADATA = "metadata"
 
 
 @dataclass(frozen=True)
@@ -167,11 +183,21 @@ class WashSpec:
     paragraph tag (added to its ``left-margin`` / ``right-margin``),
     not here, because the painter does not need M-width to paint: it
     only needs the inset.
+
+    ``hairline`` selects between two paint shapes. When ``False`` (the
+    default, used by admonitions, blockquotes, and code blocks) the
+    painter fills the full vertical extent of the logical line — the
+    tinted "card" behind the block. When ``True`` (used by the
+    metadata line) the painter draws a thin 1-px rule at the *bottom*
+    of the line instead of a full fill, producing the hairline divider
+    between the metadata and the body. The horizontal extent (driven by
+    the two insets) is computed identically in both cases.
     """
 
     tint: tuple[float, float, float, float]
     box_left_inset_px: int
     box_right_inset_px: int
+    hairline: bool = False
 
 
 # ---------------------------------------------------------------------------
@@ -345,6 +371,20 @@ _CODE_BLOCK_VPADDING_PX: int = 8
 _BLOCKQUOTE_ATTRIBUTION_SCALE: float = 0.9
 
 
+# Metadata line (Created / Modified / tags) under the document title.
+# A neutral dim grey for the text, a slightly reduced scale so it reads
+# as secondary to the title and body, and a gap below the text that
+# separates it from the hairline rule the wash painter draws. The rule
+# itself is a light grey RGBA painted as a 1-px band spanning the text
+# column — its colour lives here so the whole metadata treatment is one
+# place, matching the "one place per visual style" invariant.
+_METADATA_FOREGROUND: str = "#808080"
+_METADATA_SCALE: float = 0.85
+_METADATA_PIXELS_BELOW_LINES_PX: int = 8
+_METADATA_RULE_TINT: tuple[float, float, float, float] = (0.5, 0.5, 0.5, 0.30)
+_METADATA_RULE_INSET_PX: int = 0
+
+
 def build_tag_table(*, char_width_px: int) -> Gtk.TextTagTable:
     """Construct the rendered-view tag table for the current subset.
 
@@ -417,6 +457,7 @@ def build_tag_table(*, char_width_px: int) -> Gtk.TextTagTable:
     table.add(
         _make_code_block_tag(TagName.CODE_BLOCK, char_width_px=char_width_px)
     )
+    table.add(_make_metadata_tag(TagName.METADATA))
     return table
 
 
@@ -453,6 +494,12 @@ def build_wash_specs() -> dict[TagName, WashSpec]:
         tint=_CODE_BLOCK_TINT,
         box_left_inset_px=_CODE_BLOCK_HMARGIN_PX,
         box_right_inset_px=_CODE_BLOCK_HMARGIN_PX,
+    )
+    specs[TagName.METADATA] = WashSpec(
+        tint=_METADATA_RULE_TINT,
+        box_left_inset_px=_METADATA_RULE_INSET_PX,
+        box_right_inset_px=_METADATA_RULE_INSET_PX,
+        hairline=True,
     )
     return specs
 
@@ -616,4 +663,25 @@ def _make_code_block_tag(name: TagName, *, char_width_px: int) -> Gtk.TextTag:
     tag.set_property("right-margin", _CODE_BLOCK_HMARGIN_PX + char_width_px)
     tag.set_property("pixels-above-lines", _CODE_BLOCK_VPADDING_PX)
     tag.set_property("pixels-below-lines", _CODE_BLOCK_VPADDING_PX)
+    return tag
+
+
+def _make_metadata_tag(name: TagName) -> Gtk.TextTag:
+    """Build the metadata-line tag (Created / Modified / tags).
+
+    Carries the *text* appearance only — a dim grey foreground and a
+    slightly reduced scale so the line reads as secondary to the title
+    and body. ``pixels-below-lines`` opens the gap that separates the
+    text from the hairline rule the wash painter draws at the bottom of
+    the line. The line sits in the same column as the body, so it sets
+    no left/right margins — unlike the block-level paragraph tags it
+    is not inset. The rule itself is painted separately by
+    ``_ArticleTextView`` in :mod:`ui.note_view` via the ``hairline``
+    :class:`WashSpec` returned for :data:`TagName.METADATA` by
+    :func:`build_wash_specs`.
+    """
+    tag = Gtk.TextTag.new(name.value)
+    tag.set_property("foreground", _METADATA_FOREGROUND)
+    tag.set_property("scale", _METADATA_SCALE)
+    tag.set_property("pixels-below-lines", _METADATA_PIXELS_BELOW_LINES_PX)
     return tag

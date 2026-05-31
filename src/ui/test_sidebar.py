@@ -30,11 +30,9 @@ from gi.repository import Gdk, GLib, Gtk  # noqa: E402
 from controllers.app_state import AppState
 from enums import SmartFilter
 from models.note import Note
+from search.note_filter import TagSelection
 from ui.sidebar import (
     Sidebar,
-    _TAG_CHECK_ICON_NAME,
-    _TAG_LIST_CSS_CLASS,
-    _TAG_ROW_CHECK_CSS_CLASS,
     count_untagged,
     tags_header_accent_text,
 )
@@ -164,34 +162,21 @@ def _pump(iterations: int = 200) -> None:
         context.iteration(False)
 
 
-def _row_box(row: Gtk.Widget) -> Gtk.Box | None:
-    """Descend from a realised ListView row to the factory's row box."""
-    node: Gtk.Widget | None = row
-    while node is not None and not isinstance(node, Gtk.Box):
-        node = node.get_first_child()
-    return node
-
-
-def _tag_rows(list_view: Gtk.ListView) -> dict[str, Gtk.Box]:
-    """Map each visible tag label (``#name``) to its row box."""
-    rows: dict[str, Gtk.Box] = {}
-    child = list_view.get_first_child()
-    while child is not None:
-        box = _row_box(child)
-        if box is not None:
-            image = box.get_first_child()
-            label = image.get_next_sibling() if image is not None else None
-            if isinstance(label, Gtk.Label):
-                rows[label.get_text()] = box
-        child = child.get_next_sibling()
-    return rows
+def _tag_position(sidebar: Sidebar, name: str) -> int:
+    """Return the store position of the tag row labelled ``name``."""
+    store = sidebar.tag_store
+    for index in range(store.get_n_items()):
+        item = store.get_item(index)
+        if getattr(item, "name", None) == name:
+            return index
+    raise AssertionError(f"tag {name!r} not found in the store")
 
 
 @unittest.skipUnless(_display_available(), "no GDK display")
 class SidebarSelectionRenderingTests(unittest.TestCase):
-    """Selection must read as the leading ✓, and the header accent must
-    track the tag selection. Builds a real :class:`Sidebar` realised in
-    a window so the factory's rows exist."""
+    """A selected tag row reads as the theme selection pill (no leading
+    ✓), and the header accent tracks the tag selection. Builds a real
+    :class:`Sidebar` realised in a window so the factory's rows exist."""
 
     app_state: AppState
     sidebar: Sidebar
@@ -220,35 +205,16 @@ class SidebarSelectionRenderingTests(unittest.TestCase):
         self.window.destroy()
         _pump(20)
 
-    def test_tag_list_carries_scoping_class(self) -> None:
-        # Guards the softened-selection rule's scope: without the class
-        # the rule cannot target the Tags list alone.
-        self.assertTrue(
-            self.sidebar.tag_list_view.has_css_class(_TAG_LIST_CSS_CLASS),
-        )
-
-    def test_check_icon_name_and_class(self) -> None:
-        # Guards the broken-icon regression (must be the GTK-bundled
-        # name) and the dead-CSS regression (class must reach the icon).
-        rows = _tag_rows(self.sidebar.tag_list_view)
-        self.assertIn("#baking", rows)
-        image = rows["#baking"].get_first_child()
-        assert isinstance(image, Gtk.Image)
-        self.assertEqual(image.get_icon_name(), _TAG_CHECK_ICON_NAME)
-        self.assertTrue(image.has_css_class(_TAG_ROW_CHECK_CSS_CLASS))
-
-    def test_selected_row_shows_check_unselected_reserves_column(self) -> None:
+    def test_selected_tag_is_in_the_model_selection(self) -> None:
+        # With the leading ✓ gone, "selected" is read straight off the
+        # model: the row carries the theme pill because GTK paints
+        # ``row:selected`` for items the MultiSelection holds.
         self.app_state.toggle_tag("baking")
         _pump()
-        rows = _tag_rows(self.sidebar.tag_list_view)
-        selected = rows["#baking"].get_first_child()
-        unselected = rows["#bread"].get_first_child()
-        assert isinstance(selected, Gtk.Image)
-        assert isinstance(unselected, Gtk.Image)
-        # The ✓ is shown on the selected row and merely transparent (not
-        # gone) on the unselected one, so both rows keep the same column.
-        self.assertEqual(selected.get_opacity(), 1.0)
-        self.assertEqual(unselected.get_opacity(), 0.0)
+        baking_pos = _tag_position(self.sidebar, "baking")
+        bread_pos = _tag_position(self.sidebar, "bread")
+        self.assertTrue(self.sidebar.tag_selection.is_selected(baking_pos))
+        self.assertFalse(self.sidebar.tag_selection.is_selected(bread_pos))
 
     def test_header_accent_visible_when_selected_hidden_when_not(self) -> None:
         accent = self.sidebar.tags_header_box.get_last_child()
@@ -266,6 +232,88 @@ class SidebarSelectionRenderingTests(unittest.TestCase):
         _pump()
         self.assertFalse(accent.get_visible())
         self.assertEqual(accent.get_text(), "")
+
+
+@unittest.skipUnless(_display_available(), "no GDK display")
+class SidebarMultiSelectTests(unittest.TestCase):
+    """A plain single click toggles a tag additively — no modifier key.
+
+    Drives :meth:`Sidebar._on_tag_row_clicked` (the per-row gesture's
+    callback) for two distinct positions and asserts the model, the
+    mirrored :class:`AppState` selection, and the header accent all
+    reflect a two-tag selection.
+    """
+
+    app_state: AppState
+    sidebar: Sidebar
+    window: Gtk.Window
+
+    def setUp(self) -> None:
+        repository = _FakeNoteRepository(
+            notes=[
+                _note_with_tags("1", ("baking", "bread")),
+                _note_with_tags("2", ("bread",)),
+            ],
+            tag_pairs=(("baking", 1), ("bread", 2)),
+        )
+        self.app_state = AppState()
+        self.sidebar = Sidebar(
+            note_repository=repository,
+            app_state=self.app_state,
+        )
+        self.window = Gtk.Window()
+        self.window.set_child(self.sidebar)
+        self.window.present()
+        _pump()
+
+    def tearDown(self) -> None:
+        self.window.set_child(None)
+        self.window.destroy()
+        _pump(20)
+
+    def test_two_single_clicks_select_both_tags(self) -> None:
+        baking_pos = _tag_position(self.sidebar, "baking")
+        bread_pos = _tag_position(self.sidebar, "bread")
+
+        # Two plain clicks on two different rows — no modifier.
+        self.sidebar._on_tag_row_clicked(baking_pos)
+        _pump()
+        self.sidebar._on_tag_row_clicked(bread_pos)
+        _pump()
+
+        # (a) Both selected in the model.
+        self.assertTrue(self.sidebar.tag_selection.is_selected(baking_pos))
+        self.assertTrue(self.sidebar.tag_selection.is_selected(bread_pos))
+
+        # (b) AppState mirrors a TagSelection holding both names.
+        selection = self.app_state.selection
+        self.assertIsInstance(selection, TagSelection)
+        assert isinstance(selection, TagSelection)  # for mypy/pylint
+        self.assertEqual(selection.tags, frozenset({"baking", "bread"}))
+
+        # (c) The Tags header accent reads "(2 selected)".
+        accent = self.sidebar.tags_header_box.get_last_child()
+        assert isinstance(accent, Gtk.Label)
+        self.assertEqual(accent.get_text(), "(2 selected)")
+
+    def test_clicking_a_selected_row_again_deselects_only_it(self) -> None:
+        baking_pos = _tag_position(self.sidebar, "baking")
+        bread_pos = _tag_position(self.sidebar, "bread")
+
+        self.sidebar._on_tag_row_clicked(baking_pos)
+        _pump()
+        self.sidebar._on_tag_row_clicked(bread_pos)
+        _pump()
+        # Re-click baking — it toggles off, bread stays.
+        self.sidebar._on_tag_row_clicked(baking_pos)
+        _pump()
+
+        self.assertFalse(self.sidebar.tag_selection.is_selected(baking_pos))
+        self.assertTrue(self.sidebar.tag_selection.is_selected(bread_pos))
+        selection = self.app_state.selection
+        self.assertIsInstance(selection, TagSelection)
+        assert isinstance(selection, TagSelection)  # for mypy/pylint
+        self.assertEqual(selection.tags, frozenset({"bread"}))
 
 
 if __name__ == "__main__":
