@@ -112,8 +112,15 @@ the actual SVGs. ``tag-symbolic`` doubles as a "no tags" indicator
 since the row matches notes with an empty tag set.
 """
 
-_TAG_CHECK_ICON_NAME: Final[str] = "emblem-ok-symbolic"
+_TAG_CHECK_ICON_NAME: Final[str] = "object-select-symbolic"
 """Leading ✓ shown on a tag row when the row is currently selected.
+
+``object-select-symbolic`` is the canonical GTK "selected" checkmark and
+is compiled into GTK itself, so it always resolves to a clean ✓. The
+former ``emblem-ok-symbolic`` ships only with the full Adwaita icon-theme
+package; where that set is not indexed GTK falls back to the broken-image
+triangle-with-``!`` glyph.
+
 Hidden via ``Gtk.Widget.set_opacity(0)`` (not ``set_visible``) so the
 icon column reserves the same width whether or not the row is
 selected — see the row factory below."""
@@ -129,6 +136,16 @@ _DEFAULT_PANE_WIDTH_PX: Final[int] = 220
 
 _SIDEBAR_CSS_CLASS: Final[str] = "sidebar"
 """Class on the :class:`Sidebar` box that the stylesheet keys off."""
+
+_TAG_LIST_CSS_CLASS: Final[str] = "tag-list"
+"""Class on the Tags :class:`Gtk.ListView` so the softened-selection
+rule (``.sidebar .tag-list row:selected``) is scoped to tag rows only,
+leaving the Library list's theme pill intact."""
+
+_TAG_ROW_CHECK_CSS_CLASS: Final[str] = "tag-row-check"
+"""Class on the leading ✓ :class:`Gtk.Image` so ``app.css`` owns its
+styling. Visibility stays imperative — opacity 0 reserves the column
+width when the row is unselected (see the row factory below)."""
 
 _SECTION_HEADER_CSS_CLASS: Final[str] = "sidebar-section-header"
 """Class on each section-header label (font treatment + dim)."""
@@ -210,6 +227,23 @@ def count_untagged(notes: Iterable[object]) -> int:
     return untagged
 
 
+def tags_header_accent_text(selected_count: int) -> str:
+    """Return the Tags-header parenthetical, or ``""`` when nothing is
+    selected.
+
+    Pure helper — unit-testable without GTK, and the single source of
+    the parenthetical wording (which previously regressed to invisible).
+    Returns ``""`` for any non-positive count so the caller can use the
+    empty string as the "hide the accent label" signal. The leading
+    space in :data:`_TAGS_HEADER_SELECTED_SUFFIX` (kept for the
+    concatenated form) is dropped here because the accent label is a
+    separate widget already spaced by the header box.
+    """
+    if selected_count <= 0:
+        return ""
+    return _TAGS_HEADER_SELECTED_SUFFIX.format(n=selected_count).strip()
+
+
 # ---------------------------------------------------------------------------
 # Section header
 # ---------------------------------------------------------------------------
@@ -248,11 +282,13 @@ def _make_tags_header() -> Gtk.Box:
 
     base = Gtk.Label.new(_TAGS_HEADER_FORMAT)
     base.set_halign(Gtk.Align.START)
+    base.set_valign(Gtk.Align.BASELINE_CENTER)
     base.add_css_class(_SECTION_HEADER_CSS_CLASS)
     box.append(base)
 
     accent = Gtk.Label.new("")
     accent.set_halign(Gtk.Align.START)
+    accent.set_valign(Gtk.Align.BASELINE_CENTER)
     accent.add_css_class(_SECTION_COUNT_CSS_CLASS)
     accent.set_visible(False)
     box.append(accent)
@@ -344,8 +380,10 @@ def _on_tag_factory_setup(
 
     # Leading ✓ — visibility-by-opacity so the column reserves width
     # whether or not the row is selected. The two halves of the tag
-    # list (selected, unselected) stay column-aligned this way.
+    # list (selected, unselected) stay column-aligned this way. The
+    # ``.tag-row-check`` class lets app.css own its styling.
     check = Gtk.Image.new_from_icon_name(_TAG_CHECK_ICON_NAME)
+    check.add_css_class(_TAG_ROW_CHECK_CSS_CLASS)
     check.set_opacity(0.0)
     box.append(check)
 
@@ -449,6 +487,7 @@ class Sidebar(  # pylint: disable=too-many-instance-attributes
             self._tag_selection,
             _make_tag_row_factory(self._is_tag_selected),
         )
+        self._tag_list_view.add_css_class(_TAG_LIST_CSS_CLASS)
         tag_scroller = Gtk.ScrolledWindow()
         tag_scroller.set_propagate_natural_height(True)
         tag_scroller.set_vexpand(True)
@@ -649,14 +688,12 @@ class Sidebar(  # pylint: disable=too-many-instance-attributes
         if not isinstance(accent, Gtk.Label):
             return
         selection = self._app_state.selection
-        if isinstance(selection, TagSelection) and selection.tags:
-            accent.set_text(
-                _TAGS_HEADER_SELECTED_SUFFIX.format(n=len(selection.tags)),
-            )
-            accent.set_visible(True)
-        else:
-            accent.set_text("")
-            accent.set_visible(False)
+        selected_count = (
+            len(selection.tags) if isinstance(selection, TagSelection) else 0
+        )
+        text = tags_header_accent_text(selected_count)
+        accent.set_text(text)
+        accent.set_visible(bool(text))
 
     # ------------------------------------------------------------------
     # Probes used by the row factory
@@ -684,6 +721,10 @@ class Sidebar(  # pylint: disable=too-many-instance-attributes
     @property
     def tag_selection(self) -> Gtk.MultiSelection:
         return self._tag_selection
+
+    @property
+    def tag_list_view(self) -> Gtk.ListView:
+        return self._tag_list_view
 
     @property
     def smart_selection(self) -> Gtk.SingleSelection:

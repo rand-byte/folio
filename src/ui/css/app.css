@@ -63,6 +63,21 @@
     padding: 4px 6px;
 }
 
+/* Tags list: selection must read as the leading ✓, not the theme's bold
+ * accent fill. Scoped to the Tags Gtk.ListView via the `.tag-list` class
+ * (added in ui/sidebar.py) so the Library list keeps its theme pill.
+ *
+ * The bold fill is replaced by a quiet, palette-safe tint (opacity-only
+ * via `alpha(currentColor, …)`, so no literal colour is named and the
+ * highlight tracks the theme). The `color: inherit` reset is essential:
+ * the `:selected` state also flips the foreground to the theme's
+ * selected-foreground (white on most themes), which would make the label
+ * and ✓ vanish against the faint tint. */
+.sidebar .tag-list row:selected {
+    background-color: alpha(currentColor, 0.06);
+    color: inherit;
+}
+
 /* Sidebar rows are flat as of the tag migration. The previous
  * ``treeexpander indent`` workaround (compensating for GTK 4's halved
  * tree indentation) is gone — the sidebar no longer uses a
@@ -131,15 +146,28 @@
 
 /* Tags section header count parenthetical.
  *
- * Rendered next to the ``Tags`` label when N > 0. The colour is the
- * GTK 4 accent / info colour, so the parenthetical reads as a "live"
- * indicator without naming a literal blue. Falls back to the theme's
- * blue via a CSS variable on themes that expose one; otherwise uses
- * a neutral tint of the foreground (opacity-only) so it stays
- * legible on any theme. */
+ * Rendered next to the ``Tags`` label when N > 0.
+ *
+ * Issue 2: this app is plain GTK 4, not libadwaita, so the previously
+ * used ``@accent_color`` name is not defined by a theme — here it
+ * resolves to white with no parse error, painting the parenthetical
+ * white-on-white (invisible). A locally `@define-color`'d accent makes
+ * it reliably visible on any plain-GTK build. ``#1c71d8`` is the
+ * GNOME/Adwaita blue; an intentional accent literal is acceptable here
+ * (unlike the geometry/opacity-only rules elsewhere).
+ *
+ * Issue 3: the parenthetical must size and align with the ``Tags``
+ * label, so it carries the section-header font metrics (11px,
+ * 0.06em tracking) — matching ``.sidebar-section-header`` — at normal
+ * weight and full strength (no opacity dim) so the accent reads as a
+ * live indicator. Baseline alignment of the two labels is set in
+ * ui/sidebar.py (`Gtk.Align.BASELINE_CENTER`). */
+@define-color folio_selection_accent #1c71d8;
+
 .selection-count {
-    color: @accent_color;
-    opacity: 0.85;
+    color: @folio_selection_accent;
+    font-size: 11px;          /* match .sidebar-section-header → aligns with "Tags" */
+    letter-spacing: 0.06em;   /* same tracking as the header */
 }
 
 /* Article-view tag chips (under the rendered title in VIEW mode).
