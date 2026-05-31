@@ -139,6 +139,25 @@ class ParseErrorKind(StrEnum):
     DUPLICATE_TAG_ATTRIBUTE = auto()
 
 
+class HeadingTrailing(StrEnum):
+    """Trailing whitespace a heading emits after its text.
+
+    Consumed by the GTK ``TextBuffer`` renderer to decide how many
+    newline characters follow a heading's text in the buffer. A
+    body-section heading emits the full block separator so the next
+    block drops a blank line below it; the document **title** emits a
+    single newline so the tag-chip row can hug it on the very next
+    line, the renderer then completing the block gap *after* the chip
+    anchor. The values are the literal separator strings — the renderer
+    inserts ``member.value`` verbatim — and, like ``AdmonitionKind``'s
+    header text, are used directly rather than translated. They are
+    never persisted, so no migration is implied by their content.
+    """
+
+    BLOCK_SEPARATOR = "\n\n"
+    SINGLE_NEWLINE = "\n"
+
+
 class AdmonitionKind(StrEnum):
     """The five admonition labels recognised by the parser.
 

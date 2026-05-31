@@ -1787,10 +1787,20 @@ class SoftBreakPangoMarkupTests(unittest.TestCase):
 _BLOCK_SEPARATOR_LEN: int = 2
 """Length, in characters, of the renderer's inter-block separator.
 
-The renderer inserts ``"\\n\\n"`` after every block including the title;
-the post-title anchor sits *after* that separator. Tests assert anchor
-offsets relative to this length so a future change to the separator
-text fans out to exactly one place.
+The renderer inserts ``"\\n\\n"`` after most blocks. The document
+**title**, however, emits only a single newline, and the renderer
+inserts this block separator *after* the post-title anchor so the chip
+row hugs the title while the body drops a clear line below the chips.
+Tests assert anchor / body offsets relative to this length so a future
+change to the separator text fans out to exactly one place.
+"""
+
+_TITLE_TRAILING_LEN: int = 1
+"""Length, in characters, of the title's single trailing newline.
+
+The titled document emits ``HeadingTrailing.SINGLE_NEWLINE`` after the
+title text, so the post-title anchor sits exactly this many characters
+beyond the title text.
 """
 
 
@@ -1841,14 +1851,71 @@ class PostTitleHookTests(unittest.TestCase):
             post_title_hook=anchors.append,
         )
 
-        # The title text plus its trailing block separator is the
-        # offset the hook should receive — i.e. the anchor sits right
-        # before the first body block's text.
-        expected_offset = len("Welcome") + _BLOCK_SEPARATOR_LEN
+        # The title emits only a SINGLE trailing newline so the chip
+        # row hugs it: the anchor sits one newline past the title text,
+        # NOT a full block separator past it. The remaining block-gap
+        # newline is inserted after the anchor (see the body-offset
+        # test below).
+        expected_offset = len("Welcome") + _TITLE_TRAILING_LEN
         anchor_iter = self._iter_for_anchor(buffer, anchors[0])
         self.assertIsNotNone(anchor_iter)
         assert anchor_iter is not None  # for mypy/pylint
         self.assertEqual(anchor_iter.get_offset(), expected_offset)
+
+    def test_block_separator_follows_anchor_when_title_present(self) -> None:
+        # The inter-block gap is completed AFTER the anchor: the first
+        # body block starts a full block separator beyond the anchor
+        # character, so the body drops a clear blank line below the
+        # chip row rather than hugging it.
+        renderer, buffer, _ = _build_renderer()
+        anchors: list[Gtk.TextChildAnchor] = []
+
+        renderer.render_into(
+            "= Welcome\n\nbody.\n",
+            buffer,
+            note_id="n1",
+            post_title_hook=anchors.append,
+        )
+
+        anchor_iter = self._iter_for_anchor(buffer, anchors[0])
+        self.assertIsNotNone(anchor_iter)
+        assert anchor_iter is not None  # for mypy/pylint
+        # One anchor character plus the block separator separate the
+        # anchor from the first body character.
+        body_offset = anchor_iter.get_offset() + 1 + _BLOCK_SEPARATOR_LEN
+        body_start = buffer.get_iter_at_offset(body_offset)
+        self.assertEqual(
+            buffer.get_text(body_start, buffer.get_end_iter(), False),
+            "body.",
+        )
+
+    def test_block_separator_follows_anchor_when_no_title(self) -> None:
+        # A titleless note also suffered the chips-inline-with-body bug,
+        # so the block separator is inserted after the anchor here too:
+        # the chip row sits alone on the buffer's first line and the
+        # body drops a clear line below it (chips → gap → body).
+        renderer, buffer, _ = _build_renderer()
+        anchors: list[Gtk.TextChildAnchor] = []
+
+        renderer.render_into(
+            "body only.\n",
+            buffer,
+            note_id="n1",
+            post_title_hook=anchors.append,
+        )
+
+        anchor_iter = self._iter_for_anchor(buffer, anchors[0])
+        self.assertIsNotNone(anchor_iter)
+        assert anchor_iter is not None  # for mypy/pylint
+        # Anchor at buffer-start; body follows one anchor char plus the
+        # block separator later.
+        self.assertEqual(anchor_iter.get_offset(), 0)
+        body_offset = anchor_iter.get_offset() + 1 + _BLOCK_SEPARATOR_LEN
+        body_start = buffer.get_iter_at_offset(body_offset)
+        self.assertEqual(
+            buffer.get_text(body_start, buffer.get_end_iter(), False),
+            "body only.",
+        )
 
     def test_hook_anchor_offset_is_zero_when_no_title(self) -> None:
         renderer, buffer, _ = _build_renderer()
