@@ -3,14 +3,26 @@
 Principles & invariants
 -----------------------
 * :class:`NoteList` is the navigation pane between the sidebar and the
-  rendered article. It mirrors :class:`AppState`: every change to
-  :attr:`AppState.selection`, :attr:`AppState.query`, or the local
-  sort key triggers a full :meth:`refresh`. The widget never caches a
-  derived list that could drift out of sync with the signals that
-  drive it.
+  rendered article. It mirrors :class:`AppState` by observing
+  ``notify::selection``, ``notify::query``, and the local sort key.
+  Selection and sort changes are discrete and trigger a synchronous
+  :meth:`refresh`. Query changes arrive per keystroke (the search entry
+  is bound to :attr:`AppState.query`), so the query handler is
+  **throttled**: it schedules a single coalesced :meth:`refresh` per
+  :data:`_QUERY_REFRESH_DEBOUNCE_MS` window rather than re-filtering on
+  every character. The widget never caches a derived list that could
+  drift out of sync with the notifications that drive it.
+* The query refresh is a *throttle*, not a true debounce: it fires once
+  per window measured from the first keystroke of a burst, and
+  :meth:`refresh` re-reads the *current* :attr:`AppState.query` when the
+  timer fires (rather than capturing a snapshot), so intermediate
+  keystrokes are skipped and only the latest state renders. The pending
+  GLib source is cancelled at teardown so a queued refresh cannot fire
+  into a finalized widget. This mirrors the editor's autosave idiom
+  (a module constant plus a pending-id field), not a new mechanism.
 * Selection input flows in one direction: a click on a row → an
   ``app_state.set_selected_note_id`` mutation → an
-  ``app_state.selected-note-changed`` signal → the row is highlighted
+  ``app_state`` ``notify::selected-note-id`` → the row is highlighted
   here and the rendered view reacts in :class:`NoteView`.
 * The list-display computation is extracted as a free function,
   :func:`compute_display_notes`, so tests can call it without
@@ -32,7 +44,9 @@ Principles & invariants
   the rendered-view metadata line agree on it without cross-importing.
   Locale-aware formatting is a future polish item.
 * GTK 4 currency: :meth:`Gtk.Box.append`, :meth:`Gtk.ListBox.append`,
-  :class:`Gtk.DropDown`, ``row-activated``.
+  :class:`Gtk.DropDown`, ``row-activated``, ``notify::<prop>``
+  observation, and :func:`GLib.timeout_add` / :func:`GLib.source_remove`
+  for the query-refresh throttle.
 """
 
 from __future__ import annotations
@@ -44,10 +58,12 @@ from typing import Final
 
 import gi
 
+gi.require_version("GLib", "2.0")
+gi.require_version("GObject", "2.0")
 gi.require_version("Gtk", "4.0")
 gi.require_version("Pango", "1.0")
 # pylint: disable=wrong-import-position
-from gi.repository import Gtk, Pango  # noqa: E402
+from gi.repository import GLib, GObject, Gtk, Pango  # noqa: E402
 
 from controllers.app_state import AppState
 from enums import NoteSortKey
@@ -99,6 +115,17 @@ _SORT_KEY_DROPDOWN_ORDER: Final[tuple[NoteSortKey, ...]] = (
 )
 
 _DEFAULT_SORT_KEY: Final[NoteSortKey] = NoteSortKey.MODIFIED
+
+_QUERY_REFRESH_DEBOUNCE_MS: Final[int] = 150
+"""Throttle window for the query-driven refresh.
+
+The search entry is bound to :attr:`AppState.query` and notifies per
+keystroke; coalescing the resulting :meth:`NoteList.refresh` over this
+window keeps the expensive re-filter off the typing hot path. 150 ms
+matches the delay the old ``Gtk.SearchEntry:search-changed`` debounce
+carried before the binding moved the per-keystroke truth into
+:class:`AppState`.
+"""
 
 _HEADER_SPACING_PX: Final[int] = 6
 _ROW_SPACING_PX: Final[int] = 4
@@ -223,6 +250,7 @@ class NoteList(Gtk.Box):  # pylint: disable=too-many-instance-attributes
 
     _sort_key: NoteSortKey
     _row_for_note_id: dict[str, _NoteListRow]
+    _pending_refresh_id: int | None
 
     def __init__(
         self,
@@ -239,6 +267,7 @@ class NoteList(Gtk.Box):  # pylint: disable=too-many-instance-attributes
         self._attachment_store = attachment_store
         self._sort_key = _DEFAULT_SORT_KEY
         self._row_for_note_id = {}
+        self._pending_refresh_id = None
 
         header = Gtk.Box.new(Gtk.Orientation.HORIZONTAL, _HEADER_SPACING_PX)
         header.set_margin_start(_ROW_PADDING_PX)
@@ -288,15 +317,15 @@ class NoteList(Gtk.Box):  # pylint: disable=too-many-instance-attributes
         self.set_size_request(_DEFAULT_PANE_WIDTH_PX, -1)
 
         self._app_state.connect(
-            "selection-changed",
+            "notify::selection",
             self._on_app_state_selection_changed,
         )
         self._app_state.connect(
-            "query-changed",
+            "notify::query",
             self._on_app_state_query_changed,
         )
         self._app_state.connect(
-            "selected-note-changed",
+            "notify::selected-note-id",
             self._on_app_state_selected_note_changed,
         )
 
@@ -366,14 +395,64 @@ class NoteList(Gtk.Box):  # pylint: disable=too-many-instance-attributes
             self._sort_key = _SORT_KEY_DROPDOWN_ORDER[index]
         self.refresh()
 
-    def _on_app_state_selection_changed(self, _state: AppState) -> None:
+    def _on_app_state_selection_changed(
+        self,
+        _state: AppState,
+        _pspec: GObject.ParamSpec,
+    ) -> None:
         self.refresh()
 
-    def _on_app_state_query_changed(self, _state: AppState) -> None:
-        self.refresh()
+    def _on_app_state_query_changed(
+        self,
+        _state: AppState,
+        _pspec: GObject.ParamSpec,
+    ) -> None:
+        """Coalesce per-keystroke query notifications into one refresh.
 
-    def _on_app_state_selected_note_changed(self, _state: AppState) -> None:
+        The search entry is bound to :attr:`AppState.query`, so this
+        fires on every character. Scheduling a single pending source per
+        burst (and re-reading the current query when it flushes) keeps
+        the expensive re-filter off the typing hot path while always
+        rendering the latest state. See the module throttle invariant.
+        """
+        if self._pending_refresh_id is not None:
+            return  # a refresh is already scheduled for this burst
+        self._pending_refresh_id = GLib.timeout_add(
+            _QUERY_REFRESH_DEBOUNCE_MS,
+            self._flush_pending_refresh,
+        )
+
+    def _on_app_state_selected_note_changed(
+        self,
+        _state: AppState,
+        _pspec: GObject.ParamSpec,
+    ) -> None:
         self._apply_highlight()
+
+    def _flush_pending_refresh(self) -> bool:
+        """GLib timer callback — run the coalesced query refresh.
+
+        Clears the pending id first, then refreshes (which re-reads the
+        *current* :attr:`AppState.query`), then returns
+        :data:`GLib.SOURCE_REMOVE` so the one-shot source does not
+        re-fire. Safe to call directly from tests, which drive the
+        throttle without a running main loop.
+        """
+        self._pending_refresh_id = None
+        self.refresh()
+        result: bool = GLib.SOURCE_REMOVE
+        return result
+
+    def _cancel_pending_refresh(self) -> None:
+        """Drop any scheduled refresh so it cannot fire after teardown.
+
+        Idempotent and self-guarding: removes the GLib source only when
+        one is pending, so the two teardown hooks (:meth:`do_unroot` and
+        :meth:`__del__`) can both call it without double-removal.
+        """
+        if self._pending_refresh_id is not None:
+            GLib.source_remove(self._pending_refresh_id)
+            self._pending_refresh_id = None
 
     # ------------------------------------------------------------------
     # Highlight application
@@ -389,6 +468,32 @@ class NoteList(Gtk.Box):  # pylint: disable=too-many-instance-attributes
             self._list_box.unselect_all()
             return
         self._list_box.select_row(row)
+
+    # ------------------------------------------------------------------
+    # Teardown — cancel the throttle source
+    # ------------------------------------------------------------------
+
+    def do_unroot(self) -> None:  # pylint: disable=arguments-differ
+        """Cancel a pending refresh when leaving the widget tree.
+
+        GTK invokes this synchronously while tearing the window's widget
+        tree down, so it is the reliable hook for a *rooted* list. The
+        :meth:`__del__` below is the companion net for a never-rooted
+        instance (e.g. a standalone test widget).
+        """
+        self._cancel_pending_refresh()
+        Gtk.Box.do_unroot(self)
+
+    def __del__(self) -> None:
+        """Cancel a pending refresh for a list finalized un-rooted.
+
+        :meth:`do_unroot` only fires for a list that was added to a
+        window; one built in isolation and dropped (as the unit tests
+        do) is finalized without ever being rooted, so the cancel has to
+        happen here. The :meth:`_cancel_pending_refresh` guard makes this
+        a no-op when :meth:`do_unroot` already ran.
+        """
+        self._cancel_pending_refresh()
 
 
 # ---------------------------------------------------------------------------

@@ -10,17 +10,23 @@ from search.note_filter import SmartSelection, TagSelection
 
 
 class _Recorder:
-    """Captures GObject signal emissions on an :class:`AppState`."""
+    """Captures GObject property-change notifications on an :class:`AppState`.
+
+    The four navigational fields are GObject properties; observers
+    subscribe to ``notify::<prop>`` rather than to bespoke signals. The
+    handler tolerates the trailing :class:`GObject.ParamSpec` argument
+    GObject passes to a ``notify`` callback via its ``*args`` catch-all.
+    """
 
     events: list[tuple[str, tuple[object, ...]]]
 
     def __init__(self, state: AppState) -> None:
         self.events = []
         for signal in (
-            "selection-changed",
-            "selected-note-changed",
-            "view-mode-changed",
-            "query-changed",
+            "notify::selection",
+            "notify::selected-note-id",
+            "notify::view-mode",
+            "notify::query",
         ):
             state.connect(signal, self._make_handler(signal))
 
@@ -73,7 +79,7 @@ class SetSmartTests(unittest.TestCase):
             state.selection,
             SmartSelection(smart_filter=SmartFilter.UNTAGGED),
         )
-        self.assertEqual(recorder.names(), ["selection-changed"])
+        self.assertEqual(recorder.names(), ["notify::selection"])
 
     def test_picking_same_smart_is_no_op(self) -> None:
         state = AppState()  # starts at ALL
@@ -135,9 +141,9 @@ class ToggleTagTests(unittest.TestCase):
         state.toggle_tag("b")
         state.toggle_tag("a")  # back to {b}
         self.assertEqual(recorder.names(), [
-            "selection-changed",
-            "selection-changed",
-            "selection-changed",
+            "notify::selection",
+            "notify::selection",
+            "notify::selection",
         ])
 
 
@@ -147,7 +153,7 @@ class SetSelectedNoteIdTests(unittest.TestCase):
         recorder = _Recorder(state)
         state.set_selected_note_id("n1")
         self.assertEqual(state.selected_note_id, "n1")
-        self.assertEqual(recorder.names(), ["selected-note-changed"])
+        self.assertEqual(recorder.names(), ["notify::selected-note-id"])
 
     def test_setting_same_id_is_no_op(self) -> None:
         state = AppState()
@@ -169,7 +175,7 @@ class SetViewModeTests(unittest.TestCase):
         recorder = _Recorder(state)
         state.set_view_mode(ViewMode.EDIT)
         self.assertEqual(state.view_mode, ViewMode.EDIT)
-        self.assertEqual(recorder.names(), ["view-mode-changed"])
+        self.assertEqual(recorder.names(), ["notify::view-mode"])
 
     def test_same_mode_is_no_op(self) -> None:
         state = AppState()
@@ -182,21 +188,29 @@ class SetQueryTests(unittest.TestCase):
     def test_setting_query_emits(self) -> None:
         state = AppState()
         recorder = _Recorder(state)
-        state.set_query("hi")
+        state.props.query = "hi"
         self.assertEqual(state.query, "hi")
-        self.assertEqual(recorder.names(), ["query-changed"])
+        self.assertEqual(recorder.names(), ["notify::query"])
 
-    def test_same_query_is_no_op(self) -> None:
+    def test_setting_same_query_re_emits(self) -> None:
+        # ``query`` is a stored GObject property bound bidirectionally to
+        # the search entry; its generic setter notifies even when the
+        # value is unchanged (DECISION 2 — accepted). This cannot loop —
+        # the bidirectional binding suppresses any reverse echo — and a
+        # re-filter on an identical query is idempotent, so the redundant
+        # notification is harmless. The three rule-bearing fields keep
+        # their strict change-only guards; only ``query`` is relaxed.
         state = AppState()
-        state.set_query("hi")
+        state.props.query = "hi"
         recorder = _Recorder(state)
-        state.set_query("hi")
-        self.assertEqual(recorder.names(), [])
+        state.props.query = "hi"
+        self.assertEqual(recorder.names(), ["notify::query"])
 
     def test_whitespace_is_significant(self) -> None:
-        # Stripping happens in filter_by_query, not here.
+        # Stripping happens in filter_by_query, not here — the query is
+        # stored verbatim (an invariant the search-entry binding relies on).
         state = AppState()
-        state.set_query("  hi  ")
+        state.props.query = "  hi  "
         self.assertEqual(state.query, "  hi  ")
 
 

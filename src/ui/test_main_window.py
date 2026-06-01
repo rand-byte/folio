@@ -414,7 +414,7 @@ class MainWindowViewModeChangeFlushAndRefreshTests(unittest.TestCase):
         # Set the selected note BEFORE constructing the window so the
         # editor's and view's constructor-time loads both see it. (Were
         # we to set it after construction, the same load would still
-        # run through ``selected-note-changed`` — but pre-setting keeps
+        # run through ``notify::selected-note-id`` — but pre-setting keeps
         # the test setup linear and avoids interleaving signal handlers
         # with assertion setup.)
         state.set_selected_note_id(note_id)
@@ -500,9 +500,9 @@ class MainWindowViewModeChangeFlushAndRefreshTests(unittest.TestCase):
 
         Even with the editor flush in place, the view would still
         show stale content unless it is asked to refresh on every
-        mode change — its ``selected-note-changed`` subscription is
+        mode change — its ``notify::selected-note-id`` subscription is
         not enough on its own. We simulate "disk got updated"
-        without going through ``selected-note-changed`` by mutating
+        without going through ``notify::selected-note-id`` by mutating
         the fake repository directly; the toggle to EDIT and back
         to VIEW is what must force the re-read.
         """
@@ -514,7 +514,7 @@ class MainWindowViewModeChangeFlushAndRefreshTests(unittest.TestCase):
         self.assertIn("old", self._view_buffer_text(window))
 
         # Mutate the underlying note out from under the view, without
-        # firing ``selected-note-changed`` (i.e. simulate that disk
+        # firing ``notify::selected-note-id`` (i.e. simulate that disk
         # now holds different content).
         existing = repo.notes["n1"]
         repo.notes["n1"] = Note(

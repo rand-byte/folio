@@ -29,11 +29,24 @@ Principles & invariants
   thin shim over the helper plus a switch to
   :data:`ViewMode.EDIT`.
 
-* The search entry and the mode toggle are bound *bidirectionally*
-  to :class:`AppState`. To prevent the obvious update cycle (user
-  types → search-changed → set_query → query-changed → set_text →
-  search-changed) the toolbar uses a guard flag pattern matching
-  the editor's ``_loading`` field.
+* The search entry's ``text`` is bound *bidirectionally* to
+  :attr:`AppState.query` through a :meth:`GObject.Object.bind_property`
+  binding established at construction (with
+  :data:`GObject.BindingFlags.SYNC_CREATE` for the initial
+  ``query → text`` copy). GObject's own reverse-echo suppression breaks
+  the update cycle without a hand-rolled guard, and — crucially —
+  avoids the re-entrant ``set_text`` that used to reset the entry's
+  cursor and reverse typed characters. The binding's correctness relies
+  on ``query`` being stored verbatim (see the :class:`AppState`
+  invariants); any normalisation there would reintroduce the cursor bug.
+
+* The View / Source toggle maps the :class:`ViewMode` enum onto two
+  :class:`Gtk.ToggleButton` ``active`` booleans, which is not a clean
+  single-property bind, so it keeps explicit handlers. To prevent its
+  update cycle (programmatic ``set_active`` → ``toggled`` →
+  ``set_view_mode`` → ``notify::view-mode`` → ``set_active``) those
+  handlers are fenced by the ``_suppress_signal_writeback`` guard flag,
+  matching the editor's ``_loading`` field.
 
 * The More menu is a :class:`Gtk.MenuButton` with a hand-built
   :class:`Gtk.Popover` containing :class:`Gtk.Button` rows.
@@ -57,7 +70,7 @@ import gi
 gi.require_version("GObject", "2.0")
 gi.require_version("Gtk", "4.0")
 # pylint: disable=wrong-import-position
-from gi.repository import Gtk  # noqa: E402
+from gi.repository import GObject, Gtk  # noqa: E402
 
 from controllers.app_state import AppState
 from controllers.note_controller import NoteController, make_initial_source
@@ -117,6 +130,7 @@ class Toolbar(  # pylint: disable=too-many-instance-attributes
     _confirm_dialog_presenter: ConfirmDialogPresenter
 
     _search_entry: Gtk.SearchEntry
+    _query_binding: GObject.Binding
     _view_button: Gtk.ToggleButton
     _source_button: Gtk.ToggleButton
     _more_menu_button: Gtk.MenuButton
@@ -174,23 +188,32 @@ class Toolbar(  # pylint: disable=too-many-instance-attributes
         right_box.append(self._more_menu_button)
         self.pack_end(right_box)
 
-        # ---------- AppState subscriptions ----------
+        # ---------- AppState bindings & subscriptions ----------
+        # The search entry round-trips with AppState.query through a
+        # bidirectional property binding. SYNC_CREATE performs the
+        # initial query -> text copy, so no explicit sync call is needed.
+        # GObject suppresses the reverse echo within a propagation cycle,
+        # which is what removes the re-entrant set_text() that used to
+        # reset the cursor and reverse typed characters.
+        self._query_binding = self._app_state.bind_property(
+            "query",
+            self._search_entry,
+            "text",
+            GObject.BindingFlags.BIDIRECTIONAL
+            | GObject.BindingFlags.SYNC_CREATE,
+        )
         self._app_state.connect(
-            "selected-note-changed",
+            "notify::selected-note-id",
             self._on_selected_note_changed,
         )
         self._app_state.connect(
-            "query-changed",
-            self._on_app_state_query_changed,
-        )
-        self._app_state.connect(
-            "view-mode-changed",
+            "notify::view-mode",
             self._on_app_state_view_mode_changed,
         )
 
         # ---------- initial state ----------
+        # The search entry is seeded by the binding's SYNC_CREATE above.
         self._refresh_more_menu_sensitivity()
-        self._sync_search_entry_from_app_state()
         self._sync_mode_toggle_from_app_state()
 
     # ------------------------------------------------------------------
@@ -213,7 +236,6 @@ class Toolbar(  # pylint: disable=too-many-instance-attributes
     def _build_search_entry(self) -> Gtk.SearchEntry:
         entry = Gtk.SearchEntry.new()
         entry.set_placeholder_text(_SEARCH_PLACEHOLDER)
-        entry.connect("search-changed", self._on_search_changed)
         return entry
 
     def _build_mode_toggle(
@@ -264,11 +286,6 @@ class Toolbar(  # pylint: disable=too-many-instance-attributes
         self._note_controller.create_note(initial)
         self._app_state.set_view_mode(ViewMode.EDIT)
 
-    def _on_search_changed(self, entry: Gtk.SearchEntry) -> None:
-        if self._suppress_signal_writeback:
-            return
-        self._app_state.set_query(entry.get_text())
-
     def _on_view_toggle_changed(self, button: Gtk.ToggleButton) -> None:
         if self._suppress_signal_writeback:
             return
@@ -316,13 +333,18 @@ class Toolbar(  # pylint: disable=too-many-instance-attributes
     # AppState-driven handlers — programmatic widget refreshes
     # ------------------------------------------------------------------
 
-    def _on_selected_note_changed(self, _state: AppState) -> None:
+    def _on_selected_note_changed(
+        self,
+        _state: AppState,
+        _pspec: GObject.ParamSpec,
+    ) -> None:
         self._refresh_more_menu_sensitivity()
 
-    def _on_app_state_query_changed(self, _state: AppState) -> None:
-        self._sync_search_entry_from_app_state()
-
-    def _on_app_state_view_mode_changed(self, _state: AppState) -> None:
+    def _on_app_state_view_mode_changed(
+        self,
+        _state: AppState,
+        _pspec: GObject.ParamSpec,
+    ) -> None:
         self._sync_mode_toggle_from_app_state()
 
     # ------------------------------------------------------------------
@@ -333,13 +355,6 @@ class Toolbar(  # pylint: disable=too-many-instance-attributes
         self._more_menu_button.set_sensitive(
             self._app_state.selected_note_id is not None
         )
-
-    def _sync_search_entry_from_app_state(self) -> None:
-        self._suppress_signal_writeback = True
-        try:
-            self._search_entry.set_text(self._app_state.query)
-        finally:
-            self._suppress_signal_writeback = False
 
     def _sync_mode_toggle_from_app_state(self) -> None:
         self._suppress_signal_writeback = True

@@ -105,8 +105,8 @@ Principles & invariants
   with anything, and silently inserting a macro into an
   empty/unselectable buffer would be confusing. The button's
   sensitivity tracks :attr:`AppState.selected_note_id` via the
-  same selection-changed signal already wired for the buffer
-  load.
+  same ``notify::selected-note-id`` subscription already wired for
+  the buffer load.
 * GTK 4 currency: :class:`GtkSource.Buffer` (not the deprecated
   :class:`GtkSource.Buffer` v3 paths), :meth:`Gtk.Box.append`,
   :meth:`Gtk.Button.set_child` (rather than the long-form box-of-
@@ -134,10 +134,11 @@ from typing import Final
 import gi
 
 gi.require_version("GLib", "2.0")
+gi.require_version("GObject", "2.0")
 gi.require_version("Gtk", "4.0")
 gi.require_version("GtkSource", "5")
 # pylint: disable=wrong-import-position
-from gi.repository import Gio, GLib, Gtk, GtkSource  # noqa: E402
+from gi.repository import Gio, GLib, GObject, Gtk, GtkSource  # noqa: E402
 
 from controllers.app_state import AppState
 from controllers.note_controller import NoteController
@@ -790,7 +791,7 @@ class NoteEditor(Gtk.Box):  # pylint: disable=too-many-instance-attributes
         # Wire up signals last so handlers don't fire mid-construction.
         self._buffer.connect("changed", self._on_buffer_changed)
         self._app_state.connect(
-            "selected-note-changed",
+            "notify::selected-note-id",
             self._on_selected_note_changed,
         )
 
@@ -1156,7 +1157,11 @@ class NoteEditor(Gtk.Box):  # pylint: disable=too-many-instance-attributes
     # Selection / load handling
     # ------------------------------------------------------------------
 
-    def _on_selected_note_changed(self, _app_state: AppState) -> None:
+    def _on_selected_note_changed(
+        self,
+        _app_state: AppState,
+        _pspec: GObject.ParamSpec,
+    ) -> None:
         """React to a selection change.
 
         Order of operations is the lossless one: flush any pending

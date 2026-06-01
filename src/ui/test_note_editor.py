@@ -804,7 +804,7 @@ class NoteEditorAutosaveTests(unittest.TestCase):
         # buffer-changed signal from queueing a redundant save.
         editor, _, state, backend = self._editor_with_selection()
         # The editor reference must outlive the selection change —
-        # if it were collected, its ``selected-note-changed`` signal
+        # if it were collected, its ``notify::selected-note-id``
         # connection would die with it and the load path under test
         # would never run. Asserting against a property keeps the
         # reference alive for pylint as well as the GC.

@@ -7,9 +7,22 @@ Principles & invariants
   current sidebar :data:`Selection`, the id of the note currently being
   shown, the rendered/source :class:`ViewMode`, and the live search
   query. No widget reads any of these from another widget — every widget
-  reads them here. Mutations go through methods that emit GObject
-  signals so widgets can subscribe without holding direct references to
-  one another.
+  reads them here.
+* State is exposed as **GObject properties** observed via
+  ``notify::<prop>``; widgets subscribe to the property-change
+  notification rather than to bespoke signals, so they need no direct
+  references to one another. The four properties split into two shapes:
+
+  - ``query`` is a **stored read/write** property. It round-trips with
+    the toolbar's search entry through a *bidirectional* property
+    binding (see :mod:`ui.toolbar`), so it is the one field external
+    code may write directly (``self.props.query = ...``).
+  - ``selection``, ``selected_note_id`` and ``view_mode`` are
+    **read-only** to the outside world: their getters return the
+    backing field and the only way to change them is through the
+    explicit mutators below, which enforce the rules and then call
+    :meth:`GObject.Object.notify`.
+
 * The selection state has only two mutators — :meth:`set_smart` and
   :meth:`toggle_tag` — never a generic ``set_selection``. The
   controller owns the rules for how selections move between the
@@ -25,9 +38,11 @@ Principles & invariants
     remaining tags if any, else ``SmartSelection(ALL)`` (the empty
     tag set is *not* a valid :class:`TagSelection`).
 
-  This means the *Untagged* smart filter and any tag selection are
-  always mutually exclusive — there is no representable "Untagged
-  AND tag X" state.
+  This is exactly why these three stay read-only and are **not** bound
+  to a widget: a generic bindable setter could not enforce the
+  transition rules. It also means the *Untagged* smart filter and any
+  tag selection are always mutually exclusive — there is no
+  representable "Untagged AND tag X" state.
 
 * The class deliberately holds **only** navigational state. Domain data
   (the list of notes, the live tag list) is not mirrored here — those
@@ -40,17 +55,28 @@ Principles & invariants
   the controllers that produced them; dialogs are owned by the widgets
   that open them.
 * This module imports :mod:`gi` because :class:`GObject.Object` is the
-  signal substrate the rest of the application relies on. GObject is
-  not GTK — it is part of GLib — and the import works in headless
-  environments, which is what makes the controller tests runnable on
-  CI without a display server.
-* Each setter compares the proposed value against the current one and
-  emits its signal **only on a real change**.
+  property/notification substrate the rest of the application relies
+  on. GObject is not GTK — it is part of GLib — and the import works in
+  headless environments, which is what makes the controller tests
+  runnable on CI without a display server.
+* The three rule-bearing mutators emit their ``notify`` **only on a
+  real change** (each keeps an equality guard). The stored ``query``
+  property uses GObject's generic setter, which may notify even when
+  the value is unchanged; this is harmless because the bidirectional
+  binding suppresses any reverse echo and a re-filter on an identical
+  query is idempotent.
+* ``query`` must be stored **verbatim** — no stripping, lowercasing, or
+  other normalisation. The bidirectional binding's correctness depends
+  on the value round-tripping identically with the search entry: if the
+  stored value differed from what the entry holds, the binding would
+  write the normalised value back and reset the entry's cursor (the
+  very reversal bug this design removed). Stripping for matching belongs
+  in :func:`search.note_filter.filter_by_query`, not here.
 * Setting the selection does **not** clear ``selected_note_id``. The
   note-list widget auto-corrects when the currently-selected id is not
   present in the freshly filtered list.
-* Signals are payload-free. Listeners pull the new value by reading
-  the property they care about.
+* Notifications are payload-free beyond the GObject ``ParamSpec``.
+  Listeners pull the new value by reading the property they care about.
 """
 
 from __future__ import annotations
@@ -70,37 +96,32 @@ from search.note_filter import (
 
 
 class AppState(GObject.Object):
-    """Navigational state plus signals announcing changes to it.
+    """Navigational state exposed as observable GObject properties.
 
-    Signals
-    -------
-    selection-changed
-        Emitted after :meth:`set_smart` or :meth:`toggle_tag` produces a
-        new value. Read the new selection from :attr:`selection`.
-    selected-note-changed
-        Emitted after :meth:`set_selected_note_id` accepts a new value.
-        Read the new id (possibly ``None``) from
-        :attr:`selected_note_id`.
-    view-mode-changed
-        Emitted after :meth:`set_view_mode` accepts a new value. Read
-        the new mode from :attr:`view_mode`.
-    query-changed
-        Emitted after :meth:`set_query` accepts a new value. Read the
-        new (already-stripped of nothing — the query is stored
-        verbatim) string from :attr:`query`.
+    Properties
+    ----------
+    selection
+        The active sidebar :data:`Selection`. Read-only; mutated only
+        via :meth:`set_smart` / :meth:`toggle_tag`. Observe
+        ``notify::selection``.
+    selected-note-id
+        The id of the note currently shown, or ``None``. Read-only;
+        mutated via :meth:`set_selected_note_id`. Observe
+        ``notify::selected-note-id``.
+    view-mode
+        The rendered/source :class:`ViewMode`. Read-only; mutated via
+        :meth:`set_view_mode`. Observe ``notify::view-mode``.
+    query
+        The live search query, stored verbatim. Read/write — bound
+        bidirectionally to the toolbar search entry. Observe
+        ``notify::query``.
     """
 
-    __gsignals__ = {
-        "selection-changed": (GObject.SignalFlags.RUN_LAST, None, ()),
-        "selected-note-changed": (GObject.SignalFlags.RUN_LAST, None, ()),
-        "view-mode-changed": (GObject.SignalFlags.RUN_LAST, None, ()),
-        "query-changed": (GObject.SignalFlags.RUN_LAST, None, ()),
-    }
+    query: str = GObject.Property(type=str, default="")
 
     _selection: Selection
     _selected_note_id: str | None
     _view_mode: ViewMode
-    _query: str
 
     def __init__(
         self,
@@ -115,27 +136,25 @@ class AppState(GObject.Object):
         self._selection = initial_selection
         self._selected_note_id = None
         self._view_mode = initial_view_mode
-        self._query = ""
 
     # ------------------------------------------------------------------
-    # Read-only properties
+    # Read-only properties (notify-only; mutated via the methods below)
     # ------------------------------------------------------------------
 
-    @property
+    @GObject.Property(type=object)
     def selection(self) -> Selection:
+        """The active selection. Read-only externally."""
         return self._selection
 
-    @property
+    @GObject.Property(type=object)
     def selected_note_id(self) -> str | None:
+        """The id of the displayed note, or ``None``. Read-only externally."""
         return self._selected_note_id
 
-    @property
+    @GObject.Property(type=object)
     def view_mode(self) -> ViewMode:
+        """The rendered/source view mode. Read-only externally."""
         return self._view_mode
-
-    @property
-    def query(self) -> str:
-        return self._query
 
     # ------------------------------------------------------------------
     # Selection mutators
@@ -151,7 +170,7 @@ class AppState(GObject.Object):
         if target == self._selection:
             return
         self._selection = target
-        self.emit("selection-changed")
+        self.notify("selection")
 
     def toggle_tag(self, name: str) -> None:
         """Toggle ``name`` in the active tag set.
@@ -167,7 +186,7 @@ class AppState(GObject.Object):
         if isinstance(current, SmartSelection):
             new_tags = frozenset({name})
             self._selection = TagSelection(tags=new_tags)
-            self.emit("selection-changed")
+            self.notify("selection")
             return
         # current is a TagSelection
         if name in current.tags:
@@ -180,7 +199,7 @@ class AppState(GObject.Object):
                 self._selection = TagSelection(tags=remaining)
         else:
             self._selection = TagSelection(tags=current.tags | {name})
-        self.emit("selection-changed")
+        self.notify("selection")
 
     # ------------------------------------------------------------------
     # Other mutators
@@ -191,18 +210,11 @@ class AppState(GObject.Object):
         if note_id == self._selected_note_id:
             return
         self._selected_note_id = note_id
-        self.emit("selected-note-changed")
+        self.notify("selected-note-id")
 
     def set_view_mode(self, view_mode: ViewMode) -> None:
         """Switch between the rendered view and the source editor."""
         if view_mode == self._view_mode:
             return
         self._view_mode = view_mode
-        self.emit("view-mode-changed")
-
-    def set_query(self, query: str) -> None:
-        """Update the live global-search query."""
-        if query == self._query:
-            return
-        self._query = query
-        self.emit("query-changed")
+        self.notify("view-mode")

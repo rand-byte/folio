@@ -6,7 +6,7 @@ Principles & invariants
   user gestures into mutations of :class:`AppState` (via
   :meth:`AppState.set_smart` and :meth:`AppState.toggle_tag`); widgets
   that depend on the selection (:class:`NoteList`, :class:`NoteView`)
-  listen to ``selection-changed`` and pick the change up from there.
+  observe ``notify::selection`` and pick the change up from there.
   Direct cross-widget references are not held — every shared piece of
   state flows through :class:`AppState`.
 * The sidebar is split into two sections:
@@ -525,7 +525,7 @@ class Sidebar(  # pylint: disable=too-many-instance-attributes
             self._on_tag_selection_changed,
         )
         self._app_state.connect(
-            "selection-changed",
+            "notify::selection",
             self._on_app_state_selection_changed,
         )
 
@@ -623,7 +623,11 @@ class Sidebar(  # pylint: disable=too-many-instance-attributes
         for name in new_selected_names ^ current_names:
             self._app_state.toggle_tag(name)
 
-    def _on_app_state_selection_changed(self, _state: AppState) -> None:
+    def _on_app_state_selection_changed(
+        self,
+        _state: AppState,
+        _pspec: GObject.ParamSpec,
+    ) -> None:
         self._apply_highlight()
         self._refresh_tags_header()
 

@@ -24,14 +24,14 @@ Principles & invariants
   matching the design's titlebar. ``set_titlebar`` is independent
   of ``set_child``, so the existing outer-paned-as-child invariant
   is preserved unchanged.
-* The single signal subscription this widget owns is
-  ``view-mode-changed``. On every mode change the window flushes the
+* The single subscription this widget owns is
+  ``notify::view-mode``. On every mode change the window flushes the
   editor's pending autosave (so any just-typed edits hit disk under
   the current note id) and asks the view to refresh from the
   repository before the stack swap reveals it. Flush + refresh are
   both idempotent, so doing them on every mode change — not just on
   the EDIT→VIEW direction — keeps the dispatch branch-free without
-  paying any extra cost on the no-op path. Every other signal
+  paying any extra cost on the no-op path. Every other AppState
   subscription belongs to the panes themselves; the window's surface
   stays minimal, owning only the layout and the view-mode dispatch.
 * :class:`NoteEditor` and :class:`NoteView` both stay constructed
@@ -41,7 +41,7 @@ Principles & invariants
   GTK's :class:`Gtk.Stack` simply hides the inactive child — both
   remain wired to :class:`AppState` for selection updates so a
   freshly-revealed pane is always up-to-date.
-* The editor pane subscribes to ``selected-note-changed`` like any
+* The editor pane subscribes to ``notify::selected-note-id`` like any
   other pane, but with the added invariant that selection-change
   flushes any pending auto-save *before* the buffer is overwritten.
   That guarantee lives inside :class:`NoteEditor`; this window is
@@ -84,9 +84,10 @@ from typing import Final
 
 import gi
 
+gi.require_version("GObject", "2.0")
 gi.require_version("Gtk", "4.0")
 # pylint: disable=wrong-import-position
-from gi.repository import Gtk  # noqa: E402
+from gi.repository import GObject, Gtk  # noqa: E402
 
 from controllers.app_state import AppState
 from controllers.note_controller import NoteController
@@ -389,8 +390,8 @@ class MainWindow(  # pylint: disable=too-many-instance-attributes
 
         self.set_child(outer_paned)
 
-        # The single signal subscription this widget owns: on every
-        # ``view-mode-changed`` the handler flushes the editor's
+        # The single subscription this widget owns: on every
+        # ``notify::view-mode`` the handler flushes the editor's
         # pending autosave (so any just-typed edits hit disk under the
         # current note id), refreshes the view from the repository
         # (so its buffer reflects the just-saved source), and then
@@ -398,11 +399,15 @@ class MainWindow(  # pylint: disable=too-many-instance-attributes
         # idempotent, so doing them unconditionally keeps the dispatch
         # branch-free.
         self._app_state.connect(
-            "view-mode-changed",
+            "notify::view-mode",
             self._on_view_mode_changed,
         )
 
-    def _on_view_mode_changed(self, _app_state: AppState) -> None:
+    def _on_view_mode_changed(
+        self,
+        _app_state: AppState,
+        _pspec: GObject.ParamSpec,
+    ) -> None:
         """Flush the editor, refresh the view, then swap the visible child.
 
         The flush ensures any pending debounced autosave hits disk
@@ -410,7 +415,7 @@ class MainWindow(  # pylint: disable=too-many-instance-attributes
         from the repository. The refresh ensures the view's buffer
         reflects the just-saved source (without it the view would
         still show whatever was rendered at the last
-        ``selected-note-changed``). Both calls are idempotent:
+        ``notify::selected-note-id``). Both calls are idempotent:
         :meth:`NoteEditor.flush_pending_save` is a no-op when no save
         is pending; :meth:`NoteView.refresh` re-renders from the
         repository whose state may or may not have changed. Doing

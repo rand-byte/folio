@@ -238,7 +238,7 @@ class CreateNoteTests(unittest.TestCase):
         recorder = _Recorder(controller)
         controller.create_note("= x\n\n")
         # The signal sequence: notes-changed (then AppState's own
-        # selected-note-changed fires elsewhere — not in our recorder).
+        # notify::selected-note-id fires elsewhere — not in our recorder).
         self.assertIn("notes-changed", recorder.names())
         self.assertIsNotNone(state.selected_note_id)
 

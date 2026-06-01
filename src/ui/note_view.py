@@ -169,13 +169,14 @@ from datetime import datetime
 
 import gi
 
+gi.require_version("GObject", "2.0")
 gi.require_version("Gtk", "4.0")
 gi.require_version("Pango", "1.0")
 gi.require_version("Gsk", "4.0")
 gi.require_version("Graphene", "1.0")
 gi.require_version("Gdk", "4.0")
 # pylint: disable=wrong-import-position
-from gi.repository import Gdk, Graphene, Gsk, Gtk  # noqa: E402
+from gi.repository import Gdk, GObject, Graphene, Gsk, Gtk  # noqa: E402
 
 from ui.note_render.tag_table import (
     TagName,
@@ -1187,7 +1188,7 @@ class NoteView(Gtk.Box):
         # torn down — but step 8 has a single window for the lifetime
         # of the application, so explicit disconnection isn't wired up.
         self._app_state.connect(
-            "selected-note-changed",
+            "notify::selected-note-id",
             self._on_selected_note_changed,
         )
 
@@ -1217,7 +1218,7 @@ class NoteView(Gtk.Box):
         """Render the currently selected note into the buffer.
 
         Called automatically on construction and on every
-        ``selected-note-changed`` signal. Safe to invoke directly when
+        ``notify::selected-note-id``. Safe to invoke directly when
         outside code (e.g. a future editor that posts a new source)
         wants the rendered view to catch up immediately.
 
@@ -1330,8 +1331,12 @@ class NoteView(Gtk.Box):
     # Signal handlers
     # ------------------------------------------------------------------
 
-    def _on_selected_note_changed(self, _app_state: AppState) -> None:
-        """Refresh on a selection change. Payload-free signal."""
+    def _on_selected_note_changed(
+        self,
+        _app_state: AppState,
+        _pspec: GObject.ParamSpec,
+    ) -> None:
+        """Refresh on a selection change. Notify-only handler."""
         self.refresh()
 
     # ------------------------------------------------------------------
