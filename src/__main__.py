@@ -30,7 +30,7 @@ from __future__ import annotations
 
 import sys
 
-from ui.application import NotesApplication
+from giruntime.ui.application import NotesApplication
 
 
 def main(argv: list[str] | None = None) -> int:
