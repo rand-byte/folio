@@ -24,16 +24,31 @@ Principles & invariants
   matching the design's titlebar. ``set_titlebar`` is independent
   of ``set_child``, so the existing outer-paned-as-child invariant
   is preserved unchanged.
-* The single subscription this widget owns is
-  ``notify::view-mode``. On every mode change the window flushes the
-  editor's pending autosave (so any just-typed edits hit disk under
-  the current note id) and asks the view to refresh from the
-  repository before the stack swap reveals it. Flush + refresh are
-  both idempotent, so doing them on every mode change — not just on
-  the EDIT→VIEW direction — keeps the dispatch branch-free without
-  paying any extra cost on the no-op path. Every other AppState
-  subscription belongs to the panes themselves; the window's surface
-  stays minimal, owning only the layout and the view-mode dispatch.
+* This widget owns **two** signal subscriptions:
+
+  1. ``AppState:notify::view-mode``. On every mode change the window
+     flushes the editor's pending autosave (so any just-typed edits
+     hit disk under the current note id) and asks the view to refresh
+     from the repository before the stack swap reveals it. Flush +
+     refresh are both idempotent, so doing them on every mode change —
+     not just on the EDIT→VIEW direction — keeps the dispatch
+     branch-free without paying any extra cost on the no-op path.
+  2. ``NoteController::notes-changed``. After any successful mutation
+     (create / duplicate / delete / save / attachment add or remove)
+     the controller emits this signal; the window fans it out to the
+     two data-driven panes by calling :meth:`NoteList.refresh` and
+     :meth:`Sidebar.refresh`. Without it, an edit to the *currently
+     selected* note under an *unchanged* filter refreshes nothing —
+     the panes otherwise re-query only on ``notify::selection`` /
+     ``notify::selected-note-id`` / ``notify::query`` / sort changes —
+     so the list row (title / snippet / tag chips) and the sidebar tag
+     counts go stale until the next selection change. Both
+     ``refresh()`` methods are public, idempotent, and re-read from the
+     repository, so one synchronous call each per emission suffices.
+
+  Per-``AppState``-property selection plumbing still belongs to the
+  individual panes; the window's surface stays minimal, owning only
+  the layout, the view-mode dispatch, and this post-mutation fan-out.
 * :class:`NoteEditor` and :class:`NoteView` both stay constructed
   and live across mode switches. Tearing one down on every toggle
   would discard the editor's undo history and the view's child
@@ -56,7 +71,8 @@ Principles & invariants
   :class:`NoteView` falls back to its placeholder image resolver.
   Future build steps that add toolbar / status-bar children extend the
   window's child set, but leave its signal subscriptions confined to
-  the same single view-mode dispatch.
+  the two described above (the view-mode dispatch and the
+  ``notes-changed`` fan-out).
 * The initial pane positions match the per-widget hints
   (:data:`_SIDEBAR_INITIAL_POSITION_PX`,
   :data:`_NOTE_LIST_INITIAL_POSITION_PX`), and the initial *window
@@ -390,17 +406,26 @@ class MainWindow(  # pylint: disable=too-many-instance-attributes
 
         self.set_child(outer_paned)
 
-        # The single subscription this widget owns: on every
-        # ``notify::view-mode`` the handler flushes the editor's
-        # pending autosave (so any just-typed edits hit disk under the
-        # current note id), refreshes the view from the repository
-        # (so its buffer reflects the just-saved source), and then
-        # swaps the stack's visible child. Both flush and refresh are
-        # idempotent, so doing them unconditionally keeps the dispatch
-        # branch-free.
+        # Subscription 1 of 2: on every ``notify::view-mode`` the
+        # handler flushes the editor's pending autosave (so any
+        # just-typed edits hit disk under the current note id),
+        # refreshes the view from the repository (so its buffer
+        # reflects the just-saved source), and then swaps the stack's
+        # visible child. Both flush and refresh are idempotent, so
+        # doing them unconditionally keeps the dispatch branch-free.
         self._app_state.connect(
             "notify::view-mode",
             self._on_view_mode_changed,
+        )
+
+        # Subscription 2 of 2: on every ``notes-changed`` the handler
+        # re-queries and re-renders the two data-driven panes so a
+        # create / edit / delete propagates to the note list and the
+        # sidebar tag section without a manual reload — even when the
+        # filter and selection are unchanged.
+        self._note_controller.connect(
+            "notes-changed",
+            self._on_notes_changed,
         )
 
     def _on_view_mode_changed(
@@ -430,3 +455,16 @@ class MainWindow(  # pylint: disable=too-many-instance-attributes
         self._right_pane_stack.set_visible_child_name(
             _stack_name_for_mode(self._app_state.view_mode),
         )
+
+    def _on_notes_changed(self, _controller: NoteController) -> None:
+        """Re-query and re-render the data-driven panes after a mutation.
+
+        Both refreshes are idempotent and read from the repository, so a
+        single synchronous call per emission keeps the note list and the
+        sidebar tag section in step with disk without any diffing here.
+        The ``notes-changed`` marshaller passes no extra args, so the
+        handler takes only the emitting controller — matching the
+        signal's ``()`` parameter spec.
+        """
+        self._note_list.refresh()
+        self._sidebar.refresh()

@@ -79,10 +79,15 @@ def _test_application() -> Gtk.Application:
 class _FakeNoteRepository:
     notes: dict[str, Note]
     update_calls: list[tuple[str, str, datetime]]
+    tag_pairs: tuple[tuple[str, int], ...]
 
     def __init__(self) -> None:
         self.notes = {}
         self.update_calls = []
+        # Mutable so a test can put a tag "on disk" and then drive a
+        # refresh through ``notes-changed``; defaults empty so the
+        # existing tests (which never touch it) keep seeing no tags.
+        self.tag_pairs = ()
 
     def list_all(self) -> list[Note]:
         return list(self.notes.values())
@@ -129,7 +134,7 @@ class _FakeNoteRepository:
         raise NotImplementedError
 
     def list_tags(self) -> tuple[tuple[str, int], ...]:
-        return ()
+        return self.tag_pairs
 
 
 class _FakeAttachmentStore:
@@ -603,6 +608,158 @@ class MainWindowViewModeChangeFlushAndRefreshTests(unittest.TestCase):
             window._right_pane_stack.get_visible_child_name(),
             "edit",
         )
+
+
+@unittest.skipUnless(_display_available(), "no GDK display")
+class MainWindowNotesChangedFanOutTests(unittest.TestCase):
+    """The window fans a controller ``notes-changed`` out to the two
+    data-driven panes (:class:`NoteList`, :class:`Sidebar`).
+
+    This is the wiring the README's signal-flow section documents
+    ("``notes-changed`` → listeners re-query"), which had no listener
+    before this change: an edit to the *currently selected* note under
+    an *unchanged* filter fired the signal but refreshed nothing, so the
+    list row and the sidebar tag counts went stale until the next
+    selection change.
+
+    The tests drive the controller's ``notes-changed`` signal directly
+    rather than through a mutating controller method, isolating the
+    window's fan-out under test from the fake repository's stubbed
+    persistence (its ``insert`` / ``update_source`` are not exercised).
+    """
+
+    def _build_window(
+        self,
+        *,
+        select_note: bool = False,
+    ) -> tuple[MainWindow, _FakeNoteRepository, AppState]:
+        """Build a window over a fake repo seeded with one note.
+
+        With ``select_note`` the seeded note is selected before the
+        window is constructed, so the note list highlights it during its
+        construction-time refresh.
+        """
+        application = _test_application()
+        notes = _FakeNoteRepository()
+        notes.notes["n1"] = Note(
+            id="n1",
+            title="Hello",
+            source="= Hello\n\nbody.\n",
+            snippet="body.",
+            tags=(),
+            created_at=_FIXED_NOW,
+            modified_at=_FIXED_NOW,
+        )
+        state = AppState()
+        if select_note:
+            state.set_selected_note_id("n1")
+        controller = NoteController(
+            repository=notes,
+            attachments=_FakeAttachmentStore(),
+            app_state=state,
+        )
+        window = MainWindow(
+            application=application,
+            note_repository=notes,
+            note_controller=controller,
+            app_state=state,
+        )
+        return window, notes, state
+
+    @staticmethod
+    def _add_note(repo: _FakeNoteRepository, note_id: str) -> None:
+        """Put another note "on disk" without firing any AppState signal."""
+        repo.notes[note_id] = Note(
+            id=note_id,
+            title=f"Note {note_id}",
+            source=f"= Note {note_id}\n",
+            snippet="",
+            tags=(),
+            created_at=_FIXED_NOW,
+            modified_at=_FIXED_NOW,
+        )
+
+    def test_notes_changed_refreshes_note_list(self) -> None:
+        """A ``notes-changed`` emission re-queries the note list: a note
+        added since construction shows up, and the count label updates."""
+        window, repo, _state = self._build_window()
+        note_list = window._note_list
+        # The construction-time refresh shows exactly the seeded note.
+        self.assertIn("n1", note_list._row_for_note_id)
+        self.assertNotIn("n2", note_list._row_for_note_id)
+        self.assertEqual(note_list._count_label.get_text(), "1 notes")
+
+        # A second note appears on disk; nothing has prompted a refresh.
+        self._add_note(repo, "n2")
+        self.assertNotIn("n2", note_list._row_for_note_id)
+
+        # The controller announces the mutation; the window must fan it
+        # out to the list, which re-queries and re-renders.
+        window._note_controller.emit("notes-changed")
+
+        self.assertIn("n2", note_list._row_for_note_id)
+        self.assertEqual(note_list._count_label.get_text(), "2 notes")
+
+    def test_notes_changed_refreshes_sidebar_tags(self) -> None:
+        """A ``notes-changed`` emission rebuilds the sidebar Tags store
+        from ``list_tags()``."""
+        window, repo, _state = self._build_window()
+        sidebar = window._sidebar
+        # The fake's ``list_tags`` starts empty, so no tag rows yet.
+        self.assertEqual(sidebar.tag_store.get_n_items(), 0)
+
+        # A tag now exists on disk; emit the mutation signal.
+        repo.tag_pairs = (("project", 3),)
+        window._note_controller.emit("notes-changed")
+
+        self.assertEqual(sidebar.tag_store.get_n_items(), 1)
+        item = sidebar.tag_store.get_item(0)
+        # ``_TagItem`` is private to ``ui.sidebar``; read its public
+        # fields by name (mirrors ``ui.test_sidebar``) rather than
+        # importing the class.
+        self.assertEqual(getattr(item, "name", None), "project")
+        self.assertEqual(getattr(item, "count", None), 3)
+
+    def test_notes_changed_preserves_selection(self) -> None:
+        """A refresh rebuilds every row, but the still-existing selected
+        note keeps its (new) row selected."""
+        window, repo, _state = self._build_window(select_note=True)
+        note_list = window._note_list
+        list_box = note_list._list_box
+        # The seeded note is selected after the construction-time refresh.
+        self.assertIs(
+            list_box.get_selected_row(),
+            note_list._row_for_note_id["n1"],
+        )
+
+        # A non-destructive change (a new note appears), then the signal.
+        # The refresh rebuilds the rows, but "n1" still exists so its new
+        # row stays selected.
+        self._add_note(repo, "n2")
+        window._note_controller.emit("notes-changed")
+
+        self.assertIs(
+            list_box.get_selected_row(),
+            note_list._row_for_note_id["n1"],
+        )
+
+    def test_notes_changed_drops_selection_when_selected_note_gone(
+        self,
+    ) -> None:
+        """If the selected note no longer exists after the mutation, the
+        refresh leaves nothing selected — existing ``_apply_highlight``
+        behaviour, no new logic in the window."""
+        window, repo, _state = self._build_window(select_note=True)
+        note_list = window._note_list
+        list_box = note_list._list_box
+        self.assertIsNotNone(list_box.get_selected_row())
+
+        # The selected note disappears from disk; the refresh finds no
+        # row to reselect.
+        del repo.notes["n1"]
+        window._note_controller.emit("notes-changed")
+
+        self.assertIsNone(list_box.get_selected_row())
 
 
 if __name__ == "__main__":
