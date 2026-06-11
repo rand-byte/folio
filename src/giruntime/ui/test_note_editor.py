@@ -18,12 +18,13 @@ from asciidoc.ast import (
 )
 from asciidoc.inline_parser import parse_inline as _parse_inline
 from asciidoc.parser import parse as _parse_asciidoc
-from giruntime.controllers.app_state import AppState
-from giruntime.controllers.note_controller import NoteController
 from enums import AdmonitionKind, AttachmentRejectionReason, MimeKind
 from models.attachment import Attachment
 from models.note import Note
 from storage.protocols import AttachmentRejected
+from giruntime.controllers.app_state import AppState
+from giruntime.controllers.note_controller import NoteController
+from giruntime.controllers.note_list_store import NoteListStore
 from giruntime.ui.note_editor import (
     AUTOSAVE_DEBOUNCE_MS,
     LANGUAGE_ID,
@@ -101,12 +102,12 @@ class _FakeNoteRepository:
         raise NotImplementedError
 
     def list_all(self) -> list[Note]:
-        raise NotImplementedError
+        return list(self.notes.values())
 
     def search(self, _query: str) -> list[Note]:
         raise NotImplementedError
 
-    def insert(self, _note: Note) -> None:
+    def insert(self, _note: Note) -> Note:
         raise NotImplementedError
 
     def update_source(
@@ -114,10 +115,10 @@ class _FakeNoteRepository:
         note_id: str,
         source: str,
         modified_at: datetime,
-    ) -> None:
+    ) -> Note:
         self.update_calls.append((note_id, source, modified_at))
         existing = self.notes[note_id]
-        self.notes[note_id] = Note(
+        updated = Note(
             id=existing.id,
             title=existing.title,
             source=source,
@@ -126,6 +127,8 @@ class _FakeNoteRepository:
             created_at=existing.created_at,
             modified_at=modified_at,
         )
+        self.notes[note_id] = updated
+        return updated
 
     def delete(self, _note_id: str) -> None:
         raise NotImplementedError
@@ -155,7 +158,7 @@ class _RaisingNoteRepository(  # pylint: disable=abstract-method
         note_id: str,
         source: str,
         modified_at: datetime,
-    ) -> None:
+    ) -> Note:
         # Record the attempt so tests can assert it was made before
         # raising. ``OperationalError`` is a subclass of
         # ``DatabaseError`` and is the most common storage failure
@@ -632,14 +635,16 @@ class NoteEditorConstructionTests(unittest.TestCase):
         repo = _FakeNoteRepository()
         repo.notes["n1"] = _make_note("n1")
         state = AppState()
+        store = NoteListStore(repository=repo)
+        store.load()
         controller = NoteController(
-            repository=repo,
+            note_store=store,
             attachments=_FakeAttachmentStore(),
             app_state=state,
         )
         backend = _FakeTimeoutBackend()
         editor = NoteEditor(
-            note_repository=repo,
+            note_store=store,
             note_controller=controller,
             app_state=state,
             schedule_timeout=backend.schedule,
@@ -662,14 +667,16 @@ class NoteEditorConstructionTests(unittest.TestCase):
         # Select BEFORE constructing the editor — the initial load
         # path must pick this up.
         state.set_selected_note_id("n1")
+        store = NoteListStore(repository=repo)
+        store.load()
         controller = NoteController(
-            repository=repo,
+            note_store=store,
             attachments=_FakeAttachmentStore(),
             app_state=state,
         )
         backend = _FakeTimeoutBackend()
         editor = NoteEditor(
-            note_repository=repo,
+            note_store=store,
             note_controller=controller,
             app_state=state,
             schedule_timeout=backend.schedule,
@@ -721,6 +728,7 @@ class NoteEditorAutosaveTests(unittest.TestCase):
         *,
         note_id: str = "n1",
         source: str = "= Hi\n\nbody.\n",
+        extra_notes: dict[str, Note] | None = None,
     ) -> tuple[
         NoteEditor,
         _FakeNoteRepository,
@@ -729,16 +737,22 @@ class NoteEditorAutosaveTests(unittest.TestCase):
     ]:
         repo = _FakeNoteRepository()
         repo.notes[note_id] = _make_note(note_id, source=source)
+        # Extra notes must be present *before* the store loads so the
+        # editor (which reads bodies from the store) can resolve them.
+        for extra_id, extra_note in (extra_notes or {}).items():
+            repo.notes[extra_id] = extra_note
         state = AppState()
         state.set_selected_note_id(note_id)
+        store = NoteListStore(repository=repo)
+        store.load()
         controller = NoteController(
-            repository=repo,
+            note_store=store,
             attachments=_FakeAttachmentStore(),
             app_state=state,
         )
         backend = _FakeTimeoutBackend()
         editor = NoteEditor(
-            note_repository=repo,
+            note_store=store,
             note_controller=controller,
             app_state=state,
             schedule_timeout=backend.schedule,
@@ -833,8 +847,9 @@ class NoteEditorAutosaveTests(unittest.TestCase):
     def test_selection_change_flushes_pending_save_for_old_note(self) -> None:
         # The plan's lossless-switch invariant: switching notes
         # while a save is pending must not lose those edits.
-        editor, repo, state, backend = self._editor_with_selection()
-        repo.notes["n2"] = _make_note("n2", source="= Other\n")
+        editor, repo, state, backend = self._editor_with_selection(
+            extra_notes={"n2": _make_note("n2", source="= Other\n")},
+        )
         # User types in n1 …
         editor._buffer.insert(editor._buffer.get_end_iter(), "!")
         self.assertEqual(backend.pending_count, 1)
@@ -862,8 +877,10 @@ class NoteEditorAutosaveTests(unittest.TestCase):
         repo.notes["n1"] = _make_note("n1")
         state = AppState()
         state.set_selected_note_id("n1")
+        store = NoteListStore(repository=repo)
+        store.load()
         controller = NoteController(
-            repository=repo,
+            note_store=store,
             attachments=_FakeAttachmentStore(),
             app_state=state,
         )
@@ -874,7 +891,7 @@ class NoteEditorAutosaveTests(unittest.TestCase):
         )
         backend = _FakeTimeoutBackend()
         editor = NoteEditor(
-            note_repository=repo,
+            note_store=store,
             note_controller=controller,
             app_state=state,
             schedule_timeout=backend.schedule,
@@ -910,14 +927,16 @@ class NoteEditorToolbarTests(unittest.TestCase):
         repo.notes["n1"] = _make_note("n1", source="")
         state = AppState()
         state.set_selected_note_id("n1")
+        store = NoteListStore(repository=repo)
+        store.load()
         controller = NoteController(
-            repository=repo,
+            note_store=store,
             attachments=_FakeAttachmentStore(),
             app_state=state,
         )
         backend = _FakeTimeoutBackend()
         return NoteEditor(
-            note_repository=repo,
+            note_store=store,
             note_controller=controller,
             app_state=state,
             schedule_timeout=backend.schedule,
@@ -1232,26 +1251,28 @@ class ImageButtonDialogFlowTests(unittest.TestCase):
     ]:
         repo = _FakeNoteRepository()
         repo.notes["n1"] = _make_note("n1", source="")
-        store = _FakeAttachmentStore()
+        attachment_store = _FakeAttachmentStore()
         state = AppState()
         if select_note:
             state.set_selected_note_id("n1")
+        note_store = NoteListStore(repository=repo)
+        note_store.load()
         controller = NoteController(
-            repository=repo,
-            attachments=store,
+            note_store=note_store,
+            attachments=attachment_store,
             app_state=state,
         )
         backend = _FakeTimeoutBackend()
         opener = _FakeFileDialogOpener()
         editor = NoteEditor(
-            note_repository=repo,
+            note_store=note_store,
             note_controller=controller,
             app_state=state,
             schedule_timeout=backend.schedule,
             cancel_timeout=backend.cancel,
             file_dialog_opener=opener,
         )
-        return editor, repo, store, opener, controller
+        return editor, repo, attachment_store, opener, controller
 
     def _image_button(self, editor: NoteEditor) -> Gtk.Button:
         toolbar = editor.get_first_child()
@@ -1412,15 +1433,17 @@ class ImageButtonDialogFlowTests(unittest.TestCase):
         store = _FakeAttachmentStore()
         state = AppState()
         state.set_selected_note_id("n1")
+        note_store = NoteListStore(repository=repo)
+        note_store.load()
         controller = NoteController(
-            repository=repo,
+            note_store=note_store,
             attachments=store,
             app_state=state,
         )
         backend = _FakeTimeoutBackend()
         opener = _FakeFileDialogOpener()
         editor = NoteEditor(
-            note_repository=repo,
+            note_store=note_store,
             note_controller=controller,
             app_state=state,
             schedule_timeout=backend.schedule,

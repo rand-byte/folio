@@ -4,10 +4,12 @@ Principles & invariants
 -----------------------
 * :class:`NoteView` is the pane in which the user reads a note. It is
   stateless with respect to notes — every render rebuilds the buffer
-  from scratch, driven by :class:`AppState`. It never calls into
-  ``storage`` directly with concrete classes; reads go through
-  :class:`NoteRepositoryProtocol` and (from build step 11)
-  :class:`AttachmentStoreProtocol`.
+  from scratch, driven by :class:`AppState`. The body it renders comes
+  from the in-memory :class:`controllers.note_list_store.NoteListStore`
+  (never a database read); images still resolve through
+  :class:`AttachmentStoreProtocol`. It re-renders on
+  ``notify::selected-note-id`` and on a store ``items-changed`` that
+  touches the displayed note (an edit replaces that note's row).
 * The pane's layout is the three-step stack from §2 of the plan:
   ``Gtk.ScrolledWindow`` (horizontal AUTOMATIC, vertical AUTOMATIC) →
   :class:`ArticleContainer` (a ``Gtk.Widget`` subclass with a single
@@ -177,6 +179,7 @@ from config.defaults import (
 )
 from enums import LinkScheme, ParseErrorKind
 from giruntime.controllers.app_state import AppState
+from giruntime.controllers.note_list_store import NoteListStore
 from giruntime.ui._dates import format_date_long
 from giruntime.ui.note_render.tag_table import (
     TagName,
@@ -190,7 +193,6 @@ from models.parse_error import ParseError
 from storage.protocols import (
     AttachmentStoreProtocol,
     ImageBytesResolver,
-    NoteRepositoryProtocol,
 )
 
 
@@ -993,7 +995,7 @@ class NoteView(Gtk.Box):
     # :class:`MainWindow` needs the value to size the initial window
     # (:meth:`preferred_column_width_px`); caching the int keeps it tied
     # to the same M-width measurement without retaining the widget.
-    _note_repository: NoteRepositoryProtocol
+    _note_store: NoteListStore
     _attachments: AttachmentStoreProtocol | None
     _app_state: AppState
     _buffer: Gtk.TextBuffer
@@ -1008,12 +1010,12 @@ class NoteView(Gtk.Box):
     def __init__(
         self,
         *,
-        note_repository: NoteRepositoryProtocol,
+        note_store: NoteListStore,
         app_state: AppState,
         attachments: AttachmentStoreProtocol | None = None,
     ) -> None:
         super().__init__(orientation=Gtk.Orientation.VERTICAL, spacing=0)
-        self._note_repository = note_repository
+        self._note_store = note_store
         self._attachments = attachments
         self._app_state = app_state
         # ``_current_note_id`` is the note whose source is presently
@@ -1178,14 +1180,26 @@ class NoteView(Gtk.Box):
         # method so disconnecting later is simple if the widget is ever
         # torn down — but step 8 has a single window for the lifetime
         # of the application, so explicit disconnection isn't wired up.
-        self._app_state.connect(
-            "notify::selected-note-id",
-            self._on_selected_note_changed,
-        )
+        self._subscribe_to_state_and_store()
 
         # Initial render: pick up whatever ``selected_note_id`` is set
         # to before the view was constructed.
         self.refresh()
+
+    def _subscribe_to_state_and_store(self) -> None:
+        """Wire the two re-render triggers: selection and store edits."""
+        self._app_state.connect(
+            "notify::selected-note-id",
+            self._on_selected_note_changed,
+        )
+        # Re-render when the *displayed* note's row is replaced in the
+        # store (an edit splices a fresh ``NoteItem`` at its position).
+        # Scoped to the current note so unrelated create / edit / delete
+        # churn doesn't reset the reader's scroll position.
+        self._note_store.connect(
+            "items-changed",
+            self._on_store_items_changed,
+        )
 
     # ------------------------------------------------------------------
     # Public API
@@ -1240,7 +1254,7 @@ class NoteView(Gtk.Box):
             self._hide_error_banner()
             return
         try:
-            note = self._note_repository.get(note_id)
+            note = self._note_store.get_note(note_id)
         except KeyError:
             self._current_note_id = None
             self._current_note = None
@@ -1329,6 +1343,34 @@ class NoteView(Gtk.Box):
     ) -> None:
         """Refresh on a selection change. Notify-only handler."""
         self.refresh()
+
+    def _on_store_items_changed(
+        self,
+        _model: NoteListStore,
+        _position: int,
+        _removed: int,
+        _added: int,
+    ) -> None:
+        """Re-render only when the *currently displayed* note changed.
+
+        An edit replaces the note's row (``splice``) and a delete
+        removes it; either way the store emits ``items-changed``. The
+        view ignores changes that don't touch the displayed note — it
+        compares the freshly-read value against the rendered one — so
+        editing or creating *other* notes never disturbs the reader.
+        """
+        if self._current_note_id is None:
+            return
+        try:
+            latest = self._note_store.get_note(self._current_note_id)
+        except KeyError:
+            # The displayed note was deleted; the controller also clears
+            # the selection, but refreshing here keeps buffer and banner
+            # in lockstep without depending on signal ordering.
+            self.refresh()
+            return
+        if latest != self._current_note:
+            self.refresh()
 
     # ------------------------------------------------------------------
     # Renderer wiring

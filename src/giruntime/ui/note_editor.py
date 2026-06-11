@@ -135,11 +135,11 @@ from gi.repository import Gio, GLib, GObject, Gtk, GtkSource
 
 from giruntime.controllers.app_state import AppState
 from giruntime.controllers.note_controller import NoteController
+from giruntime.controllers.note_list_store import NoteListStore
 from giruntime.ui._image_picker import (
     FileDialogOpener,
     default_file_dialog_opener,
 )
-from storage.protocols import NoteRepositoryProtocol
 
 
 # ---------------------------------------------------------------------------
@@ -576,7 +576,9 @@ def _configure_search_path(manager: GtkSource.LanguageManager) -> None:
     :data:`_LANGUAGE_MANAGER`.
     """
     existing = list(manager.get_search_path() or ())
-    blob = GLib.Bytes.new(
+    # ``GLib.Bytes.new`` is provided by the gi metaclass; pylint's
+    # astroid introspection misses it in the full-source lint run.
+    blob = GLib.Bytes.new(  # pylint: disable=no-member
         importlib.resources.files("giruntime.ui").joinpath(_GRESOURCE_NAME).read_bytes()
     )
     Gio.resources_register(Gio.Resource.new_from_data(blob))
@@ -649,9 +651,11 @@ class NoteEditor(Gtk.Box):  # pylint: disable=too-many-instance-attributes
     """The source-editing pane.
 
     Construction signature is keyword-only and mirrors the other
-    panes' shape: a repository (read-only — the editor never writes
-    directly), the controller that owns ``update_source``, and the
-    :class:`AppState` instance the rest of the UI is wired to.
+    panes' shape: the in-memory note store (read-only here — the editor
+    never mutates it directly), the controller that owns
+    ``update_source``, and the :class:`AppState` instance the rest of
+    the UI is wired to. The body of the selected note is read from the
+    store, not from the database.
 
     The two timeout primitives default to GLib's main-loop-backed
     versions; tests override them with fakes so debounce behaviour can
@@ -667,7 +671,7 @@ class NoteEditor(Gtk.Box):  # pylint: disable=too-many-instance-attributes
     field is read or written from at least two methods.
     """
 
-    _note_repository: NoteRepositoryProtocol
+    _note_store: NoteListStore
     _note_controller: NoteController
     _app_state: AppState
     _schedule_timeout: TimeoutScheduler
@@ -711,7 +715,7 @@ class NoteEditor(Gtk.Box):  # pylint: disable=too-many-instance-attributes
     def __init__(  # pylint: disable=too-many-arguments
         self,
         *,
-        note_repository: NoteRepositoryProtocol,
+        note_store: NoteListStore,
         note_controller: NoteController,
         app_state: AppState,
         schedule_timeout: TimeoutScheduler = _default_timeout_scheduler,
@@ -719,7 +723,7 @@ class NoteEditor(Gtk.Box):  # pylint: disable=too-many-instance-attributes
         file_dialog_opener: FileDialogOpener = default_file_dialog_opener,
     ) -> None:
         super().__init__(orientation=Gtk.Orientation.VERTICAL, spacing=0)
-        self._note_repository = note_repository
+        self._note_store = note_store
         self._note_controller = note_controller
         self._app_state = app_state
         self._schedule_timeout = schedule_timeout
@@ -1198,7 +1202,7 @@ class NoteEditor(Gtk.Box):  # pylint: disable=too-many-instance-attributes
                 self._current_note_id = None
                 return
             try:
-                note = self._note_repository.get(note_id)
+                note = self._note_store.get_note(note_id)
             except KeyError:
                 self._buffer.set_text("")
                 self._current_note_id = None

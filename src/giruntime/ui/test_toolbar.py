@@ -26,6 +26,7 @@ from gi.repository import Gdk, Gtk
 
 from giruntime.controllers.app_state import AppState
 from giruntime.controllers.note_controller import NoteController
+from giruntime.controllers.note_list_store import NoteListStore
 from models.attachment import Attachment
 from models.note import Note
 import giruntime.ui.toolbar as toolbar_module
@@ -73,7 +74,7 @@ class _FakeNoteRepository:
     def search(self, _query: str) -> list[Note]:
         raise NotImplementedError
 
-    def insert(self, _note: Note) -> None:
+    def insert(self, _note: Note) -> Note:
         raise NotImplementedError
 
     def update_source(
@@ -81,7 +82,7 @@ class _FakeNoteRepository:
         _note_id: str,
         _source: str,
         _modified_at: datetime,
-    ) -> None:
+    ) -> Note:
         raise NotImplementedError
 
     def delete(self, _note_id: str) -> None:
@@ -113,15 +114,19 @@ class _FakeAttachmentStore:
 def _build_toolbar(app_state: AppState) -> Toolbar:
     """Construct a :class:`Toolbar` wired to fake collaborators."""
     repository = _FakeNoteRepository()
-    controller = NoteController(
+    store = NoteListStore(
         repository=repository,
-        attachments=_FakeAttachmentStore(),
-        app_state=app_state,
         clock=lambda: _FIXED_NOW,
         id_factory=lambda: "id",
     )
+    store.load()
+    controller = NoteController(
+        note_store=store,
+        attachments=_FakeAttachmentStore(),
+        app_state=app_state,
+    )
     return Toolbar(
-        note_repository=repository,
+        note_store=store,
         note_controller=controller,
         app_state=app_state,
     )

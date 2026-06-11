@@ -70,11 +70,11 @@ from gi.repository import GObject, Gtk
 from enums import ViewMode
 from giruntime.controllers.app_state import AppState
 from giruntime.controllers.note_controller import NoteController, make_initial_source
+from giruntime.controllers.note_list_store import NoteListStore
 from giruntime.ui.dialogs import (
     ConfirmDialogPresenter,
     default_confirm_dialog_presenter,
 )
-from storage.protocols import NoteRepositoryProtocol
 
 
 # ---------------------------------------------------------------------------
@@ -119,7 +119,7 @@ class Toolbar(  # pylint: disable=too-many-instance-attributes
 ):
     """The application's top header bar."""
 
-    _note_repository: NoteRepositoryProtocol
+    _note_store: NoteListStore
     _note_controller: NoteController
     _app_state: AppState
     _confirm_dialog_presenter: ConfirmDialogPresenter
@@ -136,7 +136,7 @@ class Toolbar(  # pylint: disable=too-many-instance-attributes
     def __init__(
         self,
         *,
-        note_repository: NoteRepositoryProtocol,
+        note_store: NoteListStore,
         note_controller: NoteController,
         app_state: AppState,
         confirm_dialog_presenter: ConfirmDialogPresenter = (
@@ -144,7 +144,7 @@ class Toolbar(  # pylint: disable=too-many-instance-attributes
         ),
     ) -> None:
         super().__init__()
-        self._note_repository = note_repository
+        self._note_store = note_store
         self._note_controller = note_controller
         self._app_state = app_state
         self._confirm_dialog_presenter = confirm_dialog_presenter
@@ -306,7 +306,7 @@ class Toolbar(  # pylint: disable=too-many-instance-attributes
         if note_id is None:
             return
         try:
-            note = self._note_repository.get(note_id)
+            note = self._note_store.get_note(note_id)
         except KeyError:
             return
 

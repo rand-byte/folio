@@ -22,10 +22,11 @@ from datetime import UTC, datetime
 
 from gi.repository import Gdk, GLib, Gtk
 
-from giruntime.controllers.app_state import AppState
 from enums import SmartFilter
 from models.note import Note
 from search.note_filter import TagSelection
+from giruntime.controllers.app_state import AppState
+from giruntime.controllers.note_list_store import NoteListStore
 from giruntime.ui.sidebar import (
     Sidebar,
     count_untagged,
@@ -121,7 +122,7 @@ class _FakeNoteRepository:
     def search(self, query: str) -> list[Note]:
         raise NotImplementedError
 
-    def insert(self, note: Note) -> None:
+    def insert(self, note: Note) -> Note:
         raise NotImplementedError
 
     def update_source(
@@ -129,7 +130,7 @@ class _FakeNoteRepository:
         note_id: str,
         source: str,
         modified_at: datetime,
-    ) -> None:
+    ) -> Note:
         raise NotImplementedError
 
     def delete(self, note_id: str) -> None:
@@ -159,7 +160,7 @@ def _pump(iterations: int = 200) -> None:
 
 def _tag_position(sidebar: Sidebar, name: str) -> int:
     """Return the store position of the tag row labelled ``name``."""
-    store = sidebar.tag_store
+    store = sidebar.tag_model
     for index in range(store.get_n_items()):
         item = store.get_item(index)
         if getattr(item, "name", None) == name:
@@ -185,9 +186,11 @@ class SidebarSelectionRenderingTests(unittest.TestCase):
             ],
             tag_pairs=(("baking", 1), ("bread", 2)),
         )
+        store = NoteListStore(repository=repository)
+        store.load()
         self.app_state = AppState()
         self.sidebar = Sidebar(
-            note_repository=repository,
+            note_store=store,
             app_state=self.app_state,
         )
         self.window = Gtk.Window()
@@ -251,9 +254,11 @@ class SidebarMultiSelectTests(unittest.TestCase):
             ],
             tag_pairs=(("baking", 1), ("bread", 2)),
         )
+        store = NoteListStore(repository=repository)
+        store.load()
         self.app_state = AppState()
         self.sidebar = Sidebar(
-            note_repository=repository,
+            note_store=store,
             app_state=self.app_state,
         )
         self.window = Gtk.Window()

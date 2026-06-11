@@ -164,17 +164,18 @@ class _FakeNoteRepository:
             or needle in n.source.lower()
         ]
 
-    def insert(self, note: Note) -> None:
+    def insert(self, note: Note) -> Note:
         self.notes[note.id] = note
+        return note
 
     def update_source(
         self,
         note_id: str,
         source: str,
         modified_at: datetime,
-    ) -> None:
+    ) -> Note:
         existing = self.notes[note_id]
-        self.notes[note_id] = Note(
+        updated = Note(
             id=existing.id,
             title=existing.title,
             source=source,
@@ -183,6 +184,8 @@ class _FakeNoteRepository:
             created_at=existing.created_at,
             modified_at=modified_at,
         )
+        self.notes[note_id] = updated
+        return updated
 
     def delete(self, note_id: str) -> None:
         del self.notes[note_id]

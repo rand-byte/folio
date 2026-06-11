@@ -22,6 +22,20 @@ Principles & invariants
   On update, the note's ``note_tags`` rows are replaced (deleted, then
   re-inserted) in the same transaction; partial states are never
   visible to other readers.
+* :meth:`insert` and :meth:`update_source` **return the note as
+  persisted** — the caller's id / source / timestamps combined with
+  the freshly-derived ``title`` / ``snippet`` / ``tags``. This lets the
+  write-through in-memory model commit the exact row that hit disk
+  without a re-read or a re-derive (it cannot call ``derive_summary``
+  itself — the controllers layer must not import :mod:`asciidoc`).
+  :meth:`update_source` recovers the one field it does not already hold,
+  ``created_at``, via ``UPDATE ... RETURNING created_at`` in the same
+  round trip.
+* :meth:`search`, :meth:`list_modified_since`, and :meth:`list_tags`
+  are **no longer on any UI path** after the write-through model
+  migration (the note list filters in memory; the sidebar derives tag
+  counts from the in-memory store). They remain for legacy callers and
+  their own tests; do not add new consumers.
 * :meth:`get`, :meth:`update_source`, :meth:`delete` raise
   :class:`KeyError` on an unknown id, matching the dict-like in-memory
   fake used by controller tests so production and test code paths are
@@ -141,7 +155,7 @@ class NoteRepository:
         )
         return _assemble_notes(cursor.fetchall())
 
-    def insert(self, note: Note) -> None:
+    def insert(self, note: Note) -> Note:
         # Title, snippet, and tags are derived here from the note's
         # source, not taken from the dataclass fields, so the repository
         # is the one and only place that maps source to cached state
@@ -168,13 +182,27 @@ class NoteRepository:
                     "INSERT INTO note_tags (note_id, tag) VALUES (?, ?)",
                     (note.id, tag),
                 )
+        # Return the note exactly as persisted: the caller's ``source``,
+        # timestamps, and id combined with the freshly-derived cached
+        # fields. ``summary.tags`` is already sorted / lowercased /
+        # deduplicated, matching what :meth:`get` would reassemble, so
+        # no extra query is needed.
+        return Note(
+            id=note.id,
+            title=summary.title,
+            source=note.source,
+            snippet=summary.snippet,
+            tags=summary.tags,
+            created_at=note.created_at,
+            modified_at=note.modified_at,
+        )
 
     def update_source(
         self,
         note_id: str,
         source: str,
         modified_at: datetime,
-    ) -> None:
+    ) -> Note:
         # Title, snippet, and tags are derived here, not in the
         # controller, so there is exactly one place that owns the
         # "source -> cached state" mapping. ``derive_summary`` parses
@@ -182,10 +210,15 @@ class NoteRepository:
         # saveable.
         summary = derive_summary(source)
         with self._db.transaction() as connection:
+            # ``RETURNING created_at`` (SQLite >= 3.35) hands back the
+            # one field not already in the caller's hand in the same
+            # round trip, so the derived :class:`Note` can be returned
+            # without a follow-up SELECT. A ``None`` row means no note
+            # matched the id.
             cursor = connection.execute(
                 "UPDATE notes "
                 "SET source = ?, title = ?, snippet = ?, modified_at = ? "
-                "WHERE id = ?",
+                "WHERE id = ? RETURNING created_at",
                 (
                     source,
                     summary.title,
@@ -194,8 +227,10 @@ class NoteRepository:
                     note_id,
                 ),
             )
-            if cursor.rowcount == 0:
+            row = cursor.fetchone()
+            if row is None:
                 raise KeyError(note_id)
+            created_at = datetime.fromisoformat(row["created_at"])
             # Tag rows are *replaced* on update so a removed ``:tags:``
             # entry actually disappears from the junction. The DELETE
             # + INSERT pair is atomic with the source UPDATE because
@@ -209,6 +244,15 @@ class NoteRepository:
                     "INSERT INTO note_tags (note_id, tag) VALUES (?, ?)",
                     (note_id, tag),
                 )
+        return Note(
+            id=note_id,
+            title=summary.title,
+            source=source,
+            snippet=summary.snippet,
+            tags=summary.tags,
+            created_at=created_at,
+            modified_at=modified_at,
+        )
 
     def delete(self, note_id: str) -> None:
         # ``note_tags.note_id`` is ``ON DELETE CASCADE``, so deleting

@@ -123,24 +123,45 @@ class NoteRepositoryProtocol(Protocol):
 
     def get(self, note_id: str) -> Note: ...
 
-    def list_modified_since(self, since: datetime) -> list[Note]: ...
+    def list_modified_since(self, since: datetime) -> list[Note]:
+        """Notes modified at/after ``since``. No longer on any UI path
+        after the write-through model migration — retained for legacy
+        callers and tests; do not add new consumers."""
 
     def list_all(self) -> list[Note]: ...
 
-    def search(self, query: str) -> list[Note]: ...
+    def search(self, query: str) -> list[Note]:
+        """Substring search across title/snippet/source. No longer on
+        any UI path after the write-through model migration (the note
+        list filters in memory) — retained for legacy callers and tests;
+        do not add new consumers."""
 
-    def insert(self, note: Note) -> None: ...
+    def insert(self, note: Note) -> Note:
+        """Persist ``note`` and return it **as stored** — i.e. with
+        ``title`` / ``snippet`` / ``tags`` freshly derived from
+        ``source`` by :func:`asciidoc.summary.derive_summary`. The
+        returned value is the write-through model's in-memory source of
+        truth for the new row, so callers never re-read or re-derive.
+        """
 
     def update_source(
         self,
         note_id: str,
         source: str,
         modified_at: datetime,
-    ) -> None: ...
+    ) -> Note:
+        """Persist a new ``source`` for ``note_id`` and return the
+        updated, derived :class:`Note`. Raises :class:`KeyError` on an
+        unknown id. ``created_at`` is preserved from the existing row;
+        every other field is the freshly-derived state."""
 
     def delete(self, note_id: str) -> None: ...
 
-    def list_tags(self) -> tuple[tuple[str, int], ...]: ...
+    def list_tags(self) -> tuple[tuple[str, int], ...]:
+        """Distinct tags with note counts, alphabetically. No longer on
+        any UI path after the write-through model migration (the sidebar
+        derives tag counts from the in-memory store) — retained for
+        legacy callers and tests; do not add new consumers."""
 
 
 class AttachmentStoreProtocol(Protocol):

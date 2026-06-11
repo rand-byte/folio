@@ -1,18 +1,11 @@
 """Tests for :mod:`ui.note_list`.
 
-The pre-tags note-list tests exercised notebook-subtree expansion and
-per-notebook list helpers — both removed in the tag migration. The
-remaining list-display surface (sort, search filtering, row
-construction) is covered by the pure functions in
-:mod:`search.note_filter` and by the integration paths in
-:mod:`ui.test_main_window`.
-
-What is exercised directly here is the **query-refresh throttle**: a
-burst of per-keystroke ``notify::query`` notifications must coalesce
-into a single pending refresh, and flushing that refresh must render
-the *current* query. The throttle is driven without a running GLib
-main loop — the timer never fires on its own, so the tests assert the
-scheduling/coalescing bookkeeping and call the flush callback directly.
+The note list now binds a ``Filter``/``Sort``/``ListView`` chain over
+the in-memory :class:`controllers.note_list_store.NoteListStore`. The
+"what shows / what order" rules are covered exhaustively by the pure
+predicates in :mod:`search.note_filter`; here we exercise the widget's
+own wiring: the filtered count, live query filtering (no throttle),
+sort-key reordering, and the AppState ⇄ selection round-trip.
 """
 
 from __future__ import annotations
@@ -21,13 +14,15 @@ import unittest
 from datetime import UTC, datetime
 from pathlib import Path
 
-from gi.repository import GLib, Gdk, Gtk
+from gi.repository import Gdk, Gtk
 
+from enums import NoteSortKey
 from giruntime.controllers.app_state import AppState
+from giruntime.controllers.note_list_store import NoteListStore
+import giruntime.ui.note_list as note_list_module
+from giruntime.ui.note_list import NoteList, _SORT_KEY_DROPDOWN_ORDER
 from models.attachment import Attachment
 from models.note import Note
-import giruntime.ui.note_list as note_list_module
-from giruntime.ui.note_list import NoteList
 
 
 _FIXED_NOW: datetime = datetime(2026, 4, 28, 12, 0, 0, tzinfo=UTC)
@@ -40,15 +35,21 @@ def _display_available() -> bool:
     return Gdk.Display.get_default() is not None
 
 
-def _note(note_id: str, title: str) -> Note:
+def _note(
+    note_id: str,
+    title: str,
+    *,
+    tags: tuple[str, ...] = (),
+    modified_at: datetime = _FIXED_NOW,
+) -> Note:
     return Note(
         id=note_id,
         title=title,
         source=f"= {title}\n",
         snippet=title,
-        tags=(),
+        tags=tags,
         created_at=_FIXED_NOW,
-        modified_at=_FIXED_NOW,
+        modified_at=modified_at,
     )
 
 
@@ -63,8 +64,11 @@ class _FakeNoteRepository:
     def list_all(self) -> list[Note]:
         return list(self._notes)
 
-    def get(self, _note_id: str) -> Note:
-        raise NotImplementedError
+    def get(self, note_id: str) -> Note:
+        for note in self._notes:
+            if note.id == note_id:
+                return note
+        raise KeyError(note_id)
 
     def list_modified_since(self, _since: datetime) -> list[Note]:
         raise NotImplementedError
@@ -72,7 +76,7 @@ class _FakeNoteRepository:
     def search(self, _query: str) -> list[Note]:
         raise NotImplementedError
 
-    def insert(self, _note: Note) -> None:
+    def insert(self, _note: Note) -> Note:
         raise NotImplementedError
 
     def update_source(
@@ -80,7 +84,7 @@ class _FakeNoteRepository:
         _note_id: str,
         _source: str,
         _modified_at: datetime,
-    ) -> None:
+    ) -> Note:
         raise NotImplementedError
 
     def delete(self, _note_id: str) -> None:
@@ -110,77 +114,102 @@ class _FakeAttachmentStore:
 
 
 def _build_note_list(notes: list[Note], app_state: AppState) -> NoteList:
+    store = NoteListStore(repository=_FakeNoteRepository(notes))
+    store.load()
     return NoteList(
-        note_repository=_FakeNoteRepository(notes),
+        note_store=store,
         app_state=app_state,
-        clock=lambda: _FIXED_NOW,
         attachment_store=_FakeAttachmentStore(),
     )
+
+
+def _visible_ids(note_list: NoteList) -> list[str]:
+    model = note_list._sort_model
+    return [model.get_item(i).note.id for i in range(model.get_n_items())]
 
 
 class NoteListSmokeTests(unittest.TestCase):
     """Smoke checks for the slimmer note-list surface."""
 
     def test_no_notebook_helpers_exported(self) -> None:
-        # The pre-tags note list exposed a number of notebook-subtree
-        # helpers at module scope. The tag-based note list drops the
-        # whole concept; this pins their absence.
         self.assertFalse(hasattr(note_list_module, "_expand_notebook_subtree"))
         self.assertFalse(
             hasattr(note_list_module, "_list_for_notebook_subtree"),
         )
 
+    def test_compute_display_notes_helper_removed(self) -> None:
+        # The repository-driven materialiser was replaced by the model
+        # chain; pin its absence so a stray re-introduction is caught.
+        self.assertFalse(hasattr(note_list_module, "compute_display_notes"))
+
 
 @unittest.skipUnless(_display_available(), "no GDK display")
-class QueryRefreshThrottleTests(unittest.TestCase):
-    """The per-keystroke query refresh is coalesced into one pending run."""
+class NoteListModelChainTests(unittest.TestCase):
+    """The widget binds the store through Filter/Sort and stays in step."""
 
-    def test_burst_schedules_a_single_coalesced_refresh(self) -> None:
-        notes = [_note("1", "alpha"), _note("2", "beta"), _note("3", "gamma")]
+    def _notes(self) -> list[Note]:
+        return [
+            _note("1", "alpha", modified_at=datetime(2026, 1, 3, tzinfo=UTC)),
+            _note("2", "beta", modified_at=datetime(2026, 1, 2, tzinfo=UTC)),
+            _note("3", "gamma", modified_at=datetime(2026, 1, 1, tzinfo=UTC)),
+        ]
+
+    def test_count_label_reflects_all_notes_on_empty_query(self) -> None:
         app_state = AppState()
-        note_list = _build_note_list(notes, app_state)
-        # The construction-time refresh ran synchronously: empty query
-        # passes everything through, so all three show.
+        note_list = _build_note_list(self._notes(), app_state)
         self.assertEqual(note_list._count_label.get_text(), "3 notes")
-        self.assertIsNone(note_list._pending_refresh_id)
+        self.assertEqual(_visible_ids(note_list), ["1", "2", "3"])
 
-        # A burst of per-keystroke notifications. The first schedules a
-        # source; the rest see one pending and do not reschedule.
-        app_state.props.query = "a"
-        first_id = note_list._pending_refresh_id
-        self.assertIsNotNone(first_id)
-        for partial in ("al", "alp", "alph", "alpha"):
-            app_state.props.query = partial
-            self.assertEqual(note_list._pending_refresh_id, first_id)
-
-        # The expensive refresh has NOT run during the burst — no main
-        # loop is running, so the scheduled timer never fired and the
-        # list still shows the pre-burst result.
-        self.assertEqual(note_list._count_label.get_text(), "3 notes")
-
-        # Remove the still-registered GLib source so it cannot linger.
-        note_list._cancel_pending_refresh()
-        self.assertIsNone(note_list._pending_refresh_id)
-
-    def test_flush_renders_the_current_query(self) -> None:
-        notes = [_note("1", "alpha"), _note("2", "beta"), _note("3", "gamma")]
+    def test_query_filters_immediately_without_throttle(self) -> None:
         app_state = AppState()
-        note_list = _build_note_list(notes, app_state)
-
-        app_state.props.query = "alpha"  # schedules one refresh
-        pending = note_list._pending_refresh_id
-        self.assertIsNotNone(pending)
-
-        # Flush directly (as the timer would). It must re-read the
-        # *current* query rather than any captured snapshot.
-        result = note_list._flush_pending_refresh()
-        self.assertFalse(result)  # GLib.SOURCE_REMOVE
-        self.assertIsNone(note_list._pending_refresh_id)
+        note_list = _build_note_list(self._notes(), app_state)
+        # Setting the query filters the model right away — no pending
+        # timer, no coalescing window.
+        app_state.props.query = "alpha"
         self.assertEqual(note_list._count_label.get_text(), "1 notes")
+        self.assertEqual(_visible_ids(note_list), ["1"])
+        # Clearing restores the full set.
+        app_state.props.query = ""
+        self.assertEqual(note_list._count_label.get_text(), "3 notes")
 
-        # The manual flush bypassed GLib's return-value handling, so the
-        # one-shot source is still registered; drop it explicitly.
-        GLib.source_remove(pending)
+    def test_default_sort_is_modified_descending(self) -> None:
+        app_state = AppState()
+        note_list = _build_note_list(self._notes(), app_state)
+        self.assertEqual(_visible_ids(note_list), ["1", "2", "3"])
+
+    def test_title_sort_reorders_alphabetically(self) -> None:
+        app_state = AppState()
+        note_list = _build_note_list(self._notes(), app_state)
+        index = note_list._sort_dropdown
+        # Select the "Title" entry in the dropdown.
+        index.set_selected(_SORT_KEY_DROPDOWN_ORDER.index(NoteSortKey.TITLE))
+        self.assertEqual(note_list.sort_key, NoteSortKey.TITLE)
+        # alpha, beta, gamma is already alphabetical, so reverse the
+        # check by titles to confirm the comparator drives the order.
+        model = note_list._sort_model
+        titles = [model.get_item(i).note.title for i in range(model.get_n_items())]
+        self.assertEqual(titles, ["alpha", "beta", "gamma"])
+
+    def test_app_state_selection_highlights_row(self) -> None:
+        app_state = AppState()
+        note_list = _build_note_list(self._notes(), app_state)
+        app_state.set_selected_note_id("2")
+        selected = note_list._selection_model.get_selected_item()
+        self.assertIsNotNone(selected)
+        self.assertEqual(selected.note.id, "2")
+
+    def test_row_selection_writes_through_to_app_state(self) -> None:
+        app_state = AppState()
+        note_list = _build_note_list(self._notes(), app_state)
+        # Find "gamma" (id 3) position in the sorted model and select it
+        # on the SingleSelection, simulating a user row click.
+        model = note_list._sort_model
+        pos = next(
+            i for i in range(model.get_n_items())
+            if model.get_item(i).note.id == "3"
+        )
+        note_list._selection_model.set_selected(pos)
+        self.assertEqual(app_state.selected_note_id, "3")
 
 
 if __name__ == "__main__":

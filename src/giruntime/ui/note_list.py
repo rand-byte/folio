@@ -3,90 +3,72 @@
 Principles & invariants
 -----------------------
 * :class:`NoteList` is the navigation pane between the sidebar and the
-  rendered article. It mirrors :class:`AppState` by observing
-  ``notify::selection``, ``notify::query``, and the local sort key.
-  Selection and sort changes are discrete and trigger a synchronous
-  :meth:`refresh`. Query changes arrive per keystroke (the search entry
-  is bound to :attr:`AppState.query`), so the query handler is
-  **throttled**: it schedules a single coalesced :meth:`refresh` per
-  :data:`_QUERY_REFRESH_DEBOUNCE_MS` window rather than re-filtering on
-  every character. The widget never caches a derived list that could
-  drift out of sync with the notifications that drive it.
-* The query refresh is a *throttle*, not a true debounce: it fires once
-  per window measured from the first keystroke of a burst, and
-  :meth:`refresh` re-reads the *current* :attr:`AppState.query` when the
-  timer fires (rather than capturing a snapshot), so intermediate
-  keystrokes are skipped and only the latest state renders. The pending
-  GLib source is cancelled at teardown so a queued refresh cannot fire
-  into a finalized widget. This mirrors the editor's autosave idiom
-  (a module constant plus a pending-id field), not a new mechanism.
-* Selection input flows in one direction: a click on a row → an
-  ``app_state.set_selected_note_id`` mutation → an
-  ``app_state`` ``notify::selected-note-id`` → the row is highlighted
-  here and the rendered view reacts in :class:`NoteView`.
-* The list-display computation is extracted as a free function,
-  :func:`compute_display_notes`, so tests can call it without
-  constructing GTK widgets at all. Tag-aware filtering happens in
-  :mod:`search.note_filter` against the materialised note list; this
-  widget only orchestrates the calls.
-* Sort key is a *local* concern of this widget. Stored on the widget
-  rather than on :class:`AppState` because the sort dropdown is only
-  visible from the note list.
-* The header reads ``"{N} notes"`` on the left and the sort dropdown
-  on the right — no notebook-name lead-in, no filter chips.
-* Each row carries an optional third line of dim ``#tag`` labels —
-  rendered only when ``note.tags`` is non-empty. The chip row is a
-  horizontal :class:`Gtk.Box` of :class:`Gtk.Label` widgets keyed off
-  the ``.tag-chip-row`` CSS class for the dim opacity treatment.
-* Date formatting is intentionally minimal — month abbreviation +
-  day — and lives in the shared :mod:`ui._dates` helper
+  rendered article. It binds a :class:`Gtk.ListView` to a model chain
+  layered over the in-memory
+  :class:`controllers.note_list_store.NoteListStore`::
+
+      store (NoteItem)
+        -> Gtk.FilterListModel(custom selection+query filter)
+        -> Gtk.SortListModel(custom sort-key sorter)
+        -> Gtk.SingleSelection
+        -> Gtk.ListView(SignalListItemFactory)
+
+  The list never re-reads the database and never materialises its own
+  Python list: selection, query, and sort changes invalidate the
+  ``Gtk.CustomFilter`` / ``Gtk.CustomSorter``, and the model chain
+  recomputes incrementally. Create / edit / delete in the store flow in
+  automatically because the chain observes the store's
+  ``items-changed``.
+* The filter and sorter reuse the per-item predicates in
+  :mod:`search.note_filter` (:func:`matches_selection`,
+  :func:`matches_query`, :func:`comparator_for`) so the "what shows" /
+  "what order" rules live in exactly one place, shared with the legacy
+  list API. The query needle is normalised once per query change via
+  :func:`normalize_query`, then the filter is invalidated; re-filtering
+  the resident list per keystroke is cheap, so no throttle is needed.
+* Selection is one source of truth: :class:`AppState`. A row click moves
+  the :class:`Gtk.SingleSelection`, whose ``notify::selected`` writes
+  through to ``app_state.set_selected_note_id``; a programmatic
+  selection change (e.g. the controller selecting a freshly created
+  note) arrives as ``notify::selected-note-id`` and is mirrored back
+  onto the ``SingleSelection``. A re-entrancy guard breaks the echo.
+* The header reads ``"{N} notes"`` on the left — the count of the
+  *filtered* model, kept live by observing the sorted model's
+  ``items-changed`` — and the sort dropdown on the right.
+* Each row shows title (bold, ellipsised), an optional snippet (two
+  wrapped lines), an optional ``#tag`` chip row (only when
+  ``note.tags`` is non-empty), and a right-aligned ``📎 N | <date>``
+  meta line. The 📎 count is read per-bind from the attachment store, so
+  it tracks edits (an edit replaces the row → re-bind).
+* Date formatting lives in the shared :mod:`ui._dates` helper
   (:func:`ui._dates.format_date_short`) so the note-list meta line and
-  the rendered-view metadata line agree on it without cross-importing.
-  Locale-aware formatting is a future polish item.
-* GTK 4 currency: :meth:`Gtk.Box.append`, :meth:`Gtk.ListBox.append`,
-  :class:`Gtk.DropDown`, ``row-activated``, ``notify::<prop>``
-  observation, and :func:`GLib.timeout_add` / :func:`GLib.source_remove`
-  for the query-refresh throttle.
+  the rendered-view metadata line agree without cross-importing.
+* GTK 4 currency: :class:`Gtk.ListView`, :class:`Gtk.SignalListItemFactory`,
+  :class:`Gtk.FilterListModel`, :class:`Gtk.SortListModel`,
+  :class:`Gtk.SingleSelection`, :class:`Gtk.CustomFilter`,
+  :class:`Gtk.CustomSorter`, and ``notify::<prop>`` observation.
 """
 
 from __future__ import annotations
 
-from collections.abc import Callable, Iterable
-from dataclasses import dataclass
-from datetime import UTC, datetime
+from collections.abc import Callable
 from typing import Final
 
-from gi.repository import GLib, GObject, Gtk, Pango
+from gi.repository import GObject, Gtk, Pango
 
 from enums import NoteSortKey
 from giruntime.controllers.app_state import AppState
+from giruntime.controllers.note_item import NoteItem
+from giruntime.controllers.note_list_store import NoteListStore
 from giruntime.ui._dates import format_date_short
 from models.note import Note
 from search.note_filter import (
-    Selection,
-    filter_by_query,
-    filter_by_selection,
-    sort_notes,
+    comparator_for,
+    matches_query,
+    matches_selection,
+    normalize_query,
 )
-from storage.protocols import (
-    AttachmentStoreProtocol,
-    NoteRepositoryProtocol,
-)
-
-
-# ---------------------------------------------------------------------------
-# Type aliases
-# ---------------------------------------------------------------------------
-
-
-type ClockFn = Callable[[], datetime]
-"""Callable returning a timezone-aware ``datetime`` representing 'now'.
-
-Kept for API parity with other panes; the tag migration removed the
-``Recent`` smart filter so the clock is no longer used to compute the
-displayed set. The constructor still accepts one for forward-compat
-and to keep the construction signature stable.
-"""
+from storage.protocols import AttachmentStoreProtocol
 
 
 # ---------------------------------------------------------------------------
@@ -109,17 +91,6 @@ _SORT_KEY_DROPDOWN_ORDER: Final[tuple[NoteSortKey, ...]] = (
 
 _DEFAULT_SORT_KEY: Final[NoteSortKey] = NoteSortKey.MODIFIED
 
-_QUERY_REFRESH_DEBOUNCE_MS: Final[int] = 150
-"""Throttle window for the query-driven refresh.
-
-The search entry is bound to :attr:`AppState.query` and notifies per
-keystroke; coalescing the resulting :meth:`NoteList.refresh` over this
-window keeps the expensive re-filter off the typing hot path. 150 ms
-matches the delay the old ``Gtk.SearchEntry:search-changed`` debounce
-carried before the binding moved the per-keystroke truth into
-:class:`AppState`.
-"""
-
 _HEADER_SPACING_PX: Final[int] = 6
 _ROW_SPACING_PX: Final[int] = 4
 _ROW_PADDING_PX: Final[int] = 8
@@ -138,80 +109,7 @@ _PAPERCLIP: Final[str] = "\U0001f4ce"
 _META_SEPARATOR: Final[str] = "|"
 
 _NOTES_LABEL_TEMPLATE: Final[str] = "{n} notes"
-"""Header text on the left — ``"N notes"`` regardless of selection.
-
-Replaces the former selection-name lead-in: with a flat tag system the
-note-list header no longer mirrors the sidebar choice, only its size.
-"""
-
-
-# ---------------------------------------------------------------------------
-# Default factories
-# ---------------------------------------------------------------------------
-
-
-def _default_clock() -> datetime:
-    return datetime.now(UTC)
-
-
-# ---------------------------------------------------------------------------
-# Pure helpers
-# ---------------------------------------------------------------------------
-
-
-def compute_display_notes(
-    *,
-    note_repository: NoteRepositoryProtocol,
-    selection: Selection,
-    query: str,
-    sort_key: NoteSortKey,
-) -> list[Note]:
-    """Compute the filtered, sorted note list shown in the middle pane.
-
-    Pure with respect to its inputs (except for the call to
-    :meth:`note_repository.list_all`, which is the obvious storage
-    edge). No notebook-graph knowledge — the tag migration moved
-    grouping into :func:`filter_by_selection`.
-
-    Procedure:
-
-    * Read every note via :meth:`list_all`.
-    * Apply :func:`filter_by_selection` (handles ``ALL``, ``UNTAGGED``,
-      and tag-AND).
-    * Apply :func:`filter_by_query` against the live query string.
-    * Apply :func:`sort_notes` for the current sort key.
-    """
-    notes = filter_by_selection(note_repository.list_all(), selection)
-    notes = filter_by_query(notes, query)
-    return sort_notes(notes, sort_key)
-
-
-# ---------------------------------------------------------------------------
-# Row payload + row class
-# ---------------------------------------------------------------------------
-
-
-@dataclass(frozen=True)
-class _NoteRowPayload:
-    """The note id this row stands in for."""
-
-    note_id: str
-
-
-class _NoteListRow(Gtk.ListBoxRow):
-    """A note-list row carrying its note id as a typed payload."""
-
-    payload: _NoteRowPayload
-
-    def __init__(
-        self,
-        *,
-        payload: _NoteRowPayload,
-        child: Gtk.Widget,
-    ) -> None:
-        super().__init__()
-        self.payload = payload
-        self.set_child(child)
+"""Header text on the left — ``"N notes"`` (count of the filtered set)."""
 
 
 # ---------------------------------------------------------------------------
@@ -220,57 +118,77 @@ class _NoteListRow(Gtk.ListBoxRow):
 
 
 class NoteList(Gtk.Box):  # pylint: disable=too-many-instance-attributes
-    """The middle navigation pane: header + scrolled list of notes.
+    """The middle navigation pane: header + scrolled ListView of notes."""
 
-    Layout (top to bottom):
-
-    1. Header — ``"N notes"`` label + sort dropdown.
-    2. A :class:`Gtk.ScrolledWindow` wrapping a :class:`Gtk.ListBox`
-       of note rows.
-    3. An empty-state label that becomes visible when the filtered
-       list is empty.
-    """
-
-    _note_repository: NoteRepositoryProtocol
     _app_state: AppState
-    _clock: ClockFn
     _attachment_store: AttachmentStoreProtocol | None
 
     _count_label: Gtk.Label
     _sort_dropdown: Gtk.DropDown
-    _list_box: Gtk.ListBox
+    _list_view: Gtk.ListView
     _empty_label: Gtk.Label
 
+    _filter: Gtk.CustomFilter
+    _sorter: Gtk.CustomSorter
+    _filter_model: Gtk.FilterListModel
+    _sort_model: Gtk.SortListModel
+    _selection_model: Gtk.SingleSelection
+
     _sort_key: NoteSortKey
-    _row_for_note_id: dict[str, _NoteListRow]
-    _pending_refresh_id: int | None
+    _comparator: Callable[[Note, Note], int]
+    _needle: str
+    _syncing_selection: bool
 
     def __init__(
         self,
         *,
-        note_repository: NoteRepositoryProtocol,
+        note_store: NoteListStore,
         app_state: AppState,
-        clock: ClockFn = _default_clock,
         attachment_store: AttachmentStoreProtocol | None = None,
     ) -> None:
         super().__init__(orientation=Gtk.Orientation.VERTICAL, spacing=0)
-        self._note_repository = note_repository
         self._app_state = app_state
-        self._clock = clock
         self._attachment_store = attachment_store
         self._sort_key = _DEFAULT_SORT_KEY
-        self._row_for_note_id = {}
-        self._pending_refresh_id = None
+        self._comparator = comparator_for(self._sort_key)
+        self._needle = normalize_query(app_state.query)
+        self._syncing_selection = False
 
+        self.append(self._build_header())
+        self._build_model_chain(note_store)
+        self.append(self._build_list_view())
+
+        self._empty_label = Gtk.Label.new("No notes here yet.")
+        self._empty_label.set_margin_top(_ROW_PADDING_PX * 4)
+        self._empty_label.set_margin_bottom(_ROW_PADDING_PX * 4)
+        self._empty_label.set_visible(False)
+        self.append(self._empty_label)
+
+        self.set_size_request(_DEFAULT_PANE_WIDTH_PX, -1)
+
+        self._app_state.connect(
+            "notify::selection", self._on_app_state_selection_changed,
+        )
+        self._app_state.connect(
+            "notify::query", self._on_app_state_query_changed,
+        )
+        self._app_state.connect(
+            "notify::selected-note-id",
+            self._on_app_state_selected_note_changed,
+        )
+
+        self._update_count()
+        self._sync_selection_from_app_state()
+
+    def _build_header(self) -> Gtk.Box:
+        """Build the header row: filtered count on the left, sort on right."""
         header = Gtk.Box.new(Gtk.Orientation.HORIZONTAL, _HEADER_SPACING_PX)
         header.set_margin_start(_ROW_PADDING_PX)
         header.set_margin_end(_ROW_PADDING_PX)
         header.set_margin_top(_HEADER_SPACING_PX)
         header.set_margin_bottom(_HEADER_SPACING_PX)
 
-        self._count_label = Gtk.Label.new(
-            _NOTES_LABEL_TEMPLATE.format(n=0),
-        )
+        self._count_label = Gtk.Label.new(_NOTES_LABEL_TEMPLATE.format(n=0))
         self._count_label.set_halign(Gtk.Align.START)
         self._count_label.set_hexpand(True)
         header.append(self._count_label)
@@ -283,100 +201,105 @@ class NoteList(Gtk.Box):  # pylint: disable=too-many-instance-attributes
         )
         self._sort_dropdown.connect("notify::selected", self._on_sort_changed)
         header.append(self._sort_dropdown)
+        return header
 
-        self.append(header)
+    def _build_model_chain(self, note_store: NoteListStore) -> None:
+        """Layer Filter → Sort → SingleSelection over the note store."""
+        self._filter = Gtk.CustomFilter.new(self._match)
+        self._sorter = Gtk.CustomSorter.new(self._compare)
+        self._filter_model = Gtk.FilterListModel.new(note_store, self._filter)
+        self._sort_model = Gtk.SortListModel.new(
+            self._filter_model, self._sorter,
+        )
+        self._selection_model = Gtk.SingleSelection.new(self._sort_model)
+        self._selection_model.set_autoselect(False)
+        self._selection_model.set_can_unselect(True)
+        self._selection_model.connect(
+            "notify::selected", self._on_selection_notify,
+        )
+        # The filtered/sorted count drives the header and a re-sync of
+        # the highlight (positions shift when the set changes).
+        self._sort_model.connect("items-changed", self._on_model_items_changed)
+
+    def _build_list_view(self) -> Gtk.ScrolledWindow:
+        """Build the scrolled ``ListView`` bound to the selection model."""
+        factory = Gtk.SignalListItemFactory()
+        factory.connect("setup", self._on_factory_setup)
+        factory.connect("bind", self._on_factory_bind)
+
+        self._list_view = Gtk.ListView.new(self._selection_model, factory)
+        self._list_view.add_css_class("note-list-view")
 
         scrolled = Gtk.ScrolledWindow.new()
-        scrolled.set_policy(
-            Gtk.PolicyType.NEVER,
-            Gtk.PolicyType.AUTOMATIC,
-        )
+        scrolled.set_policy(Gtk.PolicyType.NEVER, Gtk.PolicyType.AUTOMATIC)
         scrolled.set_hexpand(True)
         scrolled.set_vexpand(True)
-
-        self._list_box = Gtk.ListBox.new()
-        self._list_box.set_selection_mode(Gtk.SelectionMode.SINGLE)
-        self._list_box.connect("row-activated", self._on_row_activated)
-        scrolled.set_child(self._list_box)
-
-        self.append(scrolled)
-
-        self._empty_label = Gtk.Label.new("No notes here yet.")
-        self._empty_label.set_margin_top(_ROW_PADDING_PX * 4)
-        self._empty_label.set_margin_bottom(_ROW_PADDING_PX * 4)
-        self._empty_label.set_visible(False)
-        self.append(self._empty_label)
-
-        self.set_size_request(_DEFAULT_PANE_WIDTH_PX, -1)
-
-        self._app_state.connect(
-            "notify::selection",
-            self._on_app_state_selection_changed,
-        )
-        self._app_state.connect(
-            "notify::query",
-            self._on_app_state_query_changed,
-        )
-        self._app_state.connect(
-            "notify::selected-note-id",
-            self._on_app_state_selected_note_changed,
-        )
-
-        self.refresh()
+        scrolled.set_child(self._list_view)
+        return scrolled
 
     # ------------------------------------------------------------------
-    # Public API
+    # Filter / sorter callbacks
     # ------------------------------------------------------------------
 
-    def refresh(self) -> None:
-        """Recompute and re-render the displayed list."""
-        notes = compute_display_notes(
-            note_repository=self._note_repository,
-            selection=self._app_state.selection,
-            query=self._app_state.query,
-            sort_key=self._sort_key,
+    def _match(
+        self,
+        item: GObject.Object,
+        _user_data: object = None,
+    ) -> bool:
+        if not isinstance(item, NoteItem):
+            return False
+        note = item.note
+        return (
+            matches_selection(note, self._app_state.selection)
+            and matches_query(note, self._needle)
         )
 
-        self._count_label.set_text(
-            _NOTES_LABEL_TEMPLATE.format(n=len(notes)),
-        )
+    def _compare(
+        self,
+        left: GObject.Object,
+        right: GObject.Object,
+        _user_data: object = None,
+    ) -> int:
+        if not (isinstance(left, NoteItem) and isinstance(right, NoteItem)):
+            return 0
+        return self._comparator(left.note, right.note)
 
-        counts = self._attachment_counts(notes)
+    # ------------------------------------------------------------------
+    # Factory
+    # ------------------------------------------------------------------
 
-        self._list_box.remove_all()
-        self._row_for_note_id = {}
-        for note in notes:
-            row = _make_note_row(note, counts[note.id])
-            self._row_for_note_id[note.id] = row
-            self._list_box.append(row)
+    def _on_factory_setup(
+        self,
+        _factory: Gtk.SignalListItemFactory,
+        list_item: Gtk.ListItem,
+    ) -> None:
+        box = Gtk.Box.new(Gtk.Orientation.VERTICAL, _ROW_SPACING_PX)
+        box.set_margin_start(_ROW_PADDING_PX)
+        box.set_margin_end(_ROW_PADDING_PX)
+        box.set_margin_top(_ROW_PADDING_PX)
+        box.set_margin_bottom(_ROW_PADDING_PX)
+        list_item.set_child(box)
 
-        self._empty_label.set_visible(not notes)
-        self._list_box.set_visible(bool(notes))
+    def _on_factory_bind(
+        self,
+        _factory: Gtk.SignalListItemFactory,
+        list_item: Gtk.ListItem,
+    ) -> None:
+        box = list_item.get_child()
+        item = list_item.get_item()
+        if not isinstance(box, Gtk.Box) or not isinstance(item, NoteItem):
+            return
+        _clear_box(box)
+        _populate_row_box(box, item.note, self._attachment_count(item.note.id))
 
-        self._apply_highlight()
-
-    @property
-    def sort_key(self) -> NoteSortKey:
-        return self._sort_key
-
-    def _attachment_counts(self, notes: Iterable[Note]) -> dict[str, int]:
-        store = self._attachment_store
-        if store is None:
-            return {note.id: 0 for note in notes}
-        return {note.id: store.count_for_note(note.id) for note in notes}
+    def _attachment_count(self, note_id: str) -> int:
+        if self._attachment_store is None:
+            return 0
+        return self._attachment_store.count_for_note(note_id)
 
     # ------------------------------------------------------------------
     # Signal handlers
     # ------------------------------------------------------------------
-
-    def _on_row_activated(
-        self,
-        _listbox: Gtk.ListBox,
-        row: Gtk.ListBoxRow,
-    ) -> None:
-        if not isinstance(row, _NoteListRow):
-            return
-        self._app_state.set_selected_note_id(row.payload.note_id)
 
     def _on_sort_changed(
         self,
@@ -386,107 +309,92 @@ class NoteList(Gtk.Box):  # pylint: disable=too-many-instance-attributes
         index = self._sort_dropdown.get_selected()
         if 0 <= index < len(_SORT_KEY_DROPDOWN_ORDER):
             self._sort_key = _SORT_KEY_DROPDOWN_ORDER[index]
-        self.refresh()
+            self._comparator = comparator_for(self._sort_key)
+            self._sorter.changed(Gtk.SorterChange.DIFFERENT)
 
     def _on_app_state_selection_changed(
         self,
         _state: AppState,
         _pspec: GObject.ParamSpec,
     ) -> None:
-        self.refresh()
+        self._filter.changed(Gtk.FilterChange.DIFFERENT)
 
     def _on_app_state_query_changed(
         self,
         _state: AppState,
         _pspec: GObject.ParamSpec,
     ) -> None:
-        """Coalesce per-keystroke query notifications into one refresh.
+        """Re-normalise the needle and invalidate the filter.
 
-        The search entry is bound to :attr:`AppState.query`, so this
-        fires on every character. Scheduling a single pending source per
-        burst (and re-reading the current query when it flushes) keeps
-        the expensive re-filter off the typing hot path while always
-        rendering the latest state. See the module throttle invariant.
+        In-memory re-filtering is cheap, so the per-keystroke query
+        notification invalidates the filter directly — no throttle.
         """
-        if self._pending_refresh_id is not None:
-            return  # a refresh is already scheduled for this burst
-        self._pending_refresh_id = GLib.timeout_add(
-            _QUERY_REFRESH_DEBOUNCE_MS,
-            self._flush_pending_refresh,
-        )
+        self._needle = normalize_query(self._app_state.query)
+        self._filter.changed(Gtk.FilterChange.DIFFERENT)
 
     def _on_app_state_selected_note_changed(
         self,
         _state: AppState,
         _pspec: GObject.ParamSpec,
     ) -> None:
-        self._apply_highlight()
+        self._sync_selection_from_app_state()
 
-    def _flush_pending_refresh(self) -> bool:
-        """GLib timer callback — run the coalesced query refresh.
+    def _on_model_items_changed(
+        self,
+        _model: Gtk.SortListModel,
+        _position: int,
+        _removed: int,
+        _added: int,
+    ) -> None:
+        self._update_count()
+        # Positions shifted; keep the highlight on the app-state note.
+        self._sync_selection_from_app_state()
 
-        Clears the pending id first, then refreshes (which re-reads the
-        *current* :attr:`AppState.query`), then returns
-        :data:`GLib.SOURCE_REMOVE` so the one-shot source does not
-        re-fire. Safe to call directly from tests, which drive the
-        throttle without a running main loop.
-        """
-        self._pending_refresh_id = None
-        self.refresh()
-        result: bool = GLib.SOURCE_REMOVE
-        return result
-
-    def _cancel_pending_refresh(self) -> None:
-        """Drop any scheduled refresh so it cannot fire after teardown.
-
-        Idempotent and self-guarding: removes the GLib source only when
-        one is pending, so the two teardown hooks (:meth:`do_unroot` and
-        :meth:`__del__`) can both call it without double-removal.
-        """
-        if self._pending_refresh_id is not None:
-            GLib.source_remove(self._pending_refresh_id)
-            self._pending_refresh_id = None
+    def _on_selection_notify(
+        self,
+        _selection: Gtk.SingleSelection,
+        _pspec: GObject.ParamSpec,
+    ) -> None:
+        """Write a user-driven row click through to :class:`AppState`."""
+        if self._syncing_selection:
+            return
+        item = self._selection_model.get_selected_item()
+        if isinstance(item, NoteItem):
+            self._app_state.set_selected_note_id(item.note.id)
 
     # ------------------------------------------------------------------
-    # Highlight application
+    # Helpers
     # ------------------------------------------------------------------
 
-    def _apply_highlight(self) -> None:
+    def _update_count(self) -> None:
+        count = self._sort_model.get_n_items()
+        self._count_label.set_text(_NOTES_LABEL_TEMPLATE.format(n=count))
+        self._empty_label.set_visible(count == 0)
+        self._list_view.set_visible(count > 0)
+
+    def _sync_selection_from_app_state(self) -> None:
+        """Mirror :attr:`AppState.selected_note_id` onto the model.
+
+        Guarded against the ``notify::selected`` echo so the round-trip
+        click → app-state → here does not loop.
+        """
         note_id = self._app_state.selected_note_id
-        if note_id is None:
-            self._list_box.unselect_all()
-            return
-        row = self._row_for_note_id.get(note_id)
-        if row is None:
-            self._list_box.unselect_all()
-            return
-        self._list_box.select_row(row)
+        target = Gtk.INVALID_LIST_POSITION
+        if note_id is not None:
+            for position in range(self._sort_model.get_n_items()):
+                candidate = self._sort_model.get_item(position)
+                if isinstance(candidate, NoteItem) and candidate.note.id == note_id:
+                    target = position
+                    break
+        self._syncing_selection = True
+        try:
+            self._selection_model.set_selected(target)
+        finally:
+            self._syncing_selection = False
 
-    # ------------------------------------------------------------------
-    # Teardown — cancel the throttle source
-    # ------------------------------------------------------------------
-
-    def do_unroot(self) -> None:  # pylint: disable=arguments-differ
-        """Cancel a pending refresh when leaving the widget tree.
-
-        GTK invokes this synchronously while tearing the window's widget
-        tree down, so it is the reliable hook for a *rooted* list. The
-        :meth:`__del__` below is the companion net for a never-rooted
-        instance (e.g. a standalone test widget).
-        """
-        self._cancel_pending_refresh()
-        Gtk.Box.do_unroot(self)
-
-    def __del__(self) -> None:
-        """Cancel a pending refresh for a list finalized un-rooted.
-
-        :meth:`do_unroot` only fires for a list that was added to a
-        window; one built in isolation and dropped (as the unit tests
-        do) is finalized without ever being rooted, so the cancel has to
-        happen here. The :meth:`_cancel_pending_refresh` guard makes this
-        a no-op when :meth:`do_unroot` already ran.
-        """
-        self._cancel_pending_refresh()
+    @property
+    def sort_key(self) -> NoteSortKey:
+        return self._sort_key
 
 
 # ---------------------------------------------------------------------------
@@ -494,24 +402,27 @@ class NoteList(Gtk.Box):  # pylint: disable=too-many-instance-attributes
 # ---------------------------------------------------------------------------
 
 
-def _make_note_row(note: Note, attachment_count: int) -> _NoteListRow:
-    """Build a single note-list row.
+def _clear_box(box: Gtk.Box) -> None:
+    """Remove every child of ``box`` (GTK 4 has no ``remove_all`` on Box)."""
+    child = box.get_first_child()
+    while child is not None:
+        nxt = child.get_next_sibling()
+        box.remove(child)
+        child = nxt
+
+
+def _populate_row_box(box: Gtk.Box, note: Note, attachment_count: int) -> None:
+    """Fill ``box`` with the title / snippet / chips / meta of ``note``.
 
     Layout (top to bottom):
 
     * Title — bold, single line, end-ellipsised (``.note-title``).
     * Snippet — up to two wrapped lines, dimmed (``.note-snippet``);
       omitted when the note has none.
-    * Chip row — ``#tag`` labels (``.tag-chip-row``), one per entry in
-      ``note.tags``; omitted entirely when ``note.tags`` is empty.
+    * Chip row — ``#tag`` labels (``.tag-chip-row``); omitted entirely
+      when ``note.tags`` is empty.
     * Meta line — right-aligned ``📎 N | <date>``.
     """
-    box = Gtk.Box.new(Gtk.Orientation.VERTICAL, _ROW_SPACING_PX)
-    box.set_margin_start(_ROW_PADDING_PX)
-    box.set_margin_end(_ROW_PADDING_PX)
-    box.set_margin_top(_ROW_PADDING_PX)
-    box.set_margin_bottom(_ROW_PADDING_PX)
-
     title_label = Gtk.Label.new(note.title)
     title_label.set_halign(Gtk.Align.START)
     title_label.set_hexpand(True)
@@ -535,11 +446,6 @@ def _make_note_row(note: Note, attachment_count: int) -> _NoteListRow:
         box.append(_make_chip_row(note.tags))
 
     box.append(_make_meta_line(note, attachment_count))
-
-    return _NoteListRow(
-        payload=_NoteRowPayload(note_id=note.id),
-        child=box,
-    )
 
 
 def _make_chip_row(tags: tuple[str, ...]) -> Gtk.Box:

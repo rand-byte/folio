@@ -34,10 +34,21 @@ Principles & invariants
   (newest first) and ascending by case-folded title for
   :data:`NoteSortKey.TITLE`. Python's sort is stable, so ties preserve
   the order of the input list.
+* The "what matches" / "what order" rules each live in exactly one
+  place, exposed as **per-item** helpers so a ``Gtk.CustomFilter`` /
+  ``Gtk.CustomSorter`` can reuse them without re-implementing the rule:
+  :func:`matches_selection` (one note vs a :data:`Selection`),
+  :func:`normalize_query` + :func:`matches_query` (the needle is
+  computed once per query change, then tested per item), and
+  :func:`comparator_for` (a three-way ``(Note, Note) -> int`` over the
+  same key functions :func:`sort_notes` uses). The list functions are
+  thin wrappers over these, so the in-memory model chain and the legacy
+  list API cannot drift. This module stays GTK-free and clock-free.
 """
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import datetime
 from typing import assert_never
@@ -95,64 +106,105 @@ exhaustively cover both variants and the static checker can prove it.
 """
 
 
+def matches_selection(note: Note, selection: Selection) -> bool:
+    """Return whether a single ``note`` belongs to ``selection``.
+
+    The per-note core of :func:`filter_by_selection`, extracted so the
+    note-list's ``Gtk.CustomFilter`` can call it per item without
+    re-implementing the rule. ``SmartFilter.ALL`` always matches;
+    ``UNTAGGED`` matches a note with no tags; a :class:`TagSelection`
+    matches when the note's tags are a superset of the selected set
+    (AND semantics).
+    """
+    match selection:
+        case SmartSelection(smart_filter=sf):
+            match sf:
+                case SmartFilter.ALL:
+                    return True
+                case SmartFilter.UNTAGGED:
+                    return not note.tags
+                case _ as unhandled:
+                    assert_never(unhandled)
+        case TagSelection(tags=tags):
+            return tags.issubset(set(note.tags))
+        case _ as unhandled_selection:
+            assert_never(unhandled_selection)
+
+
 def filter_by_selection(
     notes: list[Note],
     selection: Selection,
 ) -> list[Note]:
     """Return the subset of ``notes`` that belongs to ``selection``.
 
-    * :class:`SmartSelection` with :data:`SmartFilter.ALL` is a
-      passthrough (a fresh list copy — never the original).
-    * :class:`SmartSelection` with :data:`SmartFilter.UNTAGGED` keeps
-      only notes whose ``tags`` tuple is empty.
-    * :class:`TagSelection` keeps notes whose tag set is a superset of
-      ``selection.tags`` (AND across the selected tags).
+    A comprehension over :func:`matches_selection`, so the "what
+    matches" rule lives in exactly one place (shared with the note
+    list's in-memory ``Gtk.CustomFilter``).
 
     No clock is needed because every smart filter is now time-free —
     the previous ``RECENT`` smart filter (and its ``RECENT_WINDOW_DAYS``
     constant) was dropped in favour of sort-by-date.
     """
-    match selection:
-        case SmartSelection(smart_filter=sf):
-            match sf:
-                case SmartFilter.ALL:
-                    return list(notes)
-                case SmartFilter.UNTAGGED:
-                    return [note for note in notes if not note.tags]
-                case _ as unhandled:
-                    assert_never(unhandled)
-        case TagSelection(tags=tags):
-            return [
-                note
-                for note in notes
-                if tags.issubset(set(note.tags))
-            ]
-        case _ as unhandled_selection:
-            assert_never(unhandled_selection)
+    return [note for note in notes if matches_selection(note, selection)]
+
+
+def normalize_query(query: str) -> str:
+    """Strip and case-fold ``query`` into the needle used for matching.
+
+    Extracted so a caller (the note-list filter widget) can compute the
+    needle once per query change and reuse it across every item, instead
+    of re-stripping per item. An empty result means "no filter".
+    """
+    return query.strip().casefold()
+
+
+def matches_query(note: Note, needle: str) -> bool:
+    """Return whether ``needle`` occurs in the note's title/snippet/source.
+
+    ``needle`` must already be normalised (see :func:`normalize_query`).
+    Matching spans the same three fields the repository's legacy SQL
+    ``LIKE`` query searched, so the in-memory and SQL paths agree on
+    what "matches" means.
+    """
+    return (
+        needle in note.title.casefold()
+        or needle in note.snippet.casefold()
+        or needle in note.source.casefold()
+    )
 
 
 def filter_by_query(notes: list[Note], query: str) -> list[Note]:
     """Return the subset of ``notes`` that contain ``query`` somewhere.
 
-    Matching is a case-folded substring check across each note's
-    ``title``, ``snippet``, and ``source`` — the same three columns
-    the SQL ``LIKE`` query in :class:`NoteRepository` searches, so the
-    in-memory pipeline and the SQL-side path agree on what "matches".
-
-    The query is stripped and case-folded once. A query that is empty
-    after stripping is a passthrough (a fresh list copy) — an empty
-    search box must never hide notes from the user.
+    The query is normalised once via :func:`normalize_query`; a query
+    that is empty after stripping is a passthrough (a fresh list copy) —
+    an empty search box must never hide notes from the user. The
+    per-note test delegates to :func:`matches_query`.
     """
-    needle = query.strip().casefold()
+    needle = normalize_query(query)
     if not needle:
         return list(notes)
-    return [
-        note
-        for note in notes
-        if needle in note.title.casefold()
-        or needle in note.snippet.casefold()
-        or needle in note.source.casefold()
-    ]
+    return [note for note in notes if matches_query(note, needle)]
+
+
+def comparator_for(key: NoteSortKey) -> Callable[[Note, Note], int]:
+    """Return a ``(Note, Note) -> int`` comparator for the sort ``key``.
+
+    Wraps the same ordering :func:`sort_notes` uses into the three-way
+    comparator shape a ``Gtk.CustomSorter`` expects: descending datetime
+    for ``MODIFIED`` / ``CREATED`` (newest first), ascending case-folded
+    title for ``TITLE``. Returns ``-1`` / ``0`` / ``1`` so the result is
+    a true comparator independent of any GTK enum.
+    """
+    match key:
+        case NoteSortKey.MODIFIED:
+            return _by_modified_desc
+        case NoteSortKey.CREATED:
+            return _by_created_desc
+        case NoteSortKey.TITLE:
+            return _by_title_asc
+        case _ as unhandled:
+            assert_never(unhandled)
 
 
 def sort_notes(notes: list[Note], key: NoteSortKey) -> list[Note]:
@@ -166,6 +218,26 @@ def sort_notes(notes: list[Note], key: NoteSortKey) -> list[Note]:
             return sorted(notes, key=_title_casefold)
         case _ as unhandled:
             assert_never(unhandled)
+
+
+def _by_modified_desc(left: Note, right: Note) -> int:
+    return _cmp_datetime(right.modified_at, left.modified_at)
+
+
+def _by_created_desc(left: Note, right: Note) -> int:
+    return _cmp_datetime(right.created_at, left.created_at)
+
+
+def _by_title_asc(left: Note, right: Note) -> int:
+    return _cmp_str(left.title.casefold(), right.title.casefold())
+
+
+def _cmp_datetime(first: datetime, second: datetime) -> int:
+    return (first > second) - (first < second)
+
+
+def _cmp_str(first: str, second: str) -> int:
+    return (first > second) - (first < second)
 
 
 def _modified_at(note: Note) -> datetime:

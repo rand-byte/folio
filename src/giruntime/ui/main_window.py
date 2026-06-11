@@ -24,31 +24,23 @@ Principles & invariants
   matching the design's titlebar. ``set_titlebar`` is independent
   of ``set_child``, so the existing outer-paned-as-child invariant
   is preserved unchanged.
-* This widget owns **two** signal subscriptions:
+* This widget owns a **single** signal subscription:
+  ``AppState:notify::view-mode``. On every mode change the window
+  flushes the editor's pending autosave (so any just-typed edits hit
+  disk under the current note id) and asks the view to refresh from the
+  in-memory store before the stack swap reveals it. Flush + refresh are
+  both idempotent, so doing them on every mode change — not just on the
+  EDIT→VIEW direction — keeps the dispatch branch-free without paying
+  any extra cost on the no-op path.
 
-  1. ``AppState:notify::view-mode``. On every mode change the window
-     flushes the editor's pending autosave (so any just-typed edits
-     hit disk under the current note id) and asks the view to refresh
-     from the repository before the stack swap reveals it. Flush +
-     refresh are both idempotent, so doing them on every mode change —
-     not just on the EDIT→VIEW direction — keeps the dispatch
-     branch-free without paying any extra cost on the no-op path.
-  2. ``NoteController::notes-changed``. After any successful mutation
-     (create / duplicate / delete / save / attachment add or remove)
-     the controller emits this signal; the window fans it out to the
-     two data-driven panes by calling :meth:`NoteList.refresh` and
-     :meth:`Sidebar.refresh`. Without it, an edit to the *currently
-     selected* note under an *unchanged* filter refreshes nothing —
-     the panes otherwise re-query only on ``notify::selection`` /
-     ``notify::selected-note-id`` / ``notify::query`` / sort changes —
-     so the list row (title / snippet / tag chips) and the sidebar tag
-     counts go stale until the next selection change. Both
-     ``refresh()`` methods are public, idempotent, and re-read from the
-     repository, so one synchronous call each per emission suffices.
-
-  Per-``AppState``-property selection plumbing still belongs to the
-  individual panes; the window's surface stays minimal, owning only
-  the layout, the view-mode dispatch, and this post-mutation fan-out.
+  There is no longer a ``NoteController::notes-changed`` fan-out: the
+  note list, the rendered view, and the sidebar all update by observing
+  the store's ``items-changed`` (directly or through the derived
+  :class:`controllers.tag_counts_model.TagCountsModel`), so a create /
+  edit / delete propagates without the window arbitrating. Per-pane
+  selection plumbing likewise belongs to the panes; the window's
+  surface stays minimal, owning only the layout and the view-mode
+  dispatch.
 * :class:`NoteEditor` and :class:`NoteView` both stay constructed
   and live across mode switches. Tearing one down on every toggle
   would discard the editor's undo history and the view's child
@@ -62,17 +54,13 @@ Principles & invariants
   That guarantee lives inside :class:`NoteEditor`; this window is
   blissfully unaware of it.
 * The construction signature is the long-term one: caller
-  (:class:`NotesApplication`) passes ``application``,
-  ``note_repository``, ``note_controller``, ``app_state``, and
-  ``attachment_store``, all keyword-only. ``attachment_store`` is
-  optional with a ``None`` default so the existing per-pane test
-  suites that pre-date the attachment build keep constructing
-  :class:`MainWindow` without that injected dependency; in that mode
-  :class:`NoteView` falls back to its placeholder image resolver.
-  Future build steps that add toolbar / status-bar children extend the
-  window's child set, but leave its signal subscriptions confined to
-  the two described above (the view-mode dispatch and the
-  ``notes-changed`` fan-out).
+  (:class:`NotesApplication`) passes ``application``, ``note_store``,
+  ``note_controller``, ``app_state``, and ``attachment_store``, all
+  keyword-only. ``attachment_store`` is optional with a ``None``
+  default so the existing per-pane test suites that pre-date the
+  attachment build keep constructing :class:`MainWindow` without that
+  injected dependency; in that mode :class:`NoteView` falls back to its
+  placeholder image resolver.
 * The initial pane positions match the per-widget hints
   (:data:`_SIDEBAR_INITIAL_POSITION_PX`,
   :data:`_NOTE_LIST_INITIAL_POSITION_PX`), and the initial *window
@@ -87,11 +75,11 @@ Principles & invariants
   and our defaults stop applying. Saving and restoring those across
   launches is a v2 feature — there is no settings store in v1
   (decision 4 of the plan).
-* The window owns no data. Everything it needs — repositories,
-  controllers, app state — is reached through references that
-  originate in :class:`NotesApplication`. Tests can construct the
-  same widget with the same fake repositories the per-pane tests
-  already use, without touching the file system or the database.
+* The window owns no data. Everything it needs — the note store, the
+  controller, the app state — is reached through references that
+  originate in :class:`NotesApplication`. Tests can construct the same
+  widget with the same in-memory store the per-pane tests use, without
+  touching the file system or the database.
 """
 
 from __future__ import annotations
@@ -103,15 +91,13 @@ from gi.repository import GObject, Gtk
 from enums import ViewMode
 from giruntime.controllers.app_state import AppState
 from giruntime.controllers.note_controller import NoteController
+from giruntime.controllers.note_list_store import NoteListStore
 from giruntime.ui.note_editor import NoteEditor
 from giruntime.ui.note_list import NoteList
 from giruntime.ui.note_view import NoteView
 from giruntime.ui.sidebar import Sidebar
 from giruntime.ui.toolbar import Toolbar
-from storage.protocols import (
-    AttachmentStoreProtocol,
-    NoteRepositoryProtocol,
-)
+from storage.protocols import AttachmentStoreProtocol
 
 
 # ---------------------------------------------------------------------------
@@ -265,13 +251,14 @@ class MainWindow(  # pylint: disable=too-many-instance-attributes
     :attr:`AppState.view_mode`.
 
     The instance-attribute count is intentional: the window is a
-    composition root, holding refs to the four panes plus the four
-    injected dependencies (two repositories, the note controller,
-    and the app state) that those panes share. Hiding any of them
-    behind a "Bundle" object would obscure rather than clarify.
+    composition root, holding refs to the four panes plus the
+    injected dependencies (the in-memory note store, the note
+    controller, the app state, and the optional attachment store) that
+    those panes share. Hiding any of them behind a "Bundle" object
+    would obscure rather than clarify.
     """
 
-    _note_repository: NoteRepositoryProtocol
+    _note_store: NoteListStore
     _note_controller: NoteController
     _app_state: AppState
     _attachment_store: AttachmentStoreProtocol | None
@@ -286,13 +273,13 @@ class MainWindow(  # pylint: disable=too-many-instance-attributes
         self,
         *,
         application: Gtk.Application,
-        note_repository: NoteRepositoryProtocol,
+        note_store: NoteListStore,
         note_controller: NoteController,
         app_state: AppState,
         attachment_store: AttachmentStoreProtocol | None = None,
     ) -> None:
         super().__init__(application=application)
-        self._note_repository = note_repository
+        self._note_store = note_store
         self._note_controller = note_controller
         self._app_state = app_state
         self._attachment_store = attachment_store
@@ -311,7 +298,7 @@ class MainWindow(  # pylint: disable=too-many-instance-attributes
         # the standard min/max/close buttons that the header bar
         # automatically adds to its end.
         self._toolbar = Toolbar(
-            note_repository=note_repository,
+            note_store=note_store,
             note_controller=note_controller,
             app_state=app_state,
         )
@@ -320,11 +307,11 @@ class MainWindow(  # pylint: disable=too-many-instance-attributes
         # Build the three panes. Each subscribes to AppState itself;
         # the window does not arbitrate between them.
         self._sidebar = Sidebar(
-            note_repository=note_repository,
+            note_store=note_store,
             app_state=app_state,
         )
         self._note_list = NoteList(
-            note_repository=note_repository,
+            note_store=note_store,
             app_state=app_state,
             attachment_store=attachment_store,
         )
@@ -334,12 +321,12 @@ class MainWindow(  # pylint: disable=too-many-instance-attributes
         # falls back to the placeholder bytes contract from build
         # step 8 — and existing tests rely on that default.
         self._note_view = NoteView(
-            note_repository=note_repository,
+            note_store=note_store,
             app_state=app_state,
             attachments=attachment_store,
         )
         self._note_editor = NoteEditor(
-            note_repository=note_repository,
+            note_store=note_store,
             note_controller=note_controller,
             app_state=app_state,
         )
@@ -413,16 +400,6 @@ class MainWindow(  # pylint: disable=too-many-instance-attributes
             self._on_view_mode_changed,
         )
 
-        # Subscription 2 of 2: on every ``notes-changed`` the handler
-        # re-queries and re-renders the two data-driven panes so a
-        # create / edit / delete propagates to the note list and the
-        # sidebar tag section without a manual reload — even when the
-        # filter and selection are unchanged.
-        self._note_controller.connect(
-            "notes-changed",
-            self._on_notes_changed,
-        )
-
     def _on_view_mode_changed(
         self,
         _app_state: AppState,
@@ -431,35 +408,21 @@ class MainWindow(  # pylint: disable=too-many-instance-attributes
         """Flush the editor, refresh the view, then swap the visible child.
 
         The flush ensures any pending debounced autosave hits disk
-        under the current note id before the rendered view re-reads
-        from the repository. The refresh ensures the view's buffer
-        reflects the just-saved source (without it the view would
-        still show whatever was rendered at the last
+        under the current note id before the rendered view re-reads from
+        the in-memory store. The refresh ensures the view's buffer
+        reflects the just-saved source (without it the view would still
+        show whatever was rendered at the last
         ``notify::selected-note-id``). Both calls are idempotent:
-        :meth:`NoteEditor.flush_pending_save` is a no-op when no save
-        is pending; :meth:`NoteView.refresh` re-renders from the
-        repository whose state may or may not have changed. Doing
-        both unconditionally on every mode change is simpler and
-        cheaper than gating on the direction of the transition, and
-        keeps the path identical for VIEW→EDIT (where the flush is
-        needed if the user toggled back-and-forth quickly) and
-        EDIT→VIEW.
+        :meth:`NoteEditor.flush_pending_save` is a no-op when no save is
+        pending; :meth:`NoteView.refresh` re-renders from the store
+        whose state may or may not have changed. Doing both
+        unconditionally on every mode change is simpler and cheaper than
+        gating on the direction of the transition, and keeps the path
+        identical for VIEW→EDIT (where the flush is needed if the user
+        toggled back-and-forth quickly) and EDIT→VIEW.
         """
         self._note_editor.flush_pending_save()
         self._note_view.refresh()
         self._right_pane_stack.set_visible_child_name(
             _stack_name_for_mode(self._app_state.view_mode),
         )
-
-    def _on_notes_changed(self, _controller: NoteController) -> None:
-        """Re-query and re-render the data-driven panes after a mutation.
-
-        Both refreshes are idempotent and read from the repository, so a
-        single synchronous call per emission keeps the note list and the
-        sidebar tag section in step with disk without any diffing here.
-        The ``notes-changed`` marshaller passes no extra args, so the
-        handler takes only the emitting controller — matching the
-        signal's ``()`` parameter spec.
-        """
-        self._note_list.refresh()
-        self._sidebar.refresh()

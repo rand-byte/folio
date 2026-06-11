@@ -72,6 +72,23 @@ class GetAndInsertTests(_NoteRepoTestBase):
         fetched = self.repo.get("n1")
         self.assertEqual(fetched, note)
 
+    def test_insert_returns_derived_note(self) -> None:
+        note = _make_note(
+            note_id="n1",
+            source="= Heading\n:tags: zeta, alpha\n\nBody text.",
+        )
+        returned = self.repo.insert(note)
+        expected = derive_summary(note.source)
+        self.assertEqual(returned.id, "n1")
+        self.assertEqual(returned.source, note.source)
+        self.assertEqual(returned.title, expected.title)
+        self.assertEqual(returned.snippet, expected.snippet)
+        self.assertEqual(returned.tags, expected.tags)
+        self.assertEqual(returned.created_at, note.created_at)
+        self.assertEqual(returned.modified_at, note.modified_at)
+        # The returned value matches a subsequent ``get``.
+        self.assertEqual(returned, self.repo.get("n1"))
+
     def test_get_raises_keyerror_on_missing_id(self) -> None:
         with self.assertRaises(KeyError):
             self.repo.get("does-not-exist")
@@ -184,6 +201,28 @@ class SearchTests(_NoteRepoTestBase):
 
 
 class UpdateSourceTests(_NoteRepoTestBase):
+    def test_update_source_returns_derived_note(self) -> None:
+        original = datetime(2026, 1, 1, tzinfo=UTC)
+        self.repo.insert(_make_note(
+            note_id="n1",
+            source="= Old\n:tags: alpha\n\nold body",
+            created_at=original,
+        ))
+        new_source = "= Renamed\n:tags: gamma, beta\n\nNew snippet preview."
+        new_modified = datetime(2027, 1, 1, tzinfo=UTC)
+        returned = self.repo.update_source("n1", new_source, new_modified)
+        expected = derive_summary(new_source)
+        self.assertEqual(returned.id, "n1")
+        self.assertEqual(returned.source, new_source)
+        self.assertEqual(returned.title, expected.title)
+        self.assertEqual(returned.snippet, expected.snippet)
+        self.assertEqual(returned.tags, expected.tags)
+        # ``created_at`` is preserved across the update (recovered via
+        # the RETURNING clause), ``modified_at`` is the new value.
+        self.assertEqual(returned.created_at, original)
+        self.assertEqual(returned.modified_at, new_modified)
+        self.assertEqual(returned, self.repo.get("n1"))
+
     def test_update_source_rewrites_source_title_and_snippet(self) -> None:
         self.repo.insert(_make_note(
             note_id="n1", source="= Original Title\n\nOriginal body."))

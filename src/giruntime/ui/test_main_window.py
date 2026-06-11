@@ -3,17 +3,20 @@
 from __future__ import annotations
 
 import unittest
+from collections.abc import Callable
 from datetime import UTC, datetime
 from functools import cache
 from pathlib import Path
 
 from gi.repository import Gdk, Gio, Gtk
 
-from giruntime.controllers.app_state import AppState
-from giruntime.controllers.note_controller import NoteController
+from asciidoc.summary import derive_summary
 from enums import ViewMode
 from models.attachment import Attachment
 from models.note import Note
+from giruntime.controllers.app_state import AppState
+from giruntime.controllers.note_controller import NoteController
+from giruntime.controllers.note_list_store import NoteListStore
 from giruntime.ui.main_window import (
     MainWindow,
     _ARTICLE_SIDE_SLACK_PX,
@@ -30,6 +33,17 @@ from giruntime.ui.sidebar import Sidebar
 
 
 _FIXED_NOW: datetime = datetime(2026, 4, 28, 12, 0, 0, tzinfo=UTC)
+
+
+def _id_sequence() -> Callable[[], str]:
+    """Return a deterministic, monotonically-increasing id factory."""
+    counter = {"n": 1}
+
+    def factory() -> str:
+        counter["n"] += 1
+        return f"gen-{counter['n']}"
+
+    return factory
 
 
 def _display_available() -> bool:
@@ -96,36 +110,47 @@ class _FakeNoteRepository:
     def search(self, _query: str) -> list[Note]:
         raise NotImplementedError
 
-    def insert(self, _note: Note) -> None:
-        raise NotImplementedError
+    def insert(self, note: Note) -> Note:
+        summary = derive_summary(note.source)
+        persisted = Note(
+            id=note.id,
+            title=summary.title,
+            source=note.source,
+            snippet=summary.snippet,
+            tags=summary.tags,
+            created_at=note.created_at,
+            modified_at=note.modified_at,
+        )
+        self.notes[note.id] = persisted
+        return persisted
 
     def update_source(
         self,
         note_id: str,
         source: str,
         modified_at: datetime,
-    ) -> None:
+    ) -> Note:
         # Record the call (tests inspect ``update_calls`` to assert
         # the editor's auto-save flow fired exactly once with the
-        # right payload) AND mutate the stored note so a subsequent
-        # ``get`` returns the just-saved source. The latter is what
-        # lets the view-refresh-on-mode-change tests observe the
-        # updated content after a flush.
+        # right payload) AND re-derive the cached fields so a tag edit
+        # propagates to the sidebar the way the real repository does.
         self.update_calls.append((note_id, source, modified_at))
         existing = self.notes[note_id]
-        self.notes[note_id] = Note(
+        summary = derive_summary(source)
+        updated = Note(
             id=existing.id,
-            title=existing.title,
+            title=summary.title,
             source=source,
-            snippet=existing.snippet,
-            tags=existing.tags,
+            snippet=summary.snippet,
+            tags=summary.tags,
             created_at=existing.created_at,
             modified_at=modified_at,
         )
+        self.notes[note_id] = updated
+        return updated
 
-
-    def delete(self, _note_id: str) -> None:
-        raise NotImplementedError
+    def delete(self, note_id: str) -> None:
+        del self.notes[note_id]
 
     def list_tags(self) -> tuple[tuple[str, int], ...]:
         return self.tag_pairs
@@ -237,14 +262,16 @@ class MainWindowConstructionTests(unittest.TestCase):
             modified_at=_FIXED_NOW,
         )
         state = app_state if app_state is not None else AppState()
+        store = NoteListStore(repository=notes)
+        store.load()
         controller = NoteController(
-            repository=notes,
+            note_store=store,
             attachments=_FakeAttachmentStore(),
             app_state=state,
         )
         return MainWindow(
             application=application,
-            note_repository=notes,
+            note_store=store,
             note_controller=controller,
             app_state=state,
         )
@@ -317,14 +344,16 @@ class MainWindowViewModeStackTests(unittest.TestCase):
         application = _test_application()
         notes = _FakeNoteRepository()
         state = AppState(initial_view_mode=view_mode)
+        store = NoteListStore(repository=notes)
+        store.load()
         controller = NoteController(
-            repository=notes,
+            note_store=store,
             attachments=_FakeAttachmentStore(),
             app_state=state,
         )
         return MainWindow(
             application=application,
-            note_repository=notes,
+            note_store=store,
             note_controller=controller,
             app_state=state,
         )
@@ -417,14 +446,16 @@ class MainWindowViewModeChangeFlushAndRefreshTests(unittest.TestCase):
         # the test setup linear and avoids interleaving signal handlers
         # with assertion setup.)
         state.set_selected_note_id(note_id)
+        store = NoteListStore(repository=notes)
+        store.load()
         controller = NoteController(
-            repository=notes,
+            note_store=store,
             attachments=_FakeAttachmentStore(),
             app_state=state,
         )
         window = MainWindow(
             application=application,
-            note_repository=notes,
+            note_store=store,
             note_controller=controller,
             app_state=state,
         )
@@ -493,47 +524,31 @@ class MainWindowViewModeChangeFlushAndRefreshTests(unittest.TestCase):
         self.assertEqual(saved_source, "= Hello\n\nbody.\nXYZ")
 
     def test_view_mode_change_to_view_refreshes_view_pane(self) -> None:
-        """A mode change to VIEW must re-read the source from the
-        repository so any disk-side change since the last render
-        becomes visible.
+        """Toggling to VIEW flushes the editor and shows the new content.
 
-        Even with the editor flush in place, the view would still
-        show stale content unless it is asked to refresh on every
-        mode change — its ``notify::selected-note-id`` subscription is
-        not enough on its own. We simulate "disk got updated"
-        without going through ``notify::selected-note-id`` by mutating
-        the fake repository directly; the toggle to EDIT and back
-        to VIEW is what must force the re-read.
+        With the store as the source of truth the view re-renders from
+        it; the remaining job of the mode-change handler is to flush the
+        editor's pending (debounced, unfired) autosave so the just-typed
+        text is in the store before the view reads it. We start in EDIT,
+        retype the body, and toggle to VIEW: the flush writes through to
+        the store and the rendered view shows the new title.
         """
-        window, repo, state = self._build_window_with_note(
-            view_mode=ViewMode.VIEW,
+        window, _repo, state = self._build_window_with_note(
+            view_mode=ViewMode.EDIT,
             source="= old\n",
         )
-        # The initial render already happened during construction.
+        # The view pane rendered "old" at construction time.
         self.assertIn("old", self._view_buffer_text(window))
 
-        # Mutate the underlying note out from under the view, without
-        # firing ``notify::selected-note-id`` (i.e. simulate that disk
-        # now holds different content).
-        existing = repo.notes["n1"]
-        repo.notes["n1"] = Note(
-            id=existing.id,
-            title=existing.title,
-            source="= new\n",
-            snippet=existing.snippet,
-            tags=(),
-            created_at=existing.created_at,
-            modified_at=existing.modified_at,
-        )
+        # Retype the body in the editor. The autosave is debounced and
+        # — with no GLib loop running — has not fired, so the store
+        # still holds "old".
+        editor_buffer = window._note_editor._buffer
+        editor_buffer.set_text("= new\n")
+        self.assertEqual(window._note_store.get_note("n1").source, "= old\n")
 
-        # The view still shows "old" because nothing has prompted it
-        # to re-read.
-        self.assertIn("old", self._view_buffer_text(window))
-        self.assertNotIn("new", self._view_buffer_text(window))
-
-        # Toggle VIEW → EDIT → VIEW. The second transition is where
-        # our handler asks the view to refresh.
-        state.set_view_mode(ViewMode.EDIT)
+        # Toggle VIEW. The handler flushes (editor → store) then the
+        # view re-reads and shows "new".
         state.set_view_mode(ViewMode.VIEW)
 
         rendered = self._view_buffer_text(window)
@@ -605,34 +620,21 @@ class MainWindowViewModeChangeFlushAndRefreshTests(unittest.TestCase):
 
 
 @unittest.skipUnless(_display_available(), "no GDK display")
-class MainWindowNotesChangedFanOutTests(unittest.TestCase):
-    """The window fans a controller ``notes-changed`` out to the two
-    data-driven panes (:class:`NoteList`, :class:`Sidebar`).
+class MainWindowStorePropagationTests(unittest.TestCase):
+    """A store mutation propagates to the data-driven panes.
 
-    This is the wiring the README's signal-flow section documents
-    ("``notes-changed`` → listeners re-query"), which had no listener
-    before this change: an edit to the *currently selected* note under
-    an *unchanged* filter fired the signal but refreshed nothing, so the
-    list row and the sidebar tag counts went stale until the next
-    selection change.
-
-    The tests drive the controller's ``notes-changed`` signal directly
-    rather than through a mutating controller method, isolating the
-    window's fan-out under test from the fake repository's stubbed
-    persistence (its ``insert`` / ``update_source`` are not exercised).
+    There is no longer a ``notes-changed`` fan-out: the note list binds
+    a ``Filter``/``Sort``/``ListView`` chain over the store and the
+    sidebar binds a :class:`TagCountsModel` over it, so a create / edit /
+    delete in the store ripples to both panes via ``items-changed``
+    without the window arbitrating.
     """
 
     def _build_window(
         self,
         *,
         select_note: bool = False,
-    ) -> tuple[MainWindow, _FakeNoteRepository, AppState]:
-        """Build a window over a fake repo seeded with one note.
-
-        With ``select_note`` the seeded note is selected before the
-        window is constructed, so the note list highlights it during its
-        construction-time refresh.
-        """
+    ) -> tuple[MainWindow, NoteListStore, AppState]:
         application = _test_application()
         notes = _FakeNoteRepository()
         notes.notes["n1"] = Note(
@@ -647,113 +649,75 @@ class MainWindowNotesChangedFanOutTests(unittest.TestCase):
         state = AppState()
         if select_note:
             state.set_selected_note_id("n1")
-        controller = NoteController(
+        store = NoteListStore(
             repository=notes,
+            clock=lambda: _FIXED_NOW,
+            id_factory=_id_sequence(),
+        )
+        store.load()
+        controller = NoteController(
+            note_store=store,
             attachments=_FakeAttachmentStore(),
             app_state=state,
         )
         window = MainWindow(
             application=application,
-            note_repository=notes,
+            note_store=store,
             note_controller=controller,
             app_state=state,
         )
-        return window, notes, state
+        return window, store, state
 
     @staticmethod
-    def _add_note(repo: _FakeNoteRepository, note_id: str) -> None:
-        """Put another note "on disk" without firing any AppState signal."""
-        repo.notes[note_id] = Note(
-            id=note_id,
-            title=f"Note {note_id}",
-            source=f"= Note {note_id}\n",
-            snippet="",
-            tags=(),
-            created_at=_FIXED_NOW,
-            modified_at=_FIXED_NOW,
-        )
+    def _note_ids(window: MainWindow) -> list[str]:
+        model = window._note_list._sort_model
+        return [model.get_item(i).note.id for i in range(model.get_n_items())]
 
-    def test_notes_changed_refreshes_note_list(self) -> None:
-        """A ``notes-changed`` emission re-queries the note list: a note
-        added since construction shows up, and the count label updates."""
-        window, repo, _state = self._build_window()
-        note_list = window._note_list
-        # The construction-time refresh shows exactly the seeded note.
-        self.assertIn("n1", note_list._row_for_note_id)
-        self.assertNotIn("n2", note_list._row_for_note_id)
-        self.assertEqual(note_list._count_label.get_text(), "1 notes")
+    def test_store_create_appears_in_note_list(self) -> None:
+        window, store, _state = self._build_window()
+        self.assertEqual(self._note_ids(window), ["n1"])
+        self.assertEqual(window._note_list._count_label.get_text(), "1 notes")
 
-        # A second note appears on disk; nothing has prompted a refresh.
-        self._add_note(repo, "n2")
-        self.assertNotIn("n2", note_list._row_for_note_id)
+        store.create("= Note n2\n\nbody")
 
-        # The controller announces the mutation; the window must fan it
-        # out to the list, which re-queries and re-renders.
-        window._note_controller.emit("notes-changed")
+        ids = self._note_ids(window)
+        self.assertIn("n1", ids)
+        self.assertEqual(len(ids), 2)
+        self.assertEqual(window._note_list._count_label.get_text(), "2 notes")
 
-        self.assertIn("n2", note_list._row_for_note_id)
-        self.assertEqual(note_list._count_label.get_text(), "2 notes")
-
-    def test_notes_changed_refreshes_sidebar_tags(self) -> None:
-        """A ``notes-changed`` emission rebuilds the sidebar Tags store
-        from ``list_tags()``."""
-        window, repo, _state = self._build_window()
+    def test_store_tagged_note_appears_in_sidebar(self) -> None:
+        window, store, _state = self._build_window()
         sidebar = window._sidebar
-        # The fake's ``list_tags`` starts empty, so no tag rows yet.
-        self.assertEqual(sidebar.tag_store.get_n_items(), 0)
+        self.assertEqual(sidebar.tag_model.get_n_items(), 0)
 
-        # A tag now exists on disk; emit the mutation signal.
-        repo.tag_pairs = (("project", 3),)
-        window._note_controller.emit("notes-changed")
+        store.create("= Project note\n:tags: project\n\nbody")
 
-        self.assertEqual(sidebar.tag_store.get_n_items(), 1)
-        item = sidebar.tag_store.get_item(0)
-        # ``_TagItem`` is private to ``ui.sidebar``; read its public
-        # fields by name (mirrors ``ui.test_sidebar``) rather than
-        # importing the class.
+        self.assertEqual(sidebar.tag_model.get_n_items(), 1)
+        item = sidebar.tag_model.get_item(0)
         self.assertEqual(getattr(item, "name", None), "project")
-        self.assertEqual(getattr(item, "count", None), 3)
+        self.assertEqual(getattr(item, "count", None), 1)
 
-    def test_notes_changed_preserves_selection(self) -> None:
-        """A refresh rebuilds every row, but the still-existing selected
-        note keeps its (new) row selected."""
-        window, repo, _state = self._build_window(select_note=True)
-        note_list = window._note_list
-        list_box = note_list._list_box
-        # The seeded note is selected after the construction-time refresh.
-        self.assertIs(
-            list_box.get_selected_row(),
-            note_list._row_for_note_id["n1"],
-        )
+    def test_store_mutation_preserves_unrelated_selection(self) -> None:
+        window, store, _state = self._build_window(select_note=True)
+        selection = window._note_list._selection_model
+        self.assertEqual(selection.get_selected_item().note.id, "n1")
 
-        # A non-destructive change (a new note appears), then the signal.
-        # The refresh rebuilds the rows, but "n1" still exists so its new
-        # row stays selected.
-        self._add_note(repo, "n2")
-        window._note_controller.emit("notes-changed")
+        # A direct store create does not touch AppState's selection, so
+        # the note list must keep "n1" highlighted across the splice.
+        store.create("= Note n2\n\nbody")
 
-        self.assertIs(
-            list_box.get_selected_row(),
-            note_list._row_for_note_id["n1"],
-        )
+        self.assertEqual(selection.get_selected_item().note.id, "n1")
 
-    def test_notes_changed_drops_selection_when_selected_note_gone(
-        self,
-    ) -> None:
-        """If the selected note no longer exists after the mutation, the
-        refresh leaves nothing selected — existing ``_apply_highlight``
-        behaviour, no new logic in the window."""
-        window, repo, _state = self._build_window(select_note=True)
-        note_list = window._note_list
-        list_box = note_list._list_box
-        self.assertIsNotNone(list_box.get_selected_row())
+    def test_delete_of_selected_note_clears_list_selection(self) -> None:
+        window, _store, _state = self._build_window(select_note=True)
+        selection = window._note_list._selection_model
+        self.assertEqual(selection.get_selected_item().note.id, "n1")
 
-        # The selected note disappears from disk; the refresh finds no
-        # row to reselect.
-        del repo.notes["n1"]
-        window._note_controller.emit("notes-changed")
+        # Deleting through the controller removes the row and clears the
+        # AppState selection; the note list mirrors that to no selection.
+        window._note_controller.request_delete("n1")
 
-        self.assertIsNone(list_box.get_selected_row())
+        self.assertIsNone(selection.get_selected_item())
 
 
 if __name__ == "__main__":

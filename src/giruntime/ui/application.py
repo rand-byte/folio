@@ -65,6 +65,7 @@ from config.defaults import SEED_WELCOME_NOTE_ID
 from config.paths import database_path
 from giruntime.controllers.app_state import AppState
 from giruntime.controllers.note_controller import NoteController
+from giruntime.controllers.note_list_store import NoteListStore
 from giruntime.ui.main_window import MainWindow
 from storage.attachment_store import AttachmentStore
 from storage.database import Database
@@ -114,6 +115,7 @@ class NotesApplication(Gtk.Application):
 
     _database: Database | None
     _note_repository: NoteRepository | None
+    _note_store: NoteListStore | None
     _attachment_store: AttachmentStore | None
     _app_state: AppState | None
     _note_controller: NoteController | None
@@ -125,6 +127,7 @@ class NotesApplication(Gtk.Application):
         )
         self._database = None
         self._note_repository = None
+        self._note_store = None
         self._attachment_store = None
         self._app_state = None
         self._note_controller = None
@@ -171,10 +174,12 @@ class NotesApplication(Gtk.Application):
         self._database = Database(database_path())
         apply_pending(self._database)
         self._note_repository = NoteRepository(self._database)
+        self._note_store = NoteListStore(repository=self._note_repository)
+        self._note_store.load()
         self._attachment_store = AttachmentStore(self._database)
         self._app_state = AppState()
         self._note_controller = NoteController(
-            repository=self._note_repository,
+            note_store=self._note_store,
             attachments=self._attachment_store,
             app_state=self._app_state,
         )
@@ -195,35 +200,38 @@ class NotesApplication(Gtk.Application):
         # Local non-None aliases — narrows ``Optional`` for the type
         # checker and documents the precondition that
         # :meth:`_initialise_runtime` ran first.
-        assert self._note_repository is not None
+        assert self._note_store is not None
         assert self._attachment_store is not None
         assert self._app_state is not None
         assert self._note_controller is not None
 
         window = MainWindow(
             application=self,
-            note_repository=self._note_repository,
+            note_store=self._note_store,
             note_controller=self._note_controller,
             app_state=self._app_state,
             attachment_store=self._attachment_store,
         )
-        self._select_initial_note(self._note_repository, self._app_state)
+        self._select_initial_note(self._note_store, self._app_state)
         return window
 
     @staticmethod
     def _select_initial_note(
-        repository: NoteRepository,
+        store: NoteListStore,
         app_state: AppState,
     ) -> None:
         """Pick the welcome note, or fall back to the newest note.
 
-        The two-step fallback (welcome → newest → none) is what keeps
-        the first-launch experience predictable while not breaking the
-        app for a user who has cleaned out their library. The fallback
-        chain is documented at the module level — keep them in sync.
+        Reads the in-memory store — the same truth the panes bind to —
+        rather than the repository, so startup selection cannot diverge
+        from what the views show. The two-step fallback (welcome →
+        newest → none) keeps the first-launch experience predictable
+        while not breaking the app for a user who has cleaned out their
+        library. The fallback chain is documented at the module level —
+        keep them in sync.
         """
         try:
-            welcome = repository.get(SEED_WELCOME_NOTE_ID)
+            welcome = store.get_note(SEED_WELCOME_NOTE_ID)
         except KeyError:
             welcome = None
 
@@ -231,11 +239,11 @@ class NotesApplication(Gtk.Application):
             app_state.set_selected_note_id(welcome.id)
             return
 
-        # ``list_all`` is sorted by ``modified_at DESC`` — the first
-        # entry is the most recently touched note.
-        all_notes = repository.list_all()
-        if all_notes:
-            app_state.set_selected_note_id(all_notes[0].id)
+        # The store loads in ``modified_at DESC`` order (the repository's
+        # ``list_all`` ordering), so item 0 is the most recently touched.
+        if store.get_n_items() > 0:
+            first = store.get_item(0)
+            app_state.set_selected_note_id(first.note.id)
             return
         # No notes at all — leave the selection empty. ``NoteView``
         # renders an empty buffer in that case.

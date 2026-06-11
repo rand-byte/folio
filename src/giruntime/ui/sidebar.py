@@ -15,9 +15,11 @@ Principles & invariants
     :class:`Gio.ListStore` of two items (``All notes``, ``Untagged``),
     driven by a :class:`Gtk.SingleSelection`.
   - **Tags** — a flat :class:`Gtk.ListView` over a
-    :class:`Gio.ListStore` populated from
-    :meth:`NoteRepositoryProtocol.list_tags`. Selection is a
-    :class:`Gtk.MultiSelection` because tags AND together.
+    :class:`Gtk.SortListModel` (alphabetical, via a
+    :class:`Gtk.StringSorter` on the tag name) wrapping the derived
+    :class:`controllers.tag_counts_model.TagCountsModel`, which
+    aggregates tag counts live off the in-memory note store. Selection
+    is a :class:`Gtk.MultiSelection` because tags AND together.
 
   There is no notebook tree. The :class:`Gtk.TreeListModel` /
   :class:`Gtk.TreeExpander` machinery (and the matching
@@ -51,12 +53,15 @@ Principles & invariants
   ``selection-changed``, so the highlight-application path is fenced
   behind :attr:`_suppress_selection_events` to avoid loops between
   AppState ⇄ widget.
-* :meth:`refresh` rebuilds the tag store from
-  :meth:`NoteRepositoryProtocol.list_tags`. The current tag selection
-  is snapshotted by tag name across rebuilds: tags that no longer
-  exist are dropped from :class:`AppState`'s selection (the AND filter
-  contracts accordingly). The Library section's items never change so
-  it does not need a snapshot.
+* The tag rows update **live** off the store: the
+  :class:`controllers.tag_counts_model.TagCountsModel` emits
+  ``items-changed`` as tags appear and disappear, so there is no
+  ``notes-changed`` fan-out to listen for. When a tag's last note is
+  removed the model drops the row; the sidebar then drops that tag from
+  :class:`AppState`'s selection (the AND filter contracts accordingly).
+  The Library counts (``All notes`` / ``Untagged``) are derived from
+  the store's contents and recomputed on the store's ``items-changed``.
+  The Library section's row set never changes, only its counts.
 * GTK 4.18 / 4.10 deprecations are avoided: model-driven list widgets
   (:class:`Gtk.ListView`, :class:`Gtk.SingleSelection`,
   :class:`Gtk.MultiSelection`) and the GTK 4 idiomatic icon API.
@@ -69,10 +74,14 @@ from typing import Final
 
 from gi.repository import Gdk, Gio, GObject, Gtk, Pango
 
-from giruntime.controllers.app_state import AppState
 from enums import SmartFilter
+from giruntime.controllers.app_state import AppState
+from giruntime.controllers.note_item import NoteItem
+from giruntime.controllers.note_list_store import NoteListStore
+from giruntime.controllers.tag_counts_model import TagCountsModel
+from giruntime.controllers.tag_counts_model import TagItem as TagCountItem
+from models.note import Note
 from search.note_filter import SmartSelection, TagSelection
-from storage.protocols import NoteRepositoryProtocol
 
 
 type _TagRowClickHandler = Callable[[int], None]
@@ -175,20 +184,6 @@ class _SmartItem(GObject.Object):
         self.label = label
         self.count = count
         self.smart_filter = smart_filter
-
-
-class _TagItem(GObject.Object):
-    """A row in the Tags section."""
-
-    __gtype_name__ = "NotesSidebarTagItem"
-
-    name: str
-    count: int
-
-    def __init__(self, *, name: str, count: int) -> None:
-        super().__init__()
-        self.name = name
-        self.count = count
 
 
 # ---------------------------------------------------------------------------
@@ -425,7 +420,7 @@ def _on_tag_factory_bind(
 ) -> None:
     item = list_item.get_item()
     box = list_item.get_child()
-    if not isinstance(item, _TagItem) or not isinstance(box, Gtk.Box):
+    if not isinstance(item, TagCountItem) or not isinstance(box, Gtk.Box):
         return
     label = box.get_first_child()
     if isinstance(label, Gtk.Label):
@@ -451,12 +446,13 @@ class Sidebar(  # pylint: disable=too-many-instance-attributes
     by :class:`AppState`, not by this widget.
     """
 
-    _note_repository: NoteRepositoryProtocol
+    _note_store: NoteListStore
     _app_state: AppState
 
     _smart_store: Gio.ListStore
     _smart_selection: Gtk.SingleSelection
-    _tag_store: Gio.ListStore
+    _tag_counts: TagCountsModel
+    _tag_model: Gtk.SortListModel
     _tag_selection: Gtk.MultiSelection
     _tag_list_view: Gtk.ListView
     _tags_header_box: Gtk.Box
@@ -465,11 +461,11 @@ class Sidebar(  # pylint: disable=too-many-instance-attributes
     def __init__(
         self,
         *,
-        note_repository: NoteRepositoryProtocol,
+        note_store: NoteListStore,
         app_state: AppState,
     ) -> None:
         super().__init__(orientation=Gtk.Orientation.VERTICAL, spacing=0)
-        self._note_repository = note_repository
+        self._note_store = note_store
         self._app_state = app_state
         self._suppress_selection_events = False
 
@@ -495,8 +491,14 @@ class Sidebar(  # pylint: disable=too-many-instance-attributes
         self._tags_header_box = _make_tags_header()
         self.append(self._tags_header_box)
 
-        self._tag_store = Gio.ListStore.new(_TagItem)
-        self._tag_selection = Gtk.MultiSelection.new(self._tag_store)
+        # The tag rows are a derived, alphabetically-sorted view of the
+        # live tag counts over the note store — no manual rebuild.
+        self._tag_counts = TagCountsModel(note_store)
+        name_sorter = Gtk.StringSorter.new(
+            Gtk.PropertyExpression.new(TagCountItem, None, "name"),
+        )
+        self._tag_model = Gtk.SortListModel.new(self._tag_counts, name_sorter)
+        self._tag_selection = Gtk.MultiSelection.new(self._tag_model)
         self._tag_list_view = Gtk.ListView.new(
             self._tag_selection,
             _make_tag_row_factory(self._on_tag_row_clicked),
@@ -518,6 +520,14 @@ class Sidebar(  # pylint: disable=too-many-instance-attributes
             "selection-changed",
             self._on_tag_selection_changed,
         )
+        # Library counts track the store; tag membership / drop tracks
+        # the derived model.
+        self._note_store.connect(
+            "items-changed", self._on_store_items_changed,
+        )
+        self._tag_model.connect(
+            "items-changed", self._on_tag_model_items_changed,
+        )
         self._app_state.connect(
             "notify::selection",
             self._on_app_state_selection_changed,
@@ -531,19 +541,34 @@ class Sidebar(  # pylint: disable=too-many-instance-attributes
     # ------------------------------------------------------------------
 
     def refresh(self) -> None:
-        """Rebuild every row and update every count.
+        """Recompute the Library counts and reconcile selection.
 
-        Idempotent. Triggered automatically on construction and (from
-        the main window) on every ``notes-changed`` from the
-        :class:`NoteController`.
+        Idempotent. Triggered on construction and whenever the store or
+        the derived tag model changes. The tag rows themselves are
+        model-driven (no manual rebuild); this method rebuilds the two
+        Library rows from the store's contents, drops any selected tag
+        that no longer exists, then re-applies the highlight and the
+        Tags header.
         """
-        notes = self._note_repository.list_all()
-        tag_pairs = self._note_repository.list_tags()
+        self._rebuild_smart_rows()
+        self._drop_missing_selected_tags()
+        self._apply_highlight()
+        self._refresh_tags_header()
 
-        # ----- Library section -----
-        self._smart_store.remove_all()
+    def _iter_store_notes(self) -> list[Note]:
+        notes: list[Note] = []
+        for position in range(self._note_store.get_n_items()):
+            item = self._note_store.get_item(position)
+            if isinstance(item, NoteItem):
+                notes.append(item.note)
+        return notes
+
+    def _rebuild_smart_rows(self) -> None:
+        """Rebuild the two Library rows with fresh counts from the store."""
+        notes = self._iter_store_notes()
         all_count = len(notes)
         untagged_count = count_untagged(notes)
+        self._smart_store.remove_all()
         for smart_filter in _SMART_FILTER_DISPLAY_ORDER:
             count = all_count if smart_filter is SmartFilter.ALL else untagged_count
             self._smart_store.append(
@@ -555,23 +580,45 @@ class Sidebar(  # pylint: disable=too-many-instance-attributes
                 ),
             )
 
-        # ----- Tags section -----
-        existing_names = {name for name, _ in tag_pairs}
-        # Drop selected tags that no longer exist before rebuilding.
+    def _existing_tag_names(self) -> set[str]:
+        names: set[str] = set()
+        for position in range(self._tag_model.get_n_items()):
+            item = self._tag_model.get_item(position)
+            if isinstance(item, TagCountItem):
+                names.add(item.name)
+        return names
+
+    def _drop_missing_selected_tags(self) -> None:
+        """Drop AppState-selected tags that no longer exist in the model."""
         selection = self._app_state.selection
-        if isinstance(selection, TagSelection):
-            survivors = selection.tags & existing_names
-            if survivors != selection.tags:
-                # ``AppState`` does not expose a bulk-set mutator; toggle
-                # each removed tag off. Each call is idempotent on a
-                # missing tag, so toggling drops the membership.
-                for missing in selection.tags - survivors:
-                    self._app_state.toggle_tag(missing)
+        if not isinstance(selection, TagSelection):
+            return
+        existing = self._existing_tag_names()
+        survivors = selection.tags & existing
+        if survivors != selection.tags:
+            # ``AppState`` has no bulk-set mutator; toggle each removed
+            # tag off (idempotent on a missing tag, so this drops it).
+            for missing in selection.tags - survivors:
+                self._app_state.toggle_tag(missing)
 
-        self._tag_store.remove_all()
-        for name, count in tag_pairs:
-            self._tag_store.append(_TagItem(name=name, count=count))
+    def _on_store_items_changed(
+        self,
+        _model: NoteListStore,
+        _position: int,
+        _removed: int,
+        _added: int,
+    ) -> None:
+        self._rebuild_smart_rows()
+        self._apply_highlight()
 
+    def _on_tag_model_items_changed(
+        self,
+        _model: Gtk.SortListModel,
+        _position: int,
+        _removed: int,
+        _added: int,
+    ) -> None:
+        self._drop_missing_selected_tags()
         self._apply_highlight()
         self._refresh_tags_header()
 
@@ -603,10 +650,10 @@ class Sidebar(  # pylint: disable=too-many-instance-attributes
         if self._suppress_selection_events:
             return
         new_selected_names: set[str] = set()
-        for index in range(self._tag_store.get_n_items()):
+        for index in range(self._tag_model.get_n_items()):
             if self._tag_selection.is_selected(index):
-                item = self._tag_store.get_item(index)
-                if isinstance(item, _TagItem):
+                item = self._tag_model.get_item(index)
+                if isinstance(item, TagCountItem):
                     new_selected_names.add(item.name)
         current = self._app_state.selection
         current_names: set[str] = (
@@ -651,14 +698,14 @@ class Sidebar(  # pylint: disable=too-many-instance-attributes
         self._smart_selection.set_selected(Gtk.INVALID_LIST_POSITION)
 
     def _clear_tag_selection(self) -> None:
-        if self._tag_store.get_n_items() == 0:
+        if self._tag_model.get_n_items() == 0:
             return
         self._tag_selection.unselect_all()
 
     def _select_tag_rows(self, tags: frozenset[str]) -> None:
-        for index in range(self._tag_store.get_n_items()):
-            item = self._tag_store.get_item(index)
-            if not isinstance(item, _TagItem):
+        for index in range(self._tag_model.get_n_items()):
+            item = self._tag_model.get_item(index)
+            if not isinstance(item, TagCountItem):
                 continue
             if item.name in tags:
                 self._tag_selection.select_item(index, False)
@@ -709,8 +756,13 @@ class Sidebar(  # pylint: disable=too-many-instance-attributes
         return self._smart_store
 
     @property
-    def tag_store(self) -> Gio.ListStore:
-        return self._tag_store
+    def tag_model(self) -> Gtk.SortListModel:
+        """The alphabetically-sorted, derived tag-count model.
+
+        Exposed (in place of the former raw ``tag_store``) so tests can
+        inspect the live tag rows the Tags ``ListView`` binds to.
+        """
+        return self._tag_model
 
     @property
     def tag_selection(self) -> Gtk.MultiSelection:

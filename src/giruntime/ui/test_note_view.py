@@ -17,10 +17,11 @@ from config.defaults import (
     ARTICLE_TOP_MARGIN_LINES,
     TARGET_CHARS_PER_LINE,
 )
-from giruntime.controllers.app_state import AppState
 from enums import AdmonitionKind, MimeKind, ParseErrorKind
 from models.attachment import Attachment
 from models.note import Note
+from giruntime.controllers.app_state import AppState
+from giruntime.controllers.note_list_store import NoteListStore
 from giruntime.ui import note_view as note_view_module
 from giruntime.ui.note_render.tag_table import (
     TagName,
@@ -156,12 +157,12 @@ class _FakeNoteRepository:
         raise NotImplementedError
 
     def list_all(self) -> list[Note]:
-        raise NotImplementedError
+        return list(self.notes.values())
 
     def search(self, _query: str) -> list[Note]:
         raise NotImplementedError
 
-    def insert(self, _note: Note) -> None:
+    def insert(self, _note: Note) -> Note:
         raise NotImplementedError
 
     def update_source(
@@ -169,7 +170,7 @@ class _FakeNoteRepository:
         _note_id: str,
         _source: str,
         _modified_at: datetime,
-    ) -> None:
+    ) -> Note:
         raise NotImplementedError
 
     def delete(self, _note_id: str) -> None:
@@ -177,6 +178,32 @@ class _FakeNoteRepository:
 
     def list_tags(self) -> tuple[tuple[str, int], ...]:
         return ()
+
+
+class _TrackingNoteListStore(NoteListStore):
+    """A :class:`NoteListStore` that records :meth:`get_note` calls.
+
+    Lets the view smoke-tests assert which note the view read, and in
+    what order, now that body reads come from the store rather than the
+    repository.
+    """
+
+    get_calls: list[str]
+
+    def __init__(self, *, repository: _FakeNoteRepository) -> None:
+        super().__init__(repository=repository)
+        self.get_calls = []
+
+    def get_note(self, note_id: str) -> Note:
+        self.get_calls.append(note_id)
+        return super().get_note(note_id)
+
+
+def _build_tracking_store(repo: _FakeNoteRepository) -> _TrackingNoteListStore:
+    """Build a loaded tracking store over ``repo``'s seeded notes."""
+    store = _TrackingNoteListStore(repository=repo)
+    store.load()
+    return store
 
 
 class _FakeAttachmentStore:
@@ -797,24 +824,26 @@ class NoteViewSmokeTests(unittest.TestCase):
 
     def test_constructs_with_empty_state(self) -> None:
         repo = _FakeNoteRepository()
+        store = _build_tracking_store(repo)
         app_state = AppState()
-        view = NoteView(note_repository=repo, app_state=app_state)
-        # No note is selected, so the repo's ``get`` must not have run.
-        self.assertEqual(repo.get_calls, [])
+        view = NoteView(note_store=store, app_state=app_state)
+        # No note is selected, so the store's ``get_note`` must not run.
+        self.assertEqual(store.get_calls, [])
         # The widget exists and is a GTK box.
         self.assertIsInstance(view, Gtk.Box)
 
     def test_initial_render_pulls_currently_selected_note(self) -> None:
         repo = _FakeNoteRepository()
         repo.notes["note-A"] = _make_note("note-A")
+        store = _build_tracking_store(repo)
         app_state = AppState()
         # Selection is set *before* construction — the initial refresh
         # should pick this up.
         app_state.set_selected_note_id("note-A")
 
-        NoteView(note_repository=repo, app_state=app_state)
+        NoteView(note_store=store, app_state=app_state)
 
-        self.assertEqual(repo.get_calls, ["note-A"])
+        self.assertEqual(store.get_calls, ["note-A"])
 
     def test_selection_change_triggers_refresh(self) -> None:
         repo = _FakeNoteRepository()
@@ -822,40 +851,43 @@ class NoteViewSmokeTests(unittest.TestCase):
         repo.notes["note-B"] = _make_note(
             "note-B", source="= Other\n\nelsewhere.\n",
         )
+        store = _build_tracking_store(repo)
         app_state = AppState()
-        NoteView(note_repository=repo, app_state=app_state)
-        self.assertEqual(repo.get_calls, [])
+        NoteView(note_store=store, app_state=app_state)
+        self.assertEqual(store.get_calls, [])
 
         app_state.set_selected_note_id("note-A")
         app_state.set_selected_note_id("note-B")
 
-        # Both selections drove a refresh and therefore a repository
-        # ``get``. Order matches the selection sequence.
-        self.assertEqual(repo.get_calls, ["note-A", "note-B"])
+        # Both selections drove a refresh and therefore a store
+        # ``get_note``. Order matches the selection sequence.
+        self.assertEqual(store.get_calls, ["note-A", "note-B"])
 
     def test_clearing_selection_does_not_call_get(self) -> None:
         repo = _FakeNoteRepository()
+        store = _build_tracking_store(repo)
         app_state = AppState()
-        NoteView(note_repository=repo, app_state=app_state)
+        NoteView(note_store=store, app_state=app_state)
 
         app_state.set_selected_note_id(None)
         # Setting to None when it was already None is a no-op (the
-        # signal is gated on a real change). Either way the repo is
+        # signal is gated on a real change). Either way the store is
         # not consulted for a None selection.
-        self.assertEqual(repo.get_calls, [])
+        self.assertEqual(store.get_calls, [])
 
     def test_unknown_selected_note_id_is_handled_gracefully(self) -> None:
         # A stale id (e.g. note deleted in another window) must not
         # crash the view — it simply renders nothing.
         repo = _FakeNoteRepository()  # empty
+        store = _build_tracking_store(repo)
         app_state = AppState()
-        view = NoteView(note_repository=repo, app_state=app_state)
+        view = NoteView(note_store=store, app_state=app_state)
 
         app_state.set_selected_note_id("does-not-exist")
 
-        # The repo *was* asked, but the missing-id path swallowed the
+        # The store *was* asked, but the missing-id path swallowed the
         # KeyError and cleared the buffer.
-        self.assertEqual(repo.get_calls, ["does-not-exist"])
+        self.assertEqual(store.get_calls, ["does-not-exist"])
         # The widget is still alive and the underlying buffer is empty.
         text_view_buffer = _find_text_view_buffer(view)
         self.assertEqual(
@@ -967,7 +999,7 @@ class NoteViewImageResolverTests(unittest.TestCase):
         )
         state = AppState()
         view = NoteView(
-            note_repository=repo,
+            note_store=_build_tracking_store(repo),
             app_state=state,
             attachments=attachments,
         )
@@ -1076,7 +1108,7 @@ class NoteViewAttachmentSmokeTests(unittest.TestCase):
         store = _FakeAttachmentStore()
         state = AppState()
         view = NoteView(
-            note_repository=repo,
+            note_store=_build_tracking_store(repo),
             app_state=state,
             attachments=store,
         )
@@ -1091,7 +1123,7 @@ class NoteViewAttachmentSmokeTests(unittest.TestCase):
         # ``None`` and the resolver falls back to placeholder bytes.
         repo = _FakeNoteRepository()
         state = AppState()
-        view = NoteView(note_repository=repo, app_state=state)
+        view = NoteView(note_store=_build_tracking_store(repo), app_state=state)
         self.assertEqual(view.image_bytes_resolver("any.png"), b"")
 
 
@@ -1122,7 +1154,7 @@ class NoteViewMarginWiringTests(unittest.TestCase):
             "_build_font_measurers",
             _stub_font_measurers_factory(char_w=char_w, line_h=line_h),
         ):
-            return NoteView(note_repository=repo, app_state=state)
+            return NoteView(note_store=_build_tracking_store(repo), app_state=state)
 
     def test_textview_top_margin_is_four_line_heights(self) -> None:
         view = self._build_view_with_stubbed_font(char_w=10, line_h=20)
@@ -1191,7 +1223,7 @@ class NoteViewPreferredColumnWidthTests(unittest.TestCase):
             "_build_font_measurers",
             _stub_font_measurers_factory(char_w=char_w, line_h=line_h),
         ):
-            return NoteView(note_repository=repo, app_state=state)
+            return NoteView(note_store=_build_tracking_store(repo), app_state=state)
 
     def test_reports_outer_column_width(self) -> None:
         view = self._build_view_with_stubbed_font(char_w=10, line_h=20)
@@ -1229,7 +1261,7 @@ class NoteViewRendererWiringTests(unittest.TestCase):
             "_build_font_measurers",
             _stub_font_measurers_factory(char_w=char_w, line_h=line_h),
         ):
-            return NoteView(note_repository=repo, app_state=state)
+            return NoteView(note_store=_build_tracking_store(repo), app_state=state)
 
     def test_renderer_receives_text_column_width_not_outer(self) -> None:
         # char_w=10 → text width = 66 × 10 = 660; outer width =
@@ -1321,7 +1353,7 @@ class NoteViewErrorBannerTests(unittest.TestCase):
         # hidden, the buffer empty.
         repo = _FakeNoteRepository()
         app_state = AppState()
-        view = NoteView(note_repository=repo, app_state=app_state)
+        view = NoteView(note_store=_build_tracking_store(repo), app_state=app_state)
         self.assertFalse(view.error_banner_visible)
         self.assertEqual(view.error_banner_text, "")
 
@@ -1329,7 +1361,7 @@ class NoteViewErrorBannerTests(unittest.TestCase):
         repo = _FakeNoteRepository()
         repo.notes["note-A"] = _make_note("note-A")  # parses cleanly
         app_state = AppState()
-        view = NoteView(note_repository=repo, app_state=app_state)
+        view = NoteView(note_store=_build_tracking_store(repo), app_state=app_state)
         app_state.set_selected_note_id("note-A")
         self.assertFalse(view.error_banner_visible)
         self.assertEqual(view.error_banner_text, "")
@@ -1345,7 +1377,7 @@ class NoteViewErrorBannerTests(unittest.TestCase):
             source=":bad name: value\n",
         )
         app_state = AppState()
-        view = NoteView(note_repository=repo, app_state=app_state)
+        view = NoteView(note_store=_build_tracking_store(repo), app_state=app_state)
         app_state.set_selected_note_id("note-A")
 
         self.assertTrue(view.error_banner_visible)
@@ -1372,7 +1404,7 @@ class NoteViewErrorBannerTests(unittest.TestCase):
             source="link:ftp://example.com[click]\n",
         )
         app_state = AppState()
-        view = NoteView(note_repository=repo, app_state=app_state)
+        view = NoteView(note_store=_build_tracking_store(repo), app_state=app_state)
         app_state.set_selected_note_id("note-A")
 
         self.assertTrue(view.error_banner_visible)
@@ -1393,7 +1425,7 @@ class NoteViewErrorBannerTests(unittest.TestCase):
         )
         repo.notes["good"] = _make_note("good")
         app_state = AppState()
-        view = NoteView(note_repository=repo, app_state=app_state)
+        view = NoteView(note_store=_build_tracking_store(repo), app_state=app_state)
 
         app_state.set_selected_note_id("bad")
         self.assertTrue(view.error_banner_visible)
@@ -1411,7 +1443,7 @@ class NoteViewErrorBannerTests(unittest.TestCase):
             "bad", source="*unclosed bold\n",
         )
         app_state = AppState()
-        view = NoteView(note_repository=repo, app_state=app_state)
+        view = NoteView(note_store=_build_tracking_store(repo), app_state=app_state)
         app_state.set_selected_note_id("bad")
         self.assertTrue(view.error_banner_visible)
 
@@ -1427,7 +1459,7 @@ class NoteViewErrorBannerTests(unittest.TestCase):
             "bad", source="*unclosed\n",
         )
         app_state = AppState()
-        view = NoteView(note_repository=repo, app_state=app_state)
+        view = NoteView(note_store=_build_tracking_store(repo), app_state=app_state)
         app_state.set_selected_note_id("bad")
         self.assertTrue(view.error_banner_visible)
 
@@ -1446,7 +1478,7 @@ class NoteViewErrorBannerTests(unittest.TestCase):
             "bad", source="link:bogus://x[t]\n",
         )
         app_state = AppState()
-        view = NoteView(note_repository=repo, app_state=app_state)
+        view = NoteView(note_store=_build_tracking_store(repo), app_state=app_state)
 
         app_state.set_selected_note_id("good")
         buffer = _find_text_view_buffer(view)
@@ -1712,7 +1744,7 @@ class NoteViewMetadataTests(unittest.TestCase):
             "_build_font_measurers",
             _stub_font_measurers_factory(char_w=10, line_h=20),
         ):
-            return NoteView(note_repository=repo, app_state=state)
+            return NoteView(note_store=_build_tracking_store(repo), app_state=state)
 
     def test_metadata_line_sits_immediately_under_the_title(self) -> None:
         repo = _FakeNoteRepository()
