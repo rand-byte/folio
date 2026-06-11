@@ -27,8 +27,8 @@ dependencies = [
 # ``StrEnum`` members to the ``str`` mixin when an enum class was passed to
 # builtins typed ``Iterable[_T]`` (``enumerate``/``list``) — see
 # python/mypy#18587, fixed in 1.16. Below that floor ``make type`` reports
-# spurious ``NotebookIcon``-vs-``str`` errors in ``ui/dialogs.py`` and
-# ``ui/test_dialogs.py``; pinning the floor keeps it from regressing.
+# spurious ``NotebookIcon``-vs-``str`` errors in ``giruntime/ui/dialogs.py`` and
+# ``giruntime/ui/test_dialogs.py``; pinning the floor keeps it from regressing.
 [dependency-groups]
 dev = [
     "mypy>=1.16",
@@ -61,10 +61,12 @@ incremental = false
 cache_dir = "/dev/null"
 
 # ``src`` is the source root but not an importable package (it has no
-# ``__init__.py``), so its top-level modules (``config``, ``ui``, …) are
-# imported by their bare names. These two keys tell mypy to treat ``src``
-# as the import base and to allow package-less top-level modules,
-# avoiding spurious duplicate-module / "not in a package" errors.
+# ``__init__.py``), so its top-level modules (``config``, ``enums``, …) are
+# imported by their bare names, while the GI-dependent layers live under
+# the real ``giruntime`` package discovered beneath it. These two keys
+# tell mypy to treat ``src`` as the import base and to allow package-less
+# top-level modules, avoiding spurious duplicate-module /
+# "not in a package" errors.
 mypy_path = "src"
 explicit_package_bases = true
 

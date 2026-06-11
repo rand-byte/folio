@@ -8,14 +8,14 @@ PY_TST := $(shell find src -type f -name "test_*.py")
 # committed manifest before launch, so dev, test, and prod all load the
 # grammar through the same compiled bundle.
 PYZ      := folio.pyz
-GRES     := src/ui/folio.gresource
-GRES_XML := src/ui/folio.gresource.xml
-GRES_SRC := src/ui/language_spec.lang
+GRES     := src/giruntime/ui/folio.gresource
+GRES_XML := src/giruntime/ui/folio.gresource.xml
+GRES_SRC := src/giruntime/ui/language_spec.lang
 SHEBANG  := /usr/bin/env python3
 
 # compile grammar -> GResource (sourcedir = where the manifest's <file> resolves)
 $(GRES): $(GRES_XML) $(GRES_SRC)
-	glib-compile-resources --sourcedir=src/ui --target=$@ $(GRES_XML)
+	glib-compile-resources --sourcedir=src/giruntime/ui --target=$@ $(GRES_XML)
 
 # named alias so `run` (and humans) need not know the artifact path
 resource: $(GRES)
@@ -40,7 +40,7 @@ resource: $(GRES)
 # logical line joined with `\`.
 #
 # The target depends on $(GRES): the single grammar load path (see
-# ui/note_editor.py) reads the compiled GResource, so it must exist before
+# giruntime/ui/note_editor.py) reads the compiled GResource, so it must exist before
 # discovery. Discovery uses `-t src` so `src` is the top-level dir and test
 # modules import as `config.test_paths` etc., now that `src` is not a package.
 test: $(GRES)
@@ -62,7 +62,7 @@ type:
 # pylint resolves intra-tree imports off ``src`` on the path. The former
 # package layout let pylint add the package parent to sys.path
 # automatically; now that ``src`` is the package-less source root,
-# PYTHONPATH=src is what lets ``import config``/``import ui`` etc. resolve.
+# PYTHONPATH=src is what lets ``import config``/``import giruntime.ui`` etc. resolve.
 # The disable/enable flags are unchanged from the package layout.
 lint:
 	python3 -B -m pylint $(PY_SRC)
