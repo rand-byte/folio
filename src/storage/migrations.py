@@ -13,7 +13,7 @@ Principles & invariants
   releases without losing data. v1 (notebooks + welcome note) and v2
   (cached-column backfill) are byte-identical to their shipped form;
   v3 demolishes the notebook schema and introduces the ``note_tags``
-  junction table.
+  junction table; v4 drops the unused ``attachments.mime_type`` column.
 * :func:`apply_pending` is idempotent: invoking it on a database that
   is already at the latest version is a no-op. Each migration runs
   inside its own transaction (composed via :meth:`Database.transaction`),
@@ -280,6 +280,27 @@ def _apply_v3(connection: sqlite3.Connection, now: datetime) -> None:
 
 
 # ---------------------------------------------------------------------------
+# v4 migration body — drop the unused attachments.mime_type column
+# ---------------------------------------------------------------------------
+
+
+def _apply_v4(connection: sqlite3.Connection, now: datetime) -> None:
+    """Drop ``attachments.mime_type``.
+
+    The column was written and read back but consumed by nothing: the
+    renderer sniffs bytes via ``Gdk.Texture`` and the add-time type
+    allow-list it once backed is gone (attachments are opaque blobs;
+    the size cap is the only remaining gate). SQLite >= 3.35 supports
+    ``DROP COLUMN`` — the same facility v3 already relies on. Existing
+    rows (including their BLOBs) are preserved.
+
+    ``now`` is unused: a column drop does not touch timestamps.
+    """
+    _ = now
+    connection.execute("ALTER TABLE attachments DROP COLUMN mime_type")
+
+
+# ---------------------------------------------------------------------------
 # Migration registry — append-only
 # ---------------------------------------------------------------------------
 
@@ -287,6 +308,7 @@ ALL_MIGRATIONS: tuple[Migration, ...] = (
     Migration(version=1, apply=_apply_v1),
     Migration(version=2, apply=_apply_v2),
     Migration(version=3, apply=_apply_v3),
+    Migration(version=4, apply=_apply_v4),
 )
 
 

@@ -46,8 +46,9 @@ Principles & invariants
   failure mode at this layer — better than swallowing the error and
   showing an empty window with no explanation.
 * From build step 11 the :class:`AttachmentStore` is wired in for
-  real: image attachments now flow end-to-end through the editor's
-  Image button → :class:`Gtk.FileDialog` → :class:`NoteController.add_attachment`
+  real: attachments flow end-to-end through the editor pane's
+  attachments-panel *Add file* button → :class:`Gtk.FileDialog` →
+  :class:`NoteController.add_attachment`
   → :class:`AttachmentStore.add_for_note` → SQLite BLOB; and the
   rendered view's image-bytes resolver (built inside
   :class:`NoteView`) closes over the same store to fetch bytes by

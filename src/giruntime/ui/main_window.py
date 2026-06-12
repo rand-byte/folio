@@ -312,6 +312,7 @@ class MainWindow(  # pylint: disable=too-many-instance-attributes
         )
         self._note_list = NoteList(
             note_store=note_store,
+            note_controller=note_controller,
             app_state=app_state,
             attachment_store=attachment_store,
         )
@@ -325,10 +326,15 @@ class MainWindow(  # pylint: disable=too-many-instance-attributes
             app_state=app_state,
             attachments=attachment_store,
         )
+        # The editor embeds the attachments panel, which lists the
+        # selected note's attachment metadata — so the editor now
+        # receives the attachment store on the same optional contract
+        # as the list and the view.
         self._note_editor = NoteEditor(
             note_store=note_store,
             note_controller=note_controller,
             app_state=app_state,
+            attachments=attachment_store,
         )
 
         # Now that the rendered view exists (and has measured the body

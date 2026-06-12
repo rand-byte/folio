@@ -176,19 +176,18 @@ class AttachmentStoreProtocol(Protocol):
     """
 
     def add_for_note(self, note_id: str, source_path: Path) -> Attachment:
-        """Copy an image file's bytes into the store and return its
-        metadata.
+        """Copy a file's bytes into the store and return its metadata.
 
-        Raises :class:`AttachmentRejected` with the corresponding
-        :class:`AttachmentRejectionReason` when:
+        Attachments are opaque blobs — there is no content-type
+        allow-list. Raises :class:`AttachmentRejected` with the
+        corresponding :class:`AttachmentRejectionReason` when:
 
         * the source file's :meth:`pathlib.Path.stat` size exceeds
           :data:`config.defaults.MAX_ATTACHMENT_BYTES`
           (``EXCEEDS_SIZE_LIMIT``) — checked before any bytes enter
           memory;
-        * the file's MIME type is outside
-          :class:`enums.MimeKind` (``UNSUPPORTED_MIME_TYPE``);
-        * the source file cannot be opened or read (``UNREADABLE_SOURCE``).
+        * the source file cannot be stat'd, opened, or read
+          (``UNREADABLE_SOURCE``).
         """
 
     def remove(self, attachment_id: str) -> None: ...

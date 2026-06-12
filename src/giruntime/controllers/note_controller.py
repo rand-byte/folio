@@ -31,10 +31,11 @@ Principles & invariants
   view, and the sidebar all update by observing the store's
   ``items-changed`` (directly or through the derived
   :class:`controllers.tag_counts_model.TagCountsModel`), so the old
-  coarse fan-out is gone. The note-list attachment badge stays live
-  because adding an image inserts an image macro into the editor buffer,
-  which autosaves → :meth:`update_source` → a store replace → factory
-  re-bind.
+  coarse fan-out is gone. Attachment mutations never touch the note
+  source, so they ride a dedicated **narrow** signal instead:
+  ``attachments-changed`` (per-note, emitted after a successful
+  add/remove) keeps the attachments panel and the note-list 📎 badge
+  live without re-introducing a broadcast.
 * :func:`make_initial_source` is a free function (not a method) that
   builds the initial ``:tags:`` line for a freshly-created note. The
   toolbar's *New* handler calls it against the current sidebar
@@ -122,6 +123,13 @@ class NoteController(GObject.Object):
     -------
     attachment-rejected
         Fired when :meth:`add_attachment` declines a file.
+    attachments-changed
+        Fired after a successful :meth:`add_attachment` /
+        :meth:`remove_attachment`, carrying the affected note's id. A
+        narrow per-note attachment event — **not** a note-changed
+        broadcast — consumed by the attachments panel and the
+        note-list 📎 badge, neither of which would otherwise refresh
+        (attachment mutations no longer touch the note source).
     storage-error
         Fired when a database operation raises. Carries a single
         :class:`str`.
@@ -132,6 +140,11 @@ class NoteController(GObject.Object):
             GObject.SignalFlags.RUN_LAST,
             None,
             (object,),
+        ),
+        "attachments-changed": (
+            GObject.SignalFlags.RUN_LAST,
+            None,
+            (str,),
         ),
         "storage-error": (
             GObject.SignalFlags.RUN_LAST,
@@ -213,19 +226,31 @@ class NoteController(GObject.Object):
     ) -> Attachment | None:
         """Attach the file at ``source_path`` to ``note_id``.
 
-        On success the note-list 📎 badge refreshes via the editor's
-        autosave path: the image macro the caller inserts into the
-        buffer triggers an :meth:`update_source`, which replaces the
-        note's row in the store and re-binds the factory.
+        Attaching never touches the note's source (no macro is
+        inserted on the caller's behalf), so the success path emits
+        ``attachments-changed`` — that signal is what refreshes the
+        attachments panel and the note-list 📎 badge. A rejection
+        emits ``attachment-rejected`` instead and returns ``None``.
         """
         try:
             attachment = self._attachments.add_for_note(note_id, source_path)
         except AttachmentRejected as exc:
             self.emit("attachment-rejected", exc.reason)
             return None
+        self.emit("attachments-changed", note_id)
         return attachment
 
-    def remove_attachment(self, attachment_id: str) -> None:
-        """Remove an attachment by id."""
+    def remove_attachment(self, attachment_id: str, note_id: str) -> None:
+        """Remove an attachment by id.
+
+        ``note_id`` is the owning note — the store's ``remove`` keys on
+        the attachment id alone, but the ``attachments-changed`` signal
+        carries the note id so observers (panel, badge) know which note
+        to refresh. Callers hold the :class:`Attachment` metadata they
+        are removing, so both ids are at hand. The signal fires only
+        after a successful removal: a storage error propagates out of
+        ``capturing_storage_errors`` before the emit.
+        """
         with capturing_storage_errors(self._emit_storage_error, "remove attachment"):
             self._attachments.remove(attachment_id)
+        self.emit("attachments-changed", note_id)

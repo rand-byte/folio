@@ -11,8 +11,8 @@ Principles & invariants
 * Every enum has stable, finite, well-known membership. Adding a member is
   a deliberate change that ripples to parsers, renderers, and storage; it
   is never a hotfix shortcut.
-* Enums whose values are persisted (``MimeKind``, ``LinkScheme``,
-  ``AdmonitionKind``) inherit from ``StrEnum`` and use explicit values
+* Enums whose values are persisted (``LinkScheme``, ``AdmonitionKind``)
+  inherit from ``StrEnum`` and use explicit values
   that match what is written to disk or to source. Their values must
   never change once shipped — migrations would be required.
 * Enums whose values are purely in-memory may use ``auto()``; their
@@ -187,19 +187,6 @@ class LinkScheme(StrEnum):
     MAILTO = "mailto"
 
 
-class MimeKind(StrEnum):
-    """Image MIME types accepted by the attachment store.
-
-    Values are the canonical MIME strings so they can be written verbatim to
-    the ``attachments.mime_type`` column and read back without translation.
-    """
-
-    PNG = "image/png"
-    JPEG = "image/jpeg"
-    WEBP = "image/webp"
-    GIF = "image/gif"
-
-
 class AttachmentRejectionReason(Enum):
     """Why an attachment add was refused.
 
@@ -210,5 +197,4 @@ class AttachmentRejectionReason(Enum):
     """
 
     EXCEEDS_SIZE_LIMIT = auto()
-    UNSUPPORTED_MIME_TYPE = auto()
     UNREADABLE_SOURCE = auto()

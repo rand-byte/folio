@@ -5,7 +5,6 @@ from __future__ import annotations
 import unittest
 from dataclasses import FrozenInstanceError, fields
 
-from enums import MimeKind
 from models.attachment import Attachment
 
 
@@ -16,13 +15,11 @@ class AttachmentDataclassTests(unittest.TestCase):
             note_id="note1",
             filename="cat.png",
             byte_size=12345,
-            mime_type=MimeKind.PNG,
         )
         self.assertEqual(att.id, "att1")
         self.assertEqual(att.note_id, "note1")
         self.assertEqual(att.filename, "cat.png")
         self.assertEqual(att.byte_size, 12345)
-        self.assertIs(att.mime_type, MimeKind.PNG)
 
     def test_is_frozen(self) -> None:
         att = Attachment(
@@ -30,7 +27,6 @@ class AttachmentDataclassTests(unittest.TestCase):
             note_id="note1",
             filename="cat.png",
             byte_size=1,
-            mime_type=MimeKind.PNG,
         )
         with self.assertRaises(FrozenInstanceError):
             att.filename = "dog.png"  # type: ignore[misc]
@@ -43,31 +39,19 @@ class AttachmentDataclassTests(unittest.TestCase):
         self.assertNotIn("data", names)
 
     def test_field_set_is_exact(self) -> None:
+        # Notably absent: ``mime_type``. Attachments carry no
+        # content-type classification — they are opaque blobs, and the
+        # filename extension preserves any future ability to re-derive
+        # a type.
         names = {f.name for f in fields(Attachment)}
         self.assertEqual(
             names,
-            {"id", "note_id", "filename", "byte_size", "mime_type"},
+            {"id", "note_id", "filename", "byte_size"},
         )
-
-    def test_mime_type_is_typed_as_enum(self) -> None:
-        att = Attachment(
-            id="att1",
-            note_id="note1",
-            filename="x.jpg",
-            byte_size=1,
-            mime_type=MimeKind.JPEG,
-        )
-        self.assertIsInstance(att.mime_type, MimeKind)
 
     def test_equality_by_value(self) -> None:
-        a = Attachment(
-            id="x", note_id="n", filename="f", byte_size=1,
-            mime_type=MimeKind.PNG,
-        )
-        b = Attachment(
-            id="x", note_id="n", filename="f", byte_size=1,
-            mime_type=MimeKind.PNG,
-        )
+        a = Attachment(id="x", note_id="n", filename="f", byte_size=1)
+        b = Attachment(id="x", note_id="n", filename="f", byte_size=1)
         self.assertEqual(a, b)
 
 

@@ -14,7 +14,7 @@ Principles & invariants
   Tests pass a synchronous fake matching the alias and drive the
   result callback directly. This mirrors the
   :data:`FileDialogOpener` pattern from
-  :mod:`ui._image_picker`: production wraps an asynchronous
+  :mod:`ui._file_picker`: production wraps an asynchronous
   GTK dialog; tests run synchronously.
 * :class:`Gtk.AlertDialog` is the GTK 4.10+ idiomatic choice for
   alert-style modal prompts. The pre-4.10 :class:`Gtk.MessageDialog`

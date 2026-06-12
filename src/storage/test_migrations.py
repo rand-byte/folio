@@ -128,6 +128,14 @@ class PostMigrationSchemaTests(unittest.TestCase):
     def test_notebook_index_dropped(self) -> None:
         self.assertNotIn("idx_notes_notebook", _all_index_names(self.db))
 
+    def test_attachments_table_has_no_mime_type(self) -> None:
+        # v4 dropped the unused classification column; the BLOB and
+        # the metadata columns survive.
+        self.assertEqual(
+            _column_names(self.db, "attachments"),
+            {"id", "note_id", "filename", "byte_size", "data"},
+        )
+
 
 # ---------------------------------------------------------------------------
 # Seed welcome note still lands; its tags backfill from :tags: welcome
@@ -242,6 +250,69 @@ class V3TagBackfillTests(unittest.TestCase):
             "SELECT COUNT(*) FROM note_tags WHERE note_id = 'n-broken'"
         ).fetchone()[0]
         self.assertEqual(broken_count, 0)
+
+
+# ---------------------------------------------------------------------------
+# v4 drops attachments.mime_type, preserving existing rows
+# ---------------------------------------------------------------------------
+
+
+class V4MimeTypeColumnDropTests(unittest.TestCase):
+    """A v3-shaped database upgraded through v4 keeps its attachment
+    rows (metadata and BLOB alike) while losing the column."""
+
+    def setUp(self) -> None:
+        self.db = Database.in_memory()
+        self.addCleanup(self.db.close)
+        # Run only the first three migrations to produce a v3-state DB
+        # (whose attachments table still carries ``mime_type``).
+        v1_to_v3 = tuple(m for m in ALL_MIGRATIONS if m.version <= 3)
+        self.db.connection.execute(
+            "CREATE TABLE IF NOT EXISTS schema_version "
+            "(version INTEGER NOT NULL PRIMARY KEY)"
+        )
+        for migration in v1_to_v3:
+            with self.db.transaction() as connection:
+                migration.apply(connection, _FIXED_NOW)
+                connection.execute(
+                    "INSERT INTO schema_version (version) VALUES (?)",
+                    (migration.version,),
+                )
+        # Seed one attachment against the welcome note using the
+        # pre-v4 column set — exactly what an existing database holds.
+        self.db.connection.execute(
+            "INSERT INTO attachments "
+            "(id, note_id, filename, byte_size, mime_type, data) "
+            "VALUES (?, ?, ?, ?, ?, ?)",
+            (
+                "att-legacy", SEED_WELCOME_NOTE_ID, "cat.png",
+                3, "image/png", b"\x01\x02\x03",
+            ),
+        )
+
+    def test_v3_state_still_has_the_column(self) -> None:
+        # Pin the fixture: before v4 runs the column exists, so the
+        # drop below is exercising a real transition.
+        self.assertIn("mime_type", _column_names(self.db, "attachments"))
+
+    def test_v4_drops_the_column(self) -> None:
+        apply_pending(self.db, now=_FIXED_NOW)
+        self.assertEqual(
+            _column_names(self.db, "attachments"),
+            {"id", "note_id", "filename", "byte_size", "data"},
+        )
+
+    def test_existing_rows_survive_the_drop(self) -> None:
+        apply_pending(self.db, now=_FIXED_NOW)
+        row = self.db.connection.execute(
+            "SELECT id, note_id, filename, byte_size, data "
+            "FROM attachments WHERE id = 'att-legacy'"
+        ).fetchone()
+        self.assertIsNotNone(row)
+        self.assertEqual(row["note_id"], SEED_WELCOME_NOTE_ID)
+        self.assertEqual(row["filename"], "cat.png")
+        self.assertEqual(row["byte_size"], 3)
+        self.assertEqual(bytes(row["data"]), b"\x01\x02\x03")
 
 
 # ---------------------------------------------------------------------------

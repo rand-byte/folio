@@ -4,21 +4,26 @@ Principles & invariants
 -----------------------
 * Attachment bytes are stored as ``BLOB`` values in the ``attachments``
   table — the schema lives in :mod:`storage.migrations` and
-  was created in v1, so this module never issues DDL. It only reads
-  and writes rows.
+  was created in v1 (and slimmed by v4, which dropped the unused
+  ``mime_type`` column), so this module never issues DDL. It only
+  reads and writes rows.
 * The 10 MB hard cap from :data:`MAX_ATTACHMENT_BYTES` is enforced via
   :meth:`pathlib.Path.stat` *before* any bytes are read into memory.
   The ordering matters: an over-limit file must not enter the process
   even briefly. The unit tests assert this by patching :func:`open` to
   fail if it is called for an over-limit input.
-* Three reasons can reject an add and each maps to a distinct
-  :class:`AttachmentRejectionReason`: ``EXCEEDS_SIZE_LIMIT`` (cap),
-  ``UNSUPPORTED_MIME_TYPE`` (extension does not map to a
-  :class:`MimeKind` member), and ``UNREADABLE_SOURCE`` (the file
-  refuses to be stat'd or opened — :class:`OSError` and its subclasses).
-  Each rejection raises :class:`AttachmentRejected` carrying the
-  corresponding reason; the caller (controller) catches the exception
-  and surfaces the right toast.
+* Attachments are **opaque blobs** — there is no content-type
+  allow-list and no classification. Any file the user picks may be
+  attached; whether bytes referenced by an ``image::`` macro display
+  as an image is decided at render time by ``Gdk.Texture``'s decode
+  (which falls back to the placeholder on failure). Two reasons can
+  reject an add and each maps to a distinct
+  :class:`AttachmentRejectionReason`: ``EXCEEDS_SIZE_LIMIT`` (cap)
+  and ``UNREADABLE_SOURCE`` (the file refuses to be stat'd or opened
+  — :class:`OSError` and its subclasses). Each rejection raises
+  :class:`AttachmentRejected` carrying the corresponding reason; the
+  caller (controller) catches the exception and surfaces the right
+  toast.
 * :meth:`list_for_note` and :meth:`get_bytes` honour the metadata /
   bytes split that is the central reason BLOBs live in SQLite at all
   rather than on disk: the listing query has an explicit column list
@@ -26,17 +31,6 @@ Principles & invariants
   drag the BLOB into the listing path. ``get_bytes`` is the single
   hot path that pulls the BLOB, called only by the renderer when the
   image is actually about to be displayed.
-* MIME detection uses :mod:`mimetypes` from the standard library —
-  a filename-extension lookup. This is the same shape the design
-  uses (filename → mime type) and avoids reading the file's header
-  to sniff the content. The cost of the simpler approach is that a
-  ``.png`` file with JPEG bytes would be accepted; that is a user
-  error the renderer's :class:`Gdk.Texture.new_from_bytes` decode
-  step catches at display time, falling back to the
-  ``[Image: filename]`` placeholder. We deliberately avoid magic-byte
-  sniffing because every alternative we considered (Pillow, magic,
-  hand-rolled signatures) either pulled in a dependency we don't
-  need or made the rejection rules harder to test.
 * Id generation is injected as :data:`IdFactory` so tests can pin
   ids deterministically. The default produces UUID4-shaped ids with
   a stable ``att-`` prefix so seed data and user data remain visually
@@ -54,14 +48,13 @@ Principles & invariants
 
 from __future__ import annotations
 
-import mimetypes
 import uuid
 from collections.abc import Callable
 from pathlib import Path
 from typing import Final
 
 from config.defaults import MAX_ATTACHMENT_BYTES
-from enums import AttachmentRejectionReason, MimeKind
+from enums import AttachmentRejectionReason
 from models.attachment import Attachment
 from storage.database import Database
 from storage.protocols import AttachmentRejected
@@ -77,8 +70,8 @@ and so the seed-data ids cannot collide with user-data ids.
 """
 
 
-_METADATA_FIELDS: Final[str] = "id, note_id, filename, byte_size, mime_type"
-"""Column list reused by :meth:`list_for_note` and :meth:`_load_metadata`.
+_METADATA_FIELDS: Final[str] = "id, note_id, filename, byte_size"
+"""Column list reused by the metadata queries.
 
 Defined once so the *exclusion* of ``data`` is enforced at a single
 grep target. A future schema change that introduces another column
@@ -91,24 +84,6 @@ column).
 def _default_id_factory() -> str:
     """Production id generator — UUID4 with a stable prefix."""
     return f"att-{uuid.uuid4().hex[:12]}"
-
-
-def _mime_kind_for_path(source_path: Path) -> MimeKind | None:
-    """Return the :class:`MimeKind` for ``source_path`` or ``None``.
-
-    Resolves via :mod:`mimetypes`, which is a filename-extension
-    lookup. Returning ``None`` rather than raising lets the caller
-    decide whether the absence of a recognised type is an error
-    (it is, in :meth:`AttachmentStore.add_for_note`) without forcing
-    an exception-handling shape on every caller.
-    """
-    guessed, _encoding = mimetypes.guess_type(source_path.name)
-    if guessed is None:
-        return None
-    try:
-        return MimeKind(guessed)
-    except ValueError:
-        return None
 
 
 class AttachmentStore:
@@ -140,12 +115,11 @@ class AttachmentStore:
            :data:`MAX_ATTACHMENT_BYTES`. Over-limit →
            ``EXCEEDS_SIZE_LIMIT``, *without* the bytes ever being
            loaded. The unit test patches :func:`open` to verify this.
-        3. Resolve the file's MIME type by extension. Unknown or
-           outside :class:`MimeKind` → ``UNSUPPORTED_MIME_TYPE``.
-        4. Read the bytes (:class:`OSError` on read maps to
+        3. Read the bytes (:class:`OSError` on read maps to
            ``UNREADABLE_SOURCE`` — the file passed stat but the read
-           itself failed, e.g. mid-read disk error).
-        5. Insert the row and return the metadata.
+           itself failed, e.g. mid-read disk error). There is no type
+           gate: any file under the cap is accepted.
+        4. Insert the row and return the metadata.
         """
         try:
             stat_result = source_path.stat()
@@ -160,13 +134,6 @@ class AttachmentStore:
                 AttachmentRejectionReason.EXCEEDS_SIZE_LIMIT,
                 f"{source_path.name} is {stat_result.st_size} bytes "
                 f"(limit {MAX_ATTACHMENT_BYTES})",
-            )
-
-        mime_kind = _mime_kind_for_path(source_path)
-        if mime_kind is None:
-            raise AttachmentRejected(
-                AttachmentRejectionReason.UNSUPPORTED_MIME_TYPE,
-                f"{source_path.name}: not a supported image format",
             )
 
         try:
@@ -188,20 +155,18 @@ class AttachmentStore:
             note_id=note_id,
             filename=source_path.name,
             byte_size=byte_size,
-            mime_type=mime_kind,
         )
 
         with self._db.transaction() as connection:
             connection.execute(
                 "INSERT INTO attachments "
-                "(id, note_id, filename, byte_size, mime_type, data) "
-                "VALUES (?, ?, ?, ?, ?, ?)",
+                "(id, note_id, filename, byte_size, data) "
+                "VALUES (?, ?, ?, ?, ?)",
                 (
                     attachment.id,
                     attachment.note_id,
                     attachment.filename,
                     attachment.byte_size,
-                    attachment.mime_type.value,
                     data,
                 ),
             )
@@ -244,7 +209,6 @@ class AttachmentStore:
                 note_id=row["note_id"],
                 filename=row["filename"],
                 byte_size=row["byte_size"],
-                mime_type=MimeKind(row["mime_type"]),
             )
             for row in cursor.fetchall()
         ]

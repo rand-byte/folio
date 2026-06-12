@@ -1,4 +1,4 @@
-"""The :class:`Attachment` dataclass — image metadata without the bytes.
+"""The :class:`Attachment` dataclass — attachment metadata without the bytes.
 
 Principles & invariants
 -----------------------
@@ -12,9 +12,12 @@ Principles & invariants
 * All fields are immutable once written: an attachment is never renamed,
   never re-encoded, never re-pointed to a different note. To change any of
   these the caller deletes the attachment and adds a new one.
-* ``mime_type`` is a :class:`MimeKind` enum, not a raw string. This makes
-  the allow-list a type-level constraint and means widgets that switch on
-  type cannot be silently broken by a new format slipping through.
+* Attachments carry **no content-type classification**. Any file may be
+  attached; the only add-time gate is the size cap. The renderer's
+  ``Gdk.Texture`` decode is what decides whether bytes referenced by an
+  ``image::`` macro display as an image (falling back to the placeholder
+  otherwise), and the ``filename`` extension preserves the ability to
+  re-derive a content type if a future feature ever needs one.
 * ``byte_size`` records the size of the bytes as they were measured at add
   time. It is the value used by quota / display logic and must equal the
   actual length of ``attachments.data``.
@@ -24,12 +27,10 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from enums import MimeKind
-
 
 @dataclass(frozen=True)
 class Attachment:
-    """Metadata for a single attached image.
+    """Metadata for a single attached file.
 
     Fields
     ------
@@ -43,14 +44,11 @@ class Attachment:
         the placeholder shown when bytes fail to decode). Not unique within
         a note.
     byte_size:
-        Length of the BLOB in bytes. Always positive — a zero-byte image
+        Length of the BLOB in bytes. Always positive — a zero-byte file
         is not accepted.
-    mime_type:
-        One of the formats the renderer knows how to display.
     """
 
     id: str
     note_id: str
     filename: str
     byte_size: int
-    mime_type: MimeKind

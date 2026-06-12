@@ -24,7 +24,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, TypeAliasType
 from unittest.mock import Mock
 
-from enums import AttachmentRejectionReason, MimeKind
+from enums import AttachmentRejectionReason
 from models.attachment import Attachment
 from models.note import Note
 from storage.protocols import (
@@ -64,7 +64,6 @@ def _make_attachment(attachment_id: str = "a1") -> Attachment:
         note_id="n1",
         filename="cat.png",
         byte_size=10,
-        mime_type=MimeKind.PNG,
     )
 
 
@@ -83,7 +82,7 @@ class AttachmentRejectedTests(unittest.TestCase):
 
     def test_custom_message_overrides(self) -> None:
         exc = AttachmentRejected(
-            AttachmentRejectionReason.UNSUPPORTED_MIME_TYPE,
+            AttachmentRejectionReason.UNREADABLE_SOURCE,
             "not allowed",
         )
         self.assertEqual(str(exc), "not allowed")

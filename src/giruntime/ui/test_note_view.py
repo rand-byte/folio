@@ -17,7 +17,7 @@ from config.defaults import (
     ARTICLE_TOP_MARGIN_LINES,
     TARGET_CHARS_PER_LINE,
 )
-from enums import AdmonitionKind, MimeKind, ParseErrorKind
+from enums import AdmonitionKind, ParseErrorKind
 from models.attachment import Attachment
 from models.note import Note
 from giruntime.controllers.app_state import AppState
@@ -236,7 +236,6 @@ class _FakeAttachmentStore:
             note_id=note_id,
             filename=filename,
             byte_size=len(data),
-            mime_type=MimeKind.PNG,
         )
         self.metadata_by_note.setdefault(note_id, []).append(attachment)
         self.blobs[attachment.id] = data

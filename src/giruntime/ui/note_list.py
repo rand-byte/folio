@@ -39,7 +39,13 @@ Principles & invariants
   wrapped lines), an optional ``#tag`` chip row (only when
   ``note.tags`` is non-empty), and a right-aligned ``📎 N | <date>``
   meta line. The 📎 count is read per-bind from the attachment store, so
-  it tracks edits (an edit replaces the row → re-bind).
+  it tracks edits (an edit replaces the row → re-bind). Attachment
+  add/remove never touches the note source, so no ``items-changed``
+  re-bind would fire for it; the list instead subscribes to the
+  controller's narrow ``attachments-changed`` signal and re-populates
+  the affected note's *bound* row (tracked via the factory's
+  ``bind``/``unbind`` pair) so the badge recomputes via
+  ``count_for_note`` without lying to the model chain.
 * Date formatting lives in the shared :mod:`ui._dates` helper
   (:func:`ui._dates.format_date_short`) so the note-list meta line and
   the rendered-view metadata line agree without cross-importing.
@@ -58,6 +64,7 @@ from gi.repository import GObject, Gtk, Pango
 
 from enums import NoteSortKey
 from giruntime.controllers.app_state import AppState
+from giruntime.controllers.note_controller import NoteController
 from giruntime.controllers.note_item import NoteItem
 from giruntime.controllers.note_list_store import NoteListStore
 from giruntime.ui._dates import format_date_short
@@ -123,6 +130,17 @@ class NoteList(Gtk.Box):  # pylint: disable=too-many-instance-attributes
     _app_state: AppState
     _attachment_store: AttachmentStoreProtocol | None
 
+    _bound_rows: dict[str, tuple[Gtk.Box, Note]]
+    """The factory's currently-bound rows, keyed by note id.
+
+    Maintained by the ``bind``/``unbind`` factory handlers so the
+    ``attachments-changed`` handler can re-populate exactly the
+    affected row's box (GTK exposes no "re-bind one item" API and
+    emitting a synthetic ``items-changed`` on the store would lie to
+    every other observer). A note id is present iff its row is
+    currently realised by the ``ListView``.
+    """
+
     _count_label: Gtk.Label
     _sort_dropdown: Gtk.DropDown
     _list_view: Gtk.ListView
@@ -143,12 +161,14 @@ class NoteList(Gtk.Box):  # pylint: disable=too-many-instance-attributes
         self,
         *,
         note_store: NoteListStore,
+        note_controller: NoteController,
         app_state: AppState,
         attachment_store: AttachmentStoreProtocol | None = None,
     ) -> None:
         super().__init__(orientation=Gtk.Orientation.VERTICAL, spacing=0)
         self._app_state = app_state
         self._attachment_store = attachment_store
+        self._bound_rows = {}
         self._sort_key = _DEFAULT_SORT_KEY
         self._comparator = comparator_for(self._sort_key)
         self._needle = normalize_query(app_state.query)
@@ -175,6 +195,10 @@ class NoteList(Gtk.Box):  # pylint: disable=too-many-instance-attributes
         self._app_state.connect(
             "notify::selected-note-id",
             self._on_app_state_selected_note_changed,
+        )
+        note_controller.connect(
+            "attachments-changed",
+            self._on_attachments_changed,
         )
 
         self._update_count()
@@ -226,6 +250,7 @@ class NoteList(Gtk.Box):  # pylint: disable=too-many-instance-attributes
         factory = Gtk.SignalListItemFactory()
         factory.connect("setup", self._on_factory_setup)
         factory.connect("bind", self._on_factory_bind)
+        factory.connect("unbind", self._on_factory_unbind)
 
         self._list_view = Gtk.ListView.new(self._selection_model, factory)
         self._list_view.add_css_class("note-list-view")
@@ -289,8 +314,24 @@ class NoteList(Gtk.Box):  # pylint: disable=too-many-instance-attributes
         item = list_item.get_item()
         if not isinstance(box, Gtk.Box) or not isinstance(item, NoteItem):
             return
+        self._bound_rows[item.note.id] = (box, item.note)
         _clear_box(box)
         _populate_row_box(box, item.note, self._attachment_count(item.note.id))
+
+    def _on_factory_unbind(
+        self,
+        _factory: Gtk.SignalListItemFactory,
+        list_item: Gtk.ListItem,
+    ) -> None:
+        """Forget the row mapping when the ``ListView`` recycles it.
+
+        ``unbind`` still sees the item that was bound, so the note id
+        can be popped directly; GTK always unbinds before re-binding a
+        recycled list item, so the mapping cannot go stale.
+        """
+        item = list_item.get_item()
+        if isinstance(item, NoteItem):
+            self._bound_rows.pop(item.note.id, None)
 
     def _attachment_count(self, note_id: str) -> int:
         if self._attachment_store is None:
@@ -349,6 +390,27 @@ class NoteList(Gtk.Box):  # pylint: disable=too-many-instance-attributes
         self._update_count()
         # Positions shifted; keep the highlight on the app-state note.
         self._sync_selection_from_app_state()
+
+    def _on_attachments_changed(
+        self,
+        _controller: NoteController,
+        note_id: str,
+    ) -> None:
+        """Recompute the 📎 badge of the affected note's bound row.
+
+        Attachment mutations leave the note source untouched, so the
+        model chain emits no ``items-changed`` and no factory re-bind
+        happens. Re-populating the bound box directly recomputes the
+        badge through :meth:`_attachment_count` (``count_for_note``).
+        A note whose row is not currently realised needs nothing — its
+        next ``bind`` reads the fresh count anyway.
+        """
+        entry = self._bound_rows.get(note_id)
+        if entry is None:
+            return
+        box, note = entry
+        _clear_box(box)
+        _populate_row_box(box, note, self._attachment_count(note.id))
 
     def _on_selection_notify(
         self,

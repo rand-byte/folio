@@ -21,12 +21,11 @@ from config.defaults import (
     MAX_ATTACHMENT_BYTES,
     SEED_WELCOME_NOTE_ID,
 )
-from enums import AttachmentRejectionReason, MimeKind
+from enums import AttachmentRejectionReason
 from models.note import Note
 from storage.attachment_store import (
     AttachmentStore,
     _default_id_factory,
-    _mime_kind_for_path,
 )
 from storage.database import Database
 from storage.migrations import apply_pending
@@ -37,9 +36,10 @@ from storage.protocols import AttachmentRejected
 _FIXED_NOW: datetime = datetime(2026, 4, 28, 12, 0, 0, tzinfo=UTC)
 
 # A 1×1 transparent PNG — the smallest valid PNG. We use it as fixture
-# bytes whenever a test needs *some* image data that decodes; the
-# attachment store does not decode, but the size and bytes round-trip
-# tests are clearer when the bytes are obviously image-shaped.
+# bytes whenever a test needs *some* payload; the attachment store
+# treats every file as an opaque blob (no decode, no type gate), but
+# the size and bytes round-trip tests are clearer when the bytes are
+# obviously image-shaped.
 _PNG_1X1: bytes = bytes.fromhex(
     "89504e470d0a1a0a"
     "0000000d49484452000000010000000108060000001f15c489"
@@ -122,43 +122,6 @@ class _IdSequence:
 
 
 # ---------------------------------------------------------------------------
-# _mime_kind_for_path
-# ---------------------------------------------------------------------------
-
-
-class MimeKindForPathTests(unittest.TestCase):
-    """The extension lookup is a pure function — no fixtures needed."""
-
-    def test_png_extension_maps_to_png(self) -> None:
-        self.assertIs(_mime_kind_for_path(Path("a.png")), MimeKind.PNG)
-
-    def test_jpeg_extensions_both_map_to_jpeg(self) -> None:
-        # Both ``.jpg`` and ``.jpeg`` are common; mimetypes resolves
-        # both to ``image/jpeg``.
-        self.assertIs(_mime_kind_for_path(Path("a.jpg")), MimeKind.JPEG)
-        self.assertIs(_mime_kind_for_path(Path("a.jpeg")), MimeKind.JPEG)
-
-    def test_webp_extension_maps_to_webp(self) -> None:
-        self.assertIs(_mime_kind_for_path(Path("a.webp")), MimeKind.WEBP)
-
-    def test_gif_extension_maps_to_gif(self) -> None:
-        self.assertIs(_mime_kind_for_path(Path("a.gif")), MimeKind.GIF)
-
-    def test_unknown_extension_returns_none(self) -> None:
-        # ``.xyz`` is not in mimetypes' table; the fallback path returns
-        # None so the caller can raise the right typed exception.
-        self.assertIsNone(_mime_kind_for_path(Path("a.xyz")))
-
-    def test_no_extension_returns_none(self) -> None:
-        self.assertIsNone(_mime_kind_for_path(Path("plainfile")))
-
-    def test_known_non_image_extension_returns_none(self) -> None:
-        # ``.pdf`` resolves to a real MIME type but it's not in the
-        # MimeKind allow-list, so the helper returns None.
-        self.assertIsNone(_mime_kind_for_path(Path("a.pdf")))
-
-
-# ---------------------------------------------------------------------------
 # _default_id_factory
 # ---------------------------------------------------------------------------
 
@@ -203,7 +166,6 @@ class AddForNoteHappyPathTests(unittest.TestCase):
         self.assertEqual(attachment.note_id, "note-1")
         self.assertEqual(attachment.filename, "photo.png")
         self.assertEqual(attachment.byte_size, len(_PNG_1X1))
-        self.assertIs(attachment.mime_type, MimeKind.PNG)
 
         # Metadata round-trips via list_for_note.
         listed = self.store.list_for_note("note-1")
@@ -212,10 +174,27 @@ class AddForNoteHappyPathTests(unittest.TestCase):
         # Bytes round-trip via get_bytes.
         self.assertEqual(self.store.get_bytes(attachment.id), _PNG_1X1)
 
-    def test_add_jpeg_uses_jpeg_mime(self) -> None:
-        path = self.files.write("photo.jpg", b"\xff\xd8\xff\xe0fakejpeg")
+    def test_non_image_extension_is_accepted(self) -> None:
+        # Attachments are opaque blobs: the old MimeKind allow-list is
+        # gone, so a PDF (a real MIME type, formerly rejected) attaches
+        # like anything else.
+        path = self.files.write("doc.pdf", b"%PDF-1.4")
         attachment = self.store.add_for_note("note-1", path)
-        self.assertIs(attachment.mime_type, MimeKind.JPEG)
+        self.assertEqual(attachment.filename, "doc.pdf")
+        self.assertEqual(self.store.get_bytes(attachment.id), b"%PDF-1.4")
+
+    def test_unknown_extension_is_accepted(self) -> None:
+        # ``.xyz`` maps to no MIME type at all — formerly an
+        # UNSUPPORTED_MIME_TYPE rejection, now a plain add.
+        path = self.files.write("notes.xyz", b"some bytes")
+        attachment = self.store.add_for_note("note-1", path)
+        self.assertEqual(attachment.filename, "notes.xyz")
+
+    def test_file_without_extension_is_accepted(self) -> None:
+        path = self.files.write("plainfile", b"data")
+        attachment = self.store.add_for_note("note-1", path)
+        self.assertEqual(attachment.filename, "plainfile")
+        self.assertEqual(attachment.byte_size, 4)
 
     def test_add_two_files_yields_two_attachments(self) -> None:
         first = self.files.write("a.png", _PNG_1X1)
@@ -406,56 +385,6 @@ class AddForNoteSizeCapTests(unittest.TestCase):
         # bytes we read, not the lying stat. That's intentional — we
         # want the recorded size to match the BLOB length.
         self.assertEqual(attachment.byte_size, len(_PNG_1X1))
-
-
-# ---------------------------------------------------------------------------
-# add_for_note — MIME rejection
-# ---------------------------------------------------------------------------
-
-
-class AddForNoteMimeRejectionTests(unittest.TestCase):
-    db: Database
-    files: _TempFileFactory
-    store: AttachmentStore
-
-    def setUp(self) -> None:
-        self.db = _build_database_with_note()
-        self.files = _TempFileFactory()
-        self.store = AttachmentStore(self.db, id_factory=_IdSequence())
-
-    def tearDown(self) -> None:
-        self.files.close()
-        self.db.close()
-
-    def test_unknown_extension_is_rejected(self) -> None:
-        path = self.files.write("notes.xyz", b"some bytes")
-        with self.assertRaises(AttachmentRejected) as ctx:
-            self.store.add_for_note("note-1", path)
-        self.assertIs(
-            ctx.exception.reason,
-            AttachmentRejectionReason.UNSUPPORTED_MIME_TYPE,
-        )
-
-    def test_known_non_image_mime_is_rejected(self) -> None:
-        # ``.pdf`` resolves to a real MIME type but it's not on the
-        # MimeKind allow-list — the rejection reason is still
-        # UNSUPPORTED_MIME_TYPE, not a more permissive variant.
-        path = self.files.write("doc.pdf", b"%PDF-1.4")
-        with self.assertRaises(AttachmentRejected) as ctx:
-            self.store.add_for_note("note-1", path)
-        self.assertIs(
-            ctx.exception.reason,
-            AttachmentRejectionReason.UNSUPPORTED_MIME_TYPE,
-        )
-
-    def test_no_extension_is_rejected(self) -> None:
-        path = self.files.write("plainfile", b"data")
-        with self.assertRaises(AttachmentRejected) as ctx:
-            self.store.add_for_note("note-1", path)
-        self.assertIs(
-            ctx.exception.reason,
-            AttachmentRejectionReason.UNSUPPORTED_MIME_TYPE,
-        )
 
 
 # ---------------------------------------------------------------------------

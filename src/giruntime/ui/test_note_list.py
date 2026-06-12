@@ -5,7 +5,8 @@ the in-memory :class:`controllers.note_list_store.NoteListStore`. The
 "what shows / what order" rules are covered exhaustively by the pure
 predicates in :mod:`search.note_filter`; here we exercise the widget's
 own wiring: the filtered count, live query filtering (no throttle),
-sort-key reordering, and the AppState ⇄ selection round-trip.
+sort-key reordering, the AppState ⇄ selection round-trip, and the 📎
+badge's re-bind on the controller's ``attachments-changed`` signal.
 """
 
 from __future__ import annotations
@@ -14,10 +15,11 @@ import unittest
 from datetime import UTC, datetime
 from pathlib import Path
 
-from gi.repository import Gdk, Gtk
+from gi.repository import Gdk, GLib, Gtk
 
 from enums import NoteSortKey
 from giruntime.controllers.app_state import AppState
+from giruntime.controllers.note_controller import NoteController
 from giruntime.controllers.note_list_store import NoteListStore
 import giruntime.ui.note_list as note_list_module
 from giruntime.ui.note_list import NoteList, _SORT_KEY_DROPDOWN_ORDER
@@ -95,7 +97,14 @@ class _FakeNoteRepository:
 
 
 class _FakeAttachmentStore:
-    """Reports zero attachments; no other method is called here."""
+    """Counts are read from a mutable per-note dict (default zero) so
+    the badge tests can change a count and assert the re-bind reads it;
+    no other method is called here."""
+
+    counts: dict[str, int]
+
+    def __init__(self) -> None:
+        self.counts = {}
 
     def add_for_note(self, _note_id: str, _source_path: Path) -> Attachment:
         raise NotImplementedError
@@ -106,21 +115,37 @@ class _FakeAttachmentStore:
     def list_for_note(self, _note_id: str) -> list[Attachment]:
         raise NotImplementedError
 
-    def count_for_note(self, _note_id: str) -> int:
-        return 0
+    def count_for_note(self, note_id: str) -> int:
+        return self.counts.get(note_id, 0)
 
     def get_bytes(self, _attachment_id: str) -> bytes:
         raise NotImplementedError
 
 
-def _build_note_list(notes: list[Note], app_state: AppState) -> NoteList:
+def _build_note_list_with_collaborators(
+    notes: list[Note],
+    app_state: AppState,
+) -> tuple[NoteList, NoteController, _FakeAttachmentStore]:
     store = NoteListStore(repository=_FakeNoteRepository(notes))
     store.load()
-    return NoteList(
+    attachment_store = _FakeAttachmentStore()
+    controller = NoteController(
         note_store=store,
+        attachments=attachment_store,
         app_state=app_state,
-        attachment_store=_FakeAttachmentStore(),
     )
+    note_list = NoteList(
+        note_store=store,
+        note_controller=controller,
+        app_state=app_state,
+        attachment_store=attachment_store,
+    )
+    return note_list, controller, attachment_store
+
+
+def _build_note_list(notes: list[Note], app_state: AppState) -> NoteList:
+    note_list, _, _ = _build_note_list_with_collaborators(notes, app_state)
+    return note_list
 
 
 def _visible_ids(note_list: NoteList) -> list[str]:
@@ -210,6 +235,101 @@ class NoteListModelChainTests(unittest.TestCase):
         )
         note_list._selection_model.set_selected(pos)
         self.assertEqual(app_state.selected_note_id, "3")
+
+
+def _pump(iterations: int = 200) -> None:
+    """Drive the default main context so the ListView realises its
+    rows. Non-blocking iterations keep the pump bounded and crash-proof
+    under the cairo software renderer."""
+    context = GLib.MainContext.default()
+    for _ in range(iterations):
+        context.iteration(False)
+
+
+def _row_label_texts(note_list: NoteList, note_id: str) -> list[str]:
+    """Every label text on ``note_id``'s currently-bound row box."""
+    box, _ = note_list._bound_rows[note_id]
+    texts: list[str] = []
+    stack: list[Gtk.Widget | None] = [box.get_first_child()]
+    while stack:
+        widget = stack.pop()
+        if widget is None:
+            continue
+        if isinstance(widget, Gtk.Label):
+            texts.append(widget.get_text())
+        stack.append(widget.get_next_sibling())
+        stack.append(widget.get_first_child())
+    return texts
+
+
+@unittest.skipUnless(_display_available(), "no GDK display")
+class NoteListAttachmentBadgeTests(unittest.TestCase):
+    """The 📎 badge re-binds on the controller's ``attachments-changed``.
+
+    Attachment add/remove never touches the note source, so no store
+    ``items-changed`` fires and the factory would not re-bind on its
+    own; the widget re-populates the affected *bound* row directly.
+    Rows only bind once the ``ListView`` is realised, so this suite
+    presents a real window and pumps the main loop — same pattern as
+    the sidebar's rendering tests.
+    """
+
+    app_state: AppState
+    note_list: NoteList
+    controller: NoteController
+    attachment_store: _FakeAttachmentStore
+    window: Gtk.Window
+
+    def setUp(self) -> None:
+        self.app_state = AppState()
+        (
+            self.note_list,
+            self.controller,
+            self.attachment_store,
+        ) = _build_note_list_with_collaborators(
+            [_note("1", "alpha"), _note("2", "beta")],
+            self.app_state,
+        )
+        self.window = Gtk.Window()
+        self.window.set_child(self.note_list)
+        self.window.present()
+        _pump()
+
+    def tearDown(self) -> None:
+        self.window.set_child(None)
+        self.window.destroy()
+        _pump(20)
+
+    def test_rows_are_bound_after_realisation(self) -> None:
+        # Fixture sanity: the bind/unbind tracking saw both rows.
+        self.assertEqual(set(self.note_list._bound_rows), {"1", "2"})
+
+    def test_badge_recomputes_on_attachments_changed(self) -> None:
+        # No badge initially (zero attachments render no 📎 label).
+        self.assertNotIn("📎 1", _row_label_texts(self.note_list, "1"))
+        # The count changes behind the model's back (no items-changed)…
+        self.attachment_store.counts["1"] = 1
+        # …and the narrow signal is what re-populates the bound row.
+        self.controller.emit("attachments-changed", "1")
+        self.assertIn("📎 1", _row_label_texts(self.note_list, "1"))
+
+    def test_other_rows_are_left_alone(self) -> None:
+        self.attachment_store.counts["1"] = 1
+        self.controller.emit("attachments-changed", "1")
+        self.assertNotIn("📎 1", _row_label_texts(self.note_list, "2"))
+
+    def test_badge_drops_when_count_returns_to_zero(self) -> None:
+        self.attachment_store.counts["1"] = 2
+        self.controller.emit("attachments-changed", "1")
+        self.assertIn("📎 2", _row_label_texts(self.note_list, "1"))
+        self.attachment_store.counts["1"] = 0
+        self.controller.emit("attachments-changed", "1")
+        self.assertNotIn("📎 2", _row_label_texts(self.note_list, "1"))
+
+    def test_signal_for_unbound_note_is_a_no_op(self) -> None:
+        # A note with no realised row needs nothing — its next bind
+        # reads the fresh count anyway. The handler must not raise.
+        self.controller.emit("attachments-changed", "not-bound")
 
 
 if __name__ == "__main__":

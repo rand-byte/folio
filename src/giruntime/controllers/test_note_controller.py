@@ -11,7 +11,7 @@ from pathlib import Path
 from gi.repository import GObject
 
 from asciidoc.summary import derive_summary
-from enums import AttachmentRejectionReason, MimeKind, SmartFilter
+from enums import AttachmentRejectionReason, SmartFilter
 from giruntime.controllers.app_state import AppState
 from giruntime.controllers.note_controller import (
     NoteController,
@@ -133,7 +133,6 @@ class _FakeAttachmentStore:
             note_id=note_id,
             filename=source_path.name,
             byte_size=1,
-            mime_type=MimeKind.PNG,
         )
         self.attachments[att.id] = att
         return att
@@ -157,15 +156,19 @@ class _Recorder:
     """Captures controller signal emissions.
 
     The controller no longer has a ``notes-changed`` signal — propagation
-    is via the store's ``items-changed`` — so the recorder watches only
-    the two toast signals that remain.
+    is via the store's ``items-changed`` — so the recorder watches the
+    two toast signals plus the narrow per-note ``attachments-changed``.
     """
 
     events: list[tuple[str, tuple[object, ...]]]
 
     def __init__(self, controller: NoteController) -> None:
         self.events = []
-        for signal in ("attachment-rejected", "storage-error"):
+        for signal in (
+            "attachment-rejected",
+            "attachments-changed",
+            "storage-error",
+        ):
             controller.connect(signal, self._make_handler(signal))
 
     def _make_handler(self, signal: str):  # type: ignore[no-untyped-def]
@@ -418,6 +421,18 @@ class AddAttachmentTests(unittest.TestCase):
         self.assertIsNotNone(result)
         self.assertEqual(len(atts.attachments), 1)
 
+    def test_success_emits_attachments_changed_with_note_id(self) -> None:
+        # Adding never touches the note source, so this narrow signal
+        # is the only thing that tells the panel and the 📎 badge to
+        # refresh. It must carry the affected note's id.
+        controller, _, _, _, _ = _build_controller()
+        recorder = _Recorder(controller)
+        controller.add_attachment("n1", Path("/tmp/x.png"))
+        self.assertEqual(
+            recorder.events,
+            [("attachments-changed", ("n1",))],
+        )
+
     def test_rejection_emits_attachment_rejected_signal(self) -> None:
         controller, _, _, atts, _ = _build_controller()
         atts.reject_with = AttachmentRejectionReason.EXCEEDS_SIZE_LIMIT
@@ -426,16 +441,56 @@ class AddAttachmentTests(unittest.TestCase):
         self.assertIsNone(result)
         self.assertIn("attachment-rejected", recorder.names())
 
+    def test_rejection_does_not_emit_attachments_changed(self) -> None:
+        # A rejected add changed nothing, so no observer should
+        # refresh: the rejected reason rides its own toast signal.
+        controller, _, _, atts, _ = _build_controller()
+        atts.reject_with = AttachmentRejectionReason.EXCEEDS_SIZE_LIMIT
+        recorder = _Recorder(controller)
+        controller.add_attachment("n1", Path("/tmp/x.png"))
+        self.assertNotIn("attachments-changed", recorder.names())
+
 
 class RemoveAttachmentTests(unittest.TestCase):
     def test_remove_drops_attachment(self) -> None:
         controller, _, _, atts, _ = _build_controller()
         atts.attachments["att-1"] = Attachment(
             id="att-1", note_id="n", filename="x.png",
-            byte_size=1, mime_type=MimeKind.PNG,
+            byte_size=1,
         )
-        controller.remove_attachment("att-1")
+        controller.remove_attachment("att-1", "n")
         self.assertNotIn("att-1", atts.attachments)
+
+    def test_remove_emits_attachments_changed_with_note_id(self) -> None:
+        controller, _, _, atts, _ = _build_controller()
+        atts.attachments["att-1"] = Attachment(
+            id="att-1", note_id="n", filename="x.png",
+            byte_size=1,
+        )
+        recorder = _Recorder(controller)
+        controller.remove_attachment("att-1", "n")
+        self.assertEqual(
+            recorder.events,
+            [("attachments-changed", ("n",))],
+        )
+
+    def test_failed_remove_does_not_emit_attachments_changed(self) -> None:
+        # A storage error propagates out of capturing_storage_errors
+        # before the emit, so observers never refresh against a state
+        # that did not change — only the storage-error toast fires.
+        controller, _, _, atts, _ = _build_controller()
+        atts.attachments["att-1"] = Attachment(
+            id="att-1", note_id="n", filename="x.png",
+            byte_size=1,
+        )
+        atts.raise_on_remove = sqlite3.OperationalError("locked")
+        recorder = _Recorder(controller)
+        with self.assertRaises(sqlite3.OperationalError):
+            controller.remove_attachment("att-1", "n")
+        self.assertEqual(
+            recorder.names(),
+            ["storage-error"],
+        )
 
 
 if __name__ == "__main__":
