@@ -3,13 +3,15 @@
 from __future__ import annotations
 
 import gc
+import struct
 import unittest
+import zlib
 from collections.abc import Callable
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from unittest import mock
 
-from gi.repository import Gdk, Gsk, Gtk
+from gi.repository import Gdk, GLib, GObject, Gsk, Gtk
 
 from config.defaults import (
     ARTICLE_BOTTOM_MARGIN_LINES,
@@ -131,6 +133,54 @@ def _make_note(
         created_at=_FIXED_NOW,
         modified_at=_FIXED_NOW + timedelta(seconds=1),
     )
+
+
+def _solid_png(width: int, height: int) -> bytes:
+    """Encode a minimal solid-colour RGB PNG of the given pixel size.
+
+    The scrollbar regression test needs a *real, decodable* image whose
+    last line is taller than the viewport. A hand-rolled encoder keeps the
+    test self-contained (no Pillow / GdkPixbuf-save dependency) and lets it
+    ask for an arbitrarily tall image; a solid fill compresses to a few
+    bytes regardless of size. Colour type 2 is RGB, bit depth 8, no filter.
+    """
+
+    def _chunk(tag: bytes, payload: bytes) -> bytes:
+        crc = zlib.crc32(tag + payload) & 0xFFFFFFFF
+        return struct.pack(">I", len(payload)) + tag + payload + struct.pack(
+            ">I", crc
+        )
+
+    signature = b"\x89PNG\r\n\x1a\n"
+    ihdr = struct.pack(">IIBBBBB", width, height, 8, 2, 0, 0, 0)
+    scanline = b"\x00" + bytes((80, 120, 200)) * width
+    image_data = zlib.compress(scanline * height, 9)
+    return (
+        signature
+        + _chunk(b"IHDR", ihdr)
+        + _chunk(b"IDAT", image_data)
+        + _chunk(b"IEND", b"")
+    )
+
+
+def _settle_real_main_loop(timeout_ms: int = 400) -> None:
+    """Run a real :class:`GLib.MainLoop`, quitting after ``timeout_ms``.
+
+    Unlike the manually pumped ``MainContext.iteration`` loop most widget
+    tests use, this drives the *real* main loop so the frame clock actually
+    ticks and the window maps. The scrollbar bug only manifests after that
+    tick (a pumped context never advances the frame clock), so the
+    regression test must settle this way rather than pumping iterations.
+    """
+    loop = GLib.MainLoop()
+
+    def _quit() -> bool:
+        loop.quit()
+        result: bool = GLib.SOURCE_REMOVE
+        return result
+
+    GLib.timeout_add(timeout_ms, _quit)
+    loop.run()
 
 
 class _FakeNoteRepository:
@@ -549,9 +599,9 @@ class ArticleContainerSizeAllocateTests(unittest.TestCase):
 
     def test_exact_outer_width_places_child_at_zero_offset(self) -> None:
         # The boundary: allocated == outer → no slack to absorb. The
-        # ``>`` (strict) check in the implementation is what produces
-        # this; ``>=`` would produce a 0-offset allocation here too,
-        # but the strict form makes the equality case explicit.
+        # ``width >= outer`` centre branch runs and ``(outer - outer) //
+        # 2`` is 0, so the child sits at offset 0 with no transform — the
+        # same observable result as the narrow path's zero offset.
         container, child = self._container_with_capturing_child()
         outer = container.outer_column_width()
         container.do_size_allocate(outer, 600, -1)
@@ -692,22 +742,24 @@ class ArticleContainerTeardownTests(unittest.TestCase):
 
 @unittest.skipUnless(_display_available(), "no GDK display")
 class ArticleContainerMeasureTests(unittest.TestCase):
-    """The horizontal-measurement override is what makes the column
-    not shrink: the parent ``ScrolledWindow``'s viewport never
-    allocates us less than the reported minimum, so a narrow window
-    triggers a horizontal scrollbar instead of a smaller column.
+    """Pin the measure contract under Option C (the container is a
+    ``Gtk.Scrollable``).
 
-    The reported width is :meth:`outer_column_width` (text + inner
-    padding), not the bare text width — the padding is part of the
-    column from the layout's perspective.
+    Horizontally the *minimum* is ``0`` so the scrolled window may
+    allocate the container narrower than the column — the container-owned
+    ``hadjustment`` then drives the horizontal scrollbar — while the
+    *natural* width is :meth:`outer_column_width` (text + inner padding),
+    the column the pane opens at when there is room.
 
-    The vertical-measurement override forwards to the single child at
-    the *outer* column width — the width the child will actually be
-    allocated, so its height computation matches the column it
-    renders into.
+    Vertically the container contributes nothing (``(0, 0, …)``): the
+    vertical extent is owned by the scrollable child (the text view), which
+    the container wires up as the vertical scrollport by forwarding the
+    ``vadjustment``. The container therefore never measures its child on
+    the vertical axis — re-deriving the extent here would reinvent the
+    viewport and could reintroduce the stale-extent bug.
     """
 
-    def test_horizontal_minimum_and_natural_equal_outer_column_width(
+    def test_horizontal_minimum_is_zero_and_natural_is_outer_column_width(
         self,
     ) -> None:
         container = _make_test_article_container(char_w=10, line_h=20)
@@ -715,11 +767,14 @@ class ArticleContainerMeasureTests(unittest.TestCase):
         minimum, natural, _, _ = container.do_measure(
             Gtk.Orientation.HORIZONTAL, -1
         )
-        self.assertEqual(minimum, outer)
+        # Minimum 0 → the scrollable may be allocated narrower than the
+        # column (the hadjustment exposes the overflow); natural is the
+        # column width.
+        self.assertEqual(minimum, 0)
         self.assertEqual(natural, outer)
 
     def test_horizontal_measurement_is_independent_of_for_size(self) -> None:
-        # The horizontal width is fixed by the column rule — it must
+        # The horizontal report is fixed by the column rule — it must
         # not vary with the cross-axis hint.
         container = _make_test_article_container(char_w=10, line_h=20)
         outer = container.outer_column_width()
@@ -727,20 +782,13 @@ class ArticleContainerMeasureTests(unittest.TestCase):
             minimum, natural, _, _ = container.do_measure(
                 Gtk.Orientation.HORIZONTAL, for_size,
             )
-            self.assertEqual(minimum, outer)
+            self.assertEqual(minimum, 0)
             self.assertEqual(natural, outer)
 
-    def test_hexpand_is_set_so_wide_viewport_overshoots_natural(self) -> None:
-        # ``hexpand`` is what tells a wide ``Viewport`` to allocate us
-        # more than our natural width — the precondition for the
-        # centring branch in ``do_size_allocate``.
-        container = _make_test_article_container(char_w=10, line_h=20)
-        self.assertTrue(container.get_hexpand())
-
     def test_vertical_measure_with_no_child_returns_zero(self) -> None:
-        # No child to measure → nothing to contribute. The horizontal
-        # path stays at ``outer_column_width``; only the vertical path
-        # is affected.
+        # No child → nothing to contribute. The vertical axis is owned by
+        # the forwarded text view, so the container reports zeroes
+        # regardless.
         container = _make_test_article_container(char_w=10, line_h=20)
         minimum, natural, baseline_min, baseline_nat = container.do_measure(
             Gtk.Orientation.VERTICAL, -1,
@@ -750,64 +798,355 @@ class ArticleContainerMeasureTests(unittest.TestCase):
         self.assertEqual(baseline_min, -1)
         self.assertEqual(baseline_nat, -1)
 
-    def test_vertical_measure_forwards_to_child_at_outer_column_width(
+    def test_vertical_measure_returns_zero_and_does_not_measure_child(
         self,
     ) -> None:
-        # Width reported by the child is what the container reports
-        # vertically; ``for_size`` from the parent is capped to
-        # ``outer_column_width`` so the child wraps against the column
-        # it will be allocated, not against the parent's wider
-        # viewport.
+        # Option C: the vertical extent comes from the scrollable child
+        # (it owns the forwarded ``vadjustment``), NOT from the container
+        # measuring its child. The container must report ``(0, 0)`` and
+        # must never call ``measure`` on the child vertically — doing so
+        # is what reinvents the viewport.
         container = _make_test_article_container(char_w=10, line_h=20)
         child = _CapturingChild(reported_vertical_height=123)
         container.set_child(child)
-        outer = container.outer_column_width()
 
         minimum, natural, _, _ = container.do_measure(
-            Gtk.Orientation.VERTICAL, outer + 500,
+            Gtk.Orientation.VERTICAL, container.outer_column_width() + 500,
         )
-        self.assertEqual(minimum, 123)
-        self.assertEqual(natural, 123)
-        # for_size > outer → capped to outer.
-        self.assertEqual(
-            child.recorded_measure_calls,
-            [(Gtk.Orientation.VERTICAL, outer)],
-        )
+        self.assertEqual(minimum, 0)
+        self.assertEqual(natural, 0)
+        self.assertEqual(child.recorded_measure_calls, [])
 
-    def test_vertical_measure_passes_outer_when_for_size_is_unconstrained(
-        self,
-    ) -> None:
-        # ``for_size == -1`` is GTK's "no horizontal constraint" hint;
-        # the container substitutes ``outer_column_width`` because that
-        # is what the child will actually be allocated.
+    def test_vertical_measure_ignores_for_size(self) -> None:
+        # The container's vertical report is constant ``(0, 0)`` whatever
+        # the parent's cross-axis hint, and never touches the child.
         container = _make_test_article_container(char_w=10, line_h=20)
         child = _CapturingChild(reported_vertical_height=77)
         container.set_child(child)
         outer = container.outer_column_width()
 
-        container.do_measure(Gtk.Orientation.VERTICAL, -1)
-        self.assertEqual(
-            child.recorded_measure_calls,
-            [(Gtk.Orientation.VERTICAL, outer)],
+        for for_size in (-1, 0, outer - 50, outer, outer + 500):
+            with self.subTest(for_size=for_size):
+                minimum, natural, _, _ = container.do_measure(
+                    Gtk.Orientation.VERTICAL, for_size,
+                )
+                self.assertEqual((minimum, natural), (0, 0))
+        self.assertEqual(child.recorded_measure_calls, [])
+
+
+@unittest.skipUnless(_display_available(), "no GDK display")
+class ArticleContainerScrollableTests(unittest.TestCase):
+    """Pin Option C: :class:`ArticleContainer` implements ``Gtk.Scrollable``.
+
+    Implementing the interface is what makes the parent
+    ``Gtk.ScrolledWindow`` keep the container as its *direct* child and
+    interpose **no** ``Gtk.Viewport`` — the structural fix that removes the
+    first-launch scrollbar bug. The container then treats the two axes
+    differently: the vertical adjustment + policy are *forwarded* to the
+    scrollable child (which owns the v-extent), while the horizontal axis is
+    *owned* by the container (it configures the ``hadjustment`` and
+    translates the fixed-width column itself).
+    """
+
+    def _capturing(
+        self,
+        *,
+        char_w: int = 10,
+        line_h: int = 20,
+    ) -> tuple[ArticleContainer, _CapturingChild]:
+        container = _make_test_article_container(char_w=char_w, line_h=line_h)
+        child = _CapturingChild()
+        container.set_child(child)
+        return container, child
+
+    def test_container_is_a_gtk_scrollable(self) -> None:
+        # The base-class change is the whole point of Option C — without
+        # it the ScrolledWindow interposes a viewport and the bug returns.
+        container = _make_test_article_container()
+        self.assertIsInstance(container, Gtk.Scrollable)
+
+    def test_exposes_the_four_scrollable_interface_properties(self) -> None:
+        # The interface's required surface, installed under the hyphenated
+        # GObject names the ScrolledWindow drives.
+        container = _make_test_article_container()
+        prop_names = {pspec.name for pspec in container.list_properties()}
+        self.assertLessEqual(
+            {"hadjustment", "vadjustment", "hscroll-policy", "vscroll-policy"},
+            prop_names,
         )
 
-    def test_vertical_measure_passes_for_size_when_narrower_than_outer(
+    def test_overflow_is_hidden_so_the_column_is_clipped(self) -> None:
+        # With no interposed viewport the container must clip the column
+        # to the viewport itself, or a column wider than the window paints
+        # past the edge instead of being reached by the scrollbar.
+        container = _make_test_article_container()
+        self.assertEqual(container.get_overflow(), Gtk.Overflow.HIDDEN)
+
+    # ----- vertical pass-through -----
+
+    def test_vadjustment_is_forwarded_to_a_scrollable_child(self) -> None:
+        container = _make_test_article_container()
+        text_view = Gtk.TextView()
+        container.set_child(text_view)
+        vadj = Gtk.Adjustment()
+
+        container.set_property("vadjustment", vadj)
+
+        # The text view becomes the vertical scrollport: it owns the very
+        # adjustment the ScrolledWindow reads for the scrollbar.
+        self.assertIs(text_view.get_vadjustment(), vadj)
+
+    def test_vadjustment_set_before_child_still_reaches_a_later_child(
         self,
     ) -> None:
-        # When the parent's hint is narrower than the column the
-        # container forwards it as-is — there is no point asking the
-        # child for a height at a width it will never see.
-        container = _make_test_article_container(char_w=10, line_h=20)
-        child = _CapturingChild(reported_vertical_height=42)
-        container.set_child(child)
-        outer = container.outer_column_width()
-        narrower = outer - 50
+        # In production the child is set before the ScrolledWindow installs
+        # the adjustment; here we cover the opposite order so set_child's
+        # own forwarding is exercised too.
+        container = _make_test_article_container()
+        vadj = Gtk.Adjustment()
+        container.set_property("vadjustment", vadj)
+        text_view = Gtk.TextView()
 
-        container.do_measure(Gtk.Orientation.VERTICAL, narrower)
-        self.assertEqual(
-            child.recorded_measure_calls,
-            [(Gtk.Orientation.VERTICAL, narrower)],
+        container.set_child(text_view)
+
+        self.assertIs(text_view.get_vadjustment(), vadj)
+
+    def test_vscroll_policy_is_forwarded_to_a_scrollable_child(self) -> None:
+        container = _make_test_article_container()
+        text_view = Gtk.TextView()
+        container.set_child(text_view)
+
+        container.set_property(
+            "vscroll-policy", Gtk.ScrollablePolicy.NATURAL
         )
+
+        self.assertEqual(
+            text_view.get_vscroll_policy(), Gtk.ScrollablePolicy.NATURAL
+        )
+
+    def test_forwarding_to_a_non_scrollable_child_is_a_no_op(self) -> None:
+        # The bare-widget stand-in the allocation tests use is not a
+        # Gtk.Scrollable; forwarding must skip it without raising.
+        container, _child = self._capturing()
+        container.set_property("vadjustment", Gtk.Adjustment())  # must not raise
+
+    # ----- horizontal axis owned by the container -----
+
+    def test_narrow_allocation_configures_hadjustment_extent(self) -> None:
+        # Below the column width the container publishes the scroll extent
+        # on its own hadjustment: upper = column, page = viewport, lower 0.
+        # That overflow (upper > page) is what shows the horizontal
+        # scrollbar under the AUTOMATIC policy.
+        container, _child = self._capturing()
+        outer = container.outer_column_width()
+        hadj = Gtk.Adjustment()
+        container.set_property("hadjustment", hadj)
+        viewport = outer - 200
+
+        container.do_size_allocate(viewport, 600, -1)
+
+        self.assertEqual(hadj.get_lower(), 0.0)
+        self.assertEqual(hadj.get_upper(), float(outer))
+        self.assertEqual(hadj.get_page_size(), float(viewport))
+
+    def test_horizontal_scroll_offsets_child_by_negative_value(self) -> None:
+        # A scroll within range translates the column left by the scroll
+        # value — the container, not the text view, does the panning.
+        container, child = self._capturing()
+        outer = container.outer_column_width()
+        hadj = Gtk.Adjustment()
+        container.set_property("hadjustment", hadj)
+        viewport = outer - 200
+        container.do_size_allocate(viewport, 600, -1)  # max offset 200
+
+        hadj.set_value(150)
+        child.recorded_allocate_calls.clear()
+        container.do_size_allocate(viewport, 600, -1)
+
+        width, _h, _b, transform = child.recorded_allocate_calls[-1]
+        self.assertEqual(width, outer)  # column still pinned to full width
+        self.assertEqual(_transform_x_offset(transform), -150)
+
+    def test_horizontal_scroll_value_clamps_to_column_minus_viewport(
+        self,
+    ) -> None:
+        # A value past the end (e.g. left over from a narrower-still
+        # layout) is clamped to column − viewport so the column cannot be
+        # pinned entirely off-screen.
+        container, child = self._capturing()
+        outer = container.outer_column_width()
+        hadj = Gtk.Adjustment()
+        container.set_property("hadjustment", hadj)
+        viewport = outer - 200
+        container.do_size_allocate(viewport, 600, -1)
+        max_offset = outer - viewport  # 200
+
+        hadj.set_value(max_offset + 10_000)
+        child.recorded_allocate_calls.clear()
+        container.do_size_allocate(viewport, 600, -1)
+
+        self.assertEqual(int(hadj.get_value()), max_offset)
+        _w, _h, _b, transform = child.recorded_allocate_calls[-1]
+        self.assertEqual(_transform_x_offset(transform), -max_offset)
+
+    def test_wide_allocation_pins_hadjustment_value_to_zero(self) -> None:
+        # When the viewport is at least the column width there is nothing
+        # to scroll: upper collapses to ≤ page and the value is pinned to
+        # 0 while the column is centred.
+        container, child = self._capturing()
+        outer = container.outer_column_width()
+        hadj = Gtk.Adjustment()
+        container.set_property("hadjustment", hadj)
+        wide = outer + 240
+
+        container.do_size_allocate(wide, 600, -1)
+
+        self.assertEqual(hadj.get_value(), 0.0)
+        _w, _h, _b, transform = child.recorded_allocate_calls[-1]
+        self.assertEqual(_transform_x_offset(transform), (wide - outer) // 2)
+
+    def test_setting_hadjustment_connects_value_changed(self) -> None:
+        # The container re-runs allocation on a horizontal scroll, so it
+        # must subscribe to the adjustment it is given.
+        container = _make_test_article_container()
+        hadj = Gtk.Adjustment()
+
+        container.set_property("hadjustment", hadj)
+
+        self.assertIs(container._connected_hadjustment, hadj)
+        self.assertTrue(
+            GObject.signal_handler_is_connected(
+                hadj, container._hadjustment_value_changed_id
+            )
+        )
+
+    def test_value_changed_requests_reallocation(self) -> None:
+        # The end-to-end reason for the subscription: a value change must
+        # queue a fresh allocation so the column repositions.
+        container = _make_test_article_container()
+        hadj = Gtk.Adjustment()
+        container.set_property("hadjustment", hadj)
+        hadj.configure(0.0, 0.0, 1000.0, 10.0, 90.0, 500.0)
+        reallocations: list[int] = []
+        # Shadow the GTK method so the test observes the request without a
+        # main loop; the handler calls ``self.queue_allocate()``.
+        container.queue_allocate = lambda: reallocations.append(1)  # type: ignore[method-assign]
+
+        hadj.set_value(120.0)
+
+        self.assertTrue(reallocations)
+
+    def test_replacing_hadjustment_disconnects_the_previous_one(self) -> None:
+        # A replaced adjustment must leave no dangling handler closing over
+        # the container.
+        container = _make_test_article_container()
+        first = Gtk.Adjustment()
+        container.set_property("hadjustment", first)
+        first_id = container._hadjustment_value_changed_id
+
+        second = Gtk.Adjustment()
+        container.set_property("hadjustment", second)
+
+        self.assertFalse(
+            GObject.signal_handler_is_connected(first, first_id)
+        )
+        self.assertIs(container._connected_hadjustment, second)
+
+    def test_unroot_disconnects_the_hadjustment_handler(self) -> None:
+        # The rooted (production) teardown path drops the subscription
+        # alongside the child unparent.
+        container = _make_test_article_container()
+        container.set_child(_CapturingChild())
+        window = Gtk.Window()
+        window.set_child(container)
+        hadj = Gtk.Adjustment()
+        container.set_property("hadjustment", hadj)
+        handler_id = container._hadjustment_value_changed_id
+
+        window.set_child(None)  # unroots the container
+
+        self.assertFalse(
+            GObject.signal_handler_is_connected(hadj, handler_id)
+        )
+        self.assertIsNone(container._connected_hadjustment)
+        window.destroy()
+
+
+@unittest.skipUnless(_display_available(), "no GDK display")
+class ArticleContainerScrollbarRegressionTests(unittest.TestCase):
+    """End-to-end regression for the first-launch scrollbar bug.
+
+    The original defect: on launch the rendered pane showed *no* vertical
+    scrollbar even when the selected note overflowed the viewport, if the
+    note's last line was a static-size image. The implicit ``Gtk.Viewport``
+    committed a page-sized extent during its first allocation (while the
+    text view still measured zero height) and never revised it, because a
+    trailing static image produces no later height change. Option C removes
+    the viewport, so the text view — which knows its own height — owns the
+    vertical adjustment and writes the correct ``upper``.
+
+    This test reproduces the exact trigger: a real :class:`NoteView` whose
+    selected note ends with a tall image, presented on a real toplevel and
+    settled through a **real main loop** (the bug only manifests after a
+    frame-clock tick, which a manually pumped context never produces). It
+    asserts the vertical adjustment overflows the page at startup — i.e.
+    the scrollbar is shown — without any switch-and-back nudge.
+    """
+
+    def _build_image_last_view(
+        self,
+    ) -> tuple[NoteView, Gtk.Window]:
+        repository = _FakeNoteRepository()
+        note = _make_note(
+            "img-last",
+            source="= Title\n\nIntro paragraph.\n\nimage::tall.png[]",
+        )
+        repository.notes[note.id] = note
+        store = _build_tracking_store(repository)
+        attachments = _FakeAttachmentStore()
+        # 100×900: comfortably taller than the 600 px viewport whether or
+        # not the renderer scales it to the column width.
+        attachments.seed("img-last", "tall.png", _solid_png(100, 900))
+        app_state = AppState()
+        app_state.set_selected_note_id("img-last")
+        with mock.patch.object(
+            note_view_module,
+            "_build_font_measurers",
+            _stub_font_measurers_factory(char_w=10, line_h=20),
+        ):
+            view = NoteView(
+                note_store=store,
+                app_state=app_state,
+                attachments=attachments,
+            )
+        window = Gtk.Window()
+        window.set_default_size(900, 600)
+        window.set_child(view)
+        return view, window
+
+    def test_image_last_note_shows_vertical_scrollbar_on_first_launch(
+        self,
+    ) -> None:
+        view, window = self._build_image_last_view()
+        window.present()
+        try:
+            _settle_real_main_loop()
+            scrolled = _find_scrolled_window(view)
+            # Option C interposes no viewport — the container is the direct
+            # scrollable child.
+            self.assertNotIsInstance(scrolled.get_child(), Gtk.Viewport)
+            vadjustment = scrolled.get_vadjustment()
+            self.assertGreater(
+                vadjustment.get_upper(),
+                vadjustment.get_page_size(),
+                "the rendered note overflows the viewport, so the vertical "
+                "adjustment must report an extent larger than the page "
+                "(i.e. the scrollbar is shown) at startup",
+            )
+        finally:
+            window.set_child(None)
+            window.destroy()
+            _settle_real_main_loop(timeout_ms=50)
 
 
 # ---------------------------------------------------------------------------
@@ -904,29 +1243,16 @@ class NoteViewSmokeTests(unittest.TestCase):
 # ---------------------------------------------------------------------------
 
 
-def _find_text_view(view: NoteView) -> Gtk.TextView:
-    """Walk the widget tree and pull out the inner :class:`Gtk.TextView`.
+def _find_scrolled_window(view: NoteView) -> Gtk.ScrolledWindow:
+    """Walk the :class:`NoteView` stack and return its ``Gtk.ScrolledWindow``.
 
-    The structure is ``NoteView → [Revealer →] ScrolledWindow →
-    [Viewport →] ArticleContainer → TextView``. From step 16 onwards
-    the parse-error banner sits in a :class:`Gtk.Revealer` *prepended*
-    to the vertical box, so the helper walks past it. The
-    ``ScrolledWindow`` is the box's *next* sibling.
-    ``Gtk.ScrolledWindow`` wraps any non-:class:`Gtk.Scrollable`
-    child in a :class:`Gtk.Viewport` automatically; since
-    :class:`ArticleContainer` is a ``Gtk.Widget`` (not natively
-    scrollable), the viewport is always present in production and
-    the helper steps past it.
-
-    We walk ``get_first_child`` / ``get_next_sibling`` / ``get_child``
-    rather than reaching into private attributes of :class:`NoteView`,
-    so the test stays agnostic to its internal field names. Returning
-    the ``Gtk.TextView`` itself lets margin-wiring tests read the four
-    margin properties via the documented public API.
+    The structure is ``NoteView → [Revealer →] ScrolledWindow → …``. From
+    step 16 onwards the parse-error banner sits in a :class:`Gtk.Revealer`
+    *prepended* to the vertical box, so the helper walks past it; the
+    ``ScrolledWindow`` is the box's *next* sibling. Walking the public
+    child API keeps the tests agnostic to :class:`NoteView`'s field names.
     """
     first = view.get_first_child()
-    # The banner revealer (step 16+) is the very first child. Hop
-    # past it; the ScrolledWindow follows.
     if isinstance(first, Gtk.Revealer):
         scrolled = first.get_next_sibling()
     else:
@@ -935,6 +1261,27 @@ def _find_text_view(view: NoteView) -> Gtk.TextView:
         f"expected a ScrolledWindow in the NoteView stack, "
         f"got {type(scrolled).__name__}"
     )
+    return scrolled
+
+
+def _find_text_view(view: NoteView) -> Gtk.TextView:
+    """Walk the widget tree and pull out the inner :class:`Gtk.TextView`.
+
+    The structure is ``NoteView → [Revealer →] ScrolledWindow →
+    ArticleContainer → TextView``. Under Option C the
+    :class:`ArticleContainer` implements ``Gtk.Scrollable``, so the
+    ``ScrolledWindow`` keeps it as its **direct** child and interposes no
+    :class:`Gtk.Viewport`. The helper still tolerates a viewport (it steps
+    past one if present) so it stays robust to layout changes, but in the
+    current production tree there is none.
+
+    We walk ``get_first_child`` / ``get_next_sibling`` / ``get_child``
+    rather than reaching into private attributes of :class:`NoteView`,
+    so the test stays agnostic to its internal field names. Returning
+    the ``Gtk.TextView`` itself lets margin-wiring tests read the four
+    margin properties via the documented public API.
+    """
+    scrolled = _find_scrolled_window(view)
     inner = scrolled.get_child()
     if isinstance(inner, Gtk.Viewport):
         article = inner.get_child()
