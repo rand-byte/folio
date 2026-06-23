@@ -194,6 +194,30 @@ class WashSpec:
     hairline: bool = False
 
 
+@dataclass(frozen=True)
+class NoteEndWash:
+    """Colours for the note "sheet" and the seam that marks its end.
+
+    The rendered note is drawn as a sheet of paper sitting on the
+    scroller's background (the "desk"). Because the article text view is
+    the vertical scrollport, its own background would otherwise fill the
+    whole viewport, hiding the desk below a short note. The text view
+    therefore paints its background *itself*: ``sheet_tint`` is drawn from
+    the top down to the end of the content (the sheet), and below that the
+    view is transparent so the **parent's** real background shows through
+    — that is the desk, with no separately-invented colour to drift from
+    the theme. ``rule_tint`` is a translucent 1-px rule painted at the
+    seam (the same hairline treatment the metadata divider uses), giving
+    the sheet a crisp bottom edge.
+
+    ``sheet_tint`` is therefore opaque (it replaces the page background)
+    while ``rule_tint`` is translucent (it reads over the seam).
+    """
+
+    sheet_tint: tuple[float, float, float, float]
+    rule_tint: tuple[float, float, float, float]
+
+
 # ---------------------------------------------------------------------------
 # Scale multipliers for heading levels
 # ---------------------------------------------------------------------------
@@ -379,6 +403,18 @@ _METADATA_RULE_TINT: tuple[float, float, float, float] = (0.5, 0.5, 0.5, 0.30)
 _METADATA_RULE_INSET_PX: int = 0
 
 
+# Note "sheet" + end seam. The sheet is the paper the rendered note sits
+# on; it is painted by the article text view itself (its CSS background is
+# transparent) from the top down to the end of the content, so that below
+# the content the view is transparent and the scroller's own background —
+# the "desk" — shows through. The sheet is therefore an *opaque* colour
+# (it stands in for the page background); the rendered foregrounds and
+# block tints are all tuned for this light paper. The seam rule reuses the
+# metadata rule's alpha so the view's two hairlines read as one weight.
+_SHEET_BACKGROUND: tuple[float, float, float, float] = (1.0, 1.0, 1.0, 1.0)
+_NOTE_END_RULE_TINT: tuple[float, float, float, float] = (0.5, 0.5, 0.5, 0.30)
+
+
 def build_tag_table(*, char_width_px: int) -> Gtk.TextTagTable:
     """Construct the rendered-view tag table for the current subset.
 
@@ -496,6 +532,21 @@ def build_wash_specs() -> dict[TagName, WashSpec]:
         hairline=True,
     )
     return specs
+
+
+def build_note_end_wash() -> NoteEndWash:
+    """Return the note sheet colour and its end-seam colour.
+
+    The sheet is painted by the article text view behind the content
+    (the view's CSS background is transparent so the desk shows below);
+    the rule is the 1-px seam at the content's bottom edge. Sourced here
+    so every rendered-view colour lives in this one module, the same way
+    :func:`build_wash_specs` owns the paragraph washes.
+    """
+    return NoteEndWash(
+        sheet_tint=_SHEET_BACKGROUND,
+        rule_tint=_NOTE_END_RULE_TINT,
+    )
 
 
 def _make_inline_tag(  # pylint: disable=too-many-arguments

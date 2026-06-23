@@ -97,7 +97,18 @@ Principles & invariants
   parameters. The tag table is therefore built *after* M-width is
   measured (``char_width_px`` is required), and the wash-spec map
   passed to the subclass is keyed by :class:`Gtk.TextTag` objects
-  (not names) so per-snapshot tag-lookup work stays O(1).
+  (not names) so per-snapshot tag-lookup work stays O(1). The same
+  subclass also paints the note *sheet* and its end edge: because the
+  text view is the vertical scrollport, its own background would fill
+  the whole viewport, so the view's CSS background is made transparent
+  (the ``article-text-view`` class) and ``do_snapshot`` paints an
+  opaque sheet from the top down to the end of the content, with a 1-px
+  seam at the edge. Below the content the view paints nothing, so the
+  scroller's own background (the "desk") shows through and a short note
+  ends visibly — using the parent's real background rather than an
+  invented colour (see
+  :func:`ui.note_render.tag_table.build_note_end_wash`,
+  :func:`_sheet_rect_for`, and :func:`_seam_rect_for`).
 * The size-allocate vfunc — *not* the ``size-allocate`` signal, which is
   deprecated in GTK 4 — is the documented place to react to a fresh
   allocation. :meth:`ArticleContainer.do_size_allocate` configures the
@@ -199,8 +210,10 @@ from giruntime.controllers.app_state import AppState
 from giruntime.controllers.note_list_store import NoteListStore
 from giruntime.ui._dates import format_date_long
 from giruntime.ui.note_render.tag_table import (
+    NoteEndWash,
     TagName,
     WashSpec,
+    build_note_end_wash,
     build_tag_table,
     build_wash_specs,
 )
@@ -259,6 +272,18 @@ _BANNER_CSS_CLASS: str = "note-view-banner"
 stylesheet can style it (warning yellow background, padded
 inline-notice look). The class name is stable across releases — the
 stylesheet that targets it is shipped with the application.
+"""
+
+
+_ARTICLE_TEXT_VIEW_CSS_CLASS: str = "article-text-view"
+"""CSS class applied to :class:`_ArticleTextView` so the bundled
+stylesheet can make its background (and its text window's background)
+transparent. The view paints its own opaque *sheet* in
+:meth:`_ArticleTextView.do_snapshot`, ending at the note's content, so
+the scroller's background shows through below it; if the framework
+painted the view's background it would fill the whole viewport and hide
+that. The class name is stable across releases — the stylesheet that
+targets it ships with the application.
 """
 
 
@@ -504,17 +529,47 @@ class _ArticleTextView(Gtk.TextView):
     Splitting :meth:`_compute_wash_rects` out of :meth:`do_snapshot`
     is the test seam: tests assert the list of rects directly without
     driving GTK's snapshot machinery.
+
+    **The sheet, and the end-of-note edge.** The view's CSS background is
+    transparent (set via the ``article-text-view`` style class, see
+    ``css/app.css``); the page is instead painted here in
+    :meth:`do_snapshot` as an opaque *sheet* from the top down to the end
+    of the content. Below the content the view paints nothing, so the
+    scroller's own background (the "desk") shows through — that is what
+    gives a short note a visible end, using the *parent's* real
+    background rather than a separately-invented colour that could drift
+    from the theme. A translucent 1-px *seam* is drawn at the sheet's
+    bottom edge. The colours come from
+    :func:`ui.note_render.tag_table.build_note_end_wash` (one place for
+    every rendered-view colour) and the geometry is factored into the
+    free functions :func:`_sheet_rect_for` / :func:`_seam_rect_for` so the
+    rect math is unit-testable without a realised font. When the content
+    reaches or exceeds the viewport (a long note, or one scrolled to the
+    bottom) the sheet fills the viewport and no seam is drawn. An empty
+    buffer (the parse-error / no-note state) paints a full-height blank
+    sheet.
     """
 
     _wash_specs_by_tag: Mapping[Gtk.TextTag, WashSpec]
+    _note_end_wash: NoteEndWash
 
     def __init__(self) -> None:
         super().__init__()
+        # The page is painted by do_snapshot (an opaque sheet ending at
+        # the content), so the framework must not paint a background of
+        # its own underneath — that would fill the whole viewport and
+        # hide the desk below a short note. The style class drives the
+        # ``background: transparent`` rule in css/app.css.
+        self.add_css_class(_ARTICLE_TEXT_VIEW_CSS_CLASS)
         # No wash specs installed yet — the painter is a no-op until
         # :meth:`install_wash_specs` is called. Tests that construct
         # the subclass directly get a plain :class:`Gtk.TextView` of
         # behaviour, which matches the inert pre-install state.
         self._wash_specs_by_tag = {}
+        # The sheet / seam colours are static (no per-note parameters),
+        # so they are resolved once at construction from the single
+        # rendered-view colour source.
+        self._note_end_wash = build_note_end_wash()
 
     def install_wash_specs(
         self, specs_by_tag: Mapping[Gtk.TextTag, WashSpec],
@@ -532,16 +587,36 @@ class _ArticleTextView(Gtk.TextView):
     def do_snapshot(  # pylint: disable=arguments-differ
         self, snapshot: Gtk.Snapshot,
     ) -> None:
-        """Paint the per-paragraph washes, then delegate to the parent.
+        """Paint the sheet, the per-paragraph washes, the text, then the seam.
 
-        The wash colour nodes are appended *before* the parent
-        snapshot, so the text renders on top. The order matters: GTK
-        snapshot nodes are stacked back-to-front in the order they
-        are appended.
+        The view's CSS background is transparent (see ``__init__``), so
+        this method paints the page itself. Order is back-to-front, the
+        order :meth:`Gtk.Snapshot.append_color` stacks nodes:
+
+        1. the *sheet* — an opaque page background from the top down to
+           the end of the content (or the whole viewport when the content
+           fills it). Below the content the view paints nothing, so the
+           scroller's own background (the "desk") shows through and a
+           short note ends at a visible edge;
+        2. the per-paragraph *washes*, behind the text;
+        3. the *text*, via the parent snapshot;
+        4. the *seam* — a 1-px rule at the sheet's bottom edge, on top.
         """
+        sheet_bottom = self._sheet_bottom_px()
+        width = self.get_width()
+        height = self.get_height()
+        sheet = _sheet_rect_for(
+            sheet_bottom, width, height, self._note_end_wash.sheet_tint,
+        )
+        snapshot.append_color(*sheet)
         for color, rect in self._compute_wash_rects():
             snapshot.append_color(color, rect)
         Gtk.TextView.do_snapshot(self, snapshot)
+        seam = _seam_rect_for(
+            sheet_bottom, width, height, self._note_end_wash.rule_tint,
+        )
+        if seam is not None:
+            snapshot.append_color(*seam)
 
     def _compute_wash_rects(
         self,
@@ -661,6 +736,28 @@ class _ArticleTextView(Gtk.TextView):
             )
         return matching[0]
 
+    def _sheet_bottom_px(self) -> int | None:
+        """Return the widget-coordinate y at which the note's sheet ends.
+
+        That is the bottom of the last logical line (via
+        :meth:`Gtk.TextView.get_line_yrange` on the end iter, mapped to
+        widget coordinates the same way :meth:`_wash_rect_for_line` maps
+        wash lines) plus the view's ``bottom-margin``, so the sheet
+        includes its trailing padding before the desk begins.
+
+        Returns ``None`` for an empty buffer — the parse-error / no-note
+        state — so the caller paints a full-height sheet (a blank page),
+        not a sheet that collapses to the top of the view.
+        """
+        buffer = self.get_buffer()
+        if buffer.get_char_count() == 0:
+            return None
+        line_y_buffer, line_h = self.get_line_yrange(buffer.get_end_iter())
+        _, line_y_widget = self.buffer_to_window_coords(
+            Gtk.TextWindowType.TEXT, 0, line_y_buffer,
+        )
+        return int(line_y_widget + line_h + self.get_bottom_margin())
+
 
 def _format_metadata_line(
     created_at: datetime,
@@ -703,6 +800,63 @@ def _rgba_from_tint(tint: tuple[float, float, float, float]) -> Gdk.RGBA:
     rgba = Gdk.RGBA()
     rgba.red, rgba.green, rgba.blue, rgba.alpha = tint
     return rgba
+
+
+def _sheet_rect_for(
+    sheet_bottom_px: int | None,
+    width_px: int,
+    height_px: int,
+    sheet_tint: tuple[float, float, float, float],
+) -> tuple[Gdk.RGBA, Graphene.Rect]:
+    """Return the opaque sheet rect painted behind the note's content.
+
+    ``sheet_bottom_px`` is the widget-coordinate y at which the content
+    ends, or ``None`` for an empty buffer. The sheet spans the full width
+    from the top down to that y; it extends to the full ``height_px``
+    when the content fills or passes the viewport (``sheet_bottom_px >=
+    height_px``) or when the buffer is empty (``None``). Below the sheet
+    the view paints nothing, so the parent's background — the desk —
+    shows through.
+
+    A free function (not a method) so the rect geometry is unit-testable
+    without a realised :class:`Gtk.TextView` or font, mirroring
+    :func:`_seam_rect_for` and :func:`_rgba_from_tint`.
+    """
+    if sheet_bottom_px is None or sheet_bottom_px >= height_px:
+        sheet_bottom_px = height_px
+    rect = Graphene.Rect()
+    rect.init(0.0, 0.0, float(width_px), float(sheet_bottom_px))
+    return _rgba_from_tint(sheet_tint), rect
+
+
+def _seam_rect_for(
+    sheet_bottom_px: int | None,
+    width_px: int,
+    height_px: int,
+    rule_tint: tuple[float, float, float, float],
+) -> tuple[Gdk.RGBA, Graphene.Rect] | None:
+    """Return the 1-px seam rule at the sheet's bottom edge, or ``None``.
+
+    Returns ``None`` when there is no visible edge to mark: an empty
+    buffer (``sheet_bottom_px is None``) or content that reaches or passes
+    the viewport bottom (``sheet_bottom_px >= height_px`` — a long note,
+    or one scrolled to the end). Otherwise the rule is a full-width band
+    of :data:`_HAIRLINE_THICKNESS_PX` at the seam, painted on top of the
+    text so the sheet ends with a crisp line against the desk.
+
+    A free function (not a method) so the rect geometry is unit-testable
+    without a realised :class:`Gtk.TextView` or font.
+    """
+    if sheet_bottom_px is None or sheet_bottom_px >= height_px:
+        return None
+    rect = Graphene.Rect()
+    rect.init(
+        0.0,
+        float(sheet_bottom_px),
+        float(width_px),
+        float(_HAIRLINE_THICKNESS_PX),
+    )
+    return _rgba_from_tint(rule_tint), rect
 
 
 class ArticleContainer(Gtk.Widget, Gtk.Scrollable):

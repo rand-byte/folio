@@ -7,11 +7,13 @@ import unittest
 from gi.repository import Gtk, Pango
 
 from giruntime.ui.note_render.tag_table import (
+    NoteEndWash,
     TagName,
     WashSpec,
     admonition_body_tag_name,
     admonition_kind_tag_name,
     admonition_label_tag_name,
+    build_note_end_wash,
     build_tag_table,
     build_wash_specs,
     heading_tag_name,
@@ -646,6 +648,47 @@ class WashSpecTests(unittest.TestCase):
         for name, spec in self.specs.items():
             with self.subTest(name=name):
                 self.assertEqual(spec.hairline, name is TagName.METADATA)
+
+
+class BuildNoteEndWashTests(unittest.TestCase):
+    """:func:`build_note_end_wash` owns the note sheet + end-seam colours.
+
+    The sheet/seam are not keyed to a paragraph tag, so they live
+    outside :func:`build_wash_specs`; these tests pin their colour
+    contract the same way the wash-spec tests pin the paragraph washes.
+    """
+
+    def setUp(self) -> None:
+        self.wash = build_note_end_wash()
+
+    def test_returns_a_note_end_wash(self) -> None:
+        self.assertIsInstance(self.wash, NoteEndWash)
+
+    def test_sheet_and_rule_are_four_channel_tints(self) -> None:
+        # Both tints are RGBA 4-tuples in [0, 1]; the painter feeds them
+        # straight to Gdk.RGBA, so a wrong arity would fail at paint time.
+        for tint in (self.wash.sheet_tint, self.wash.rule_tint):
+            with self.subTest(tint=tint):
+                self.assertEqual(len(tint), 4)
+                for channel in tint:
+                    self.assertGreaterEqual(channel, 0.0)
+                    self.assertLessEqual(channel, 1.0)
+
+    def test_sheet_is_opaque(self) -> None:
+        # The sheet replaces the page background, so it must be fully
+        # opaque — a translucent sheet would let the desk bleed through
+        # behind the text.
+        self.assertEqual(self.wash.sheet_tint[3], 1.0)
+
+    def test_rule_is_translucent(self) -> None:
+        # The seam reads over the boundary between sheet and desk, so its
+        # alpha is below 1, matching the other rendered-view rules.
+        self.assertLess(self.wash.rule_tint[3], 1.0)
+
+    def test_each_call_returns_an_equal_wash(self) -> None:
+        # The colours are static; a fresh call must yield an equal value
+        # (frozen dataclass equality) so callers can resolve it once.
+        self.assertEqual(build_note_end_wash(), self.wash)
 
 
 if __name__ == "__main__":

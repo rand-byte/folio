@@ -29,6 +29,7 @@ from giruntime.ui.note_render.tag_table import (
     TagName,
     WashSpec,
     admonition_body_tag_name,
+    build_note_end_wash,
     build_tag_table,
     build_wash_specs,
 )
@@ -45,6 +46,8 @@ from giruntime.ui.note_view import (
     _message_for,
     _placeholder_image_bytes,
     _rgba_from_tint,
+    _seam_rect_for,
+    _sheet_rect_for,
 )
 from giruntime.ui._dates import format_date_long
 
@@ -2031,6 +2034,165 @@ class ArticleTextViewWashRectTests(unittest.TestCase):
             rect.get_y(),
             float(line_y_widget + line_h - _HAIRLINE_THICKNESS_PX),
         )
+
+
+class SheetAndSeamRectTests(unittest.TestCase):
+    """Drive the pure :func:`_sheet_rect_for` / :func:`_seam_rect_for` helpers.
+
+    No display needed: both are closed over their integer arguments, so
+    they are the display-free seam for the sheet/edge geometry the same
+    way :func:`_rgba_from_tint` is for wash colours.
+    """
+
+    def setUp(self) -> None:
+        self.wash = build_note_end_wash()
+
+    def test_short_content_sheet_ends_at_content(self) -> None:
+        # A short note: the sheet spans the full width from the top down
+        # to the content's bottom, not the whole viewport.
+        color, rect = _sheet_rect_for(200, 700, 560, self.wash.sheet_tint)
+        self.assertEqual(rect.get_x(), 0.0)
+        self.assertEqual(rect.get_y(), 0.0)
+        self.assertEqual(rect.get_width(), 700.0)
+        self.assertEqual(rect.get_height(), 200.0)
+        self.assertEqual(
+            _tuple_of(color), _tuple_of(_rgba_from_tint(self.wash.sheet_tint)),
+        )
+
+    def test_content_filling_viewport_sheet_fills_viewport(self) -> None:
+        # When content reaches the viewport bottom the sheet covers the
+        # whole height (no transparent strip, nothing to reveal).
+        _color, rect = _sheet_rect_for(560, 700, 560, self.wash.sheet_tint)
+        self.assertEqual(rect.get_height(), 560.0)
+
+    def test_content_past_viewport_sheet_fills_viewport(self) -> None:
+        # A long note (or one scrolled past the end) still fills.
+        _color, rect = _sheet_rect_for(900, 700, 560, self.wash.sheet_tint)
+        self.assertEqual(rect.get_height(), 560.0)
+
+    def test_empty_buffer_sheet_fills_viewport(self) -> None:
+        # ``None`` (empty buffer) paints a full-height blank sheet.
+        _color, rect = _sheet_rect_for(None, 700, 560, self.wash.sheet_tint)
+        self.assertEqual(rect.get_height(), 560.0)
+
+    def test_short_content_produces_a_seam(self) -> None:
+        # A short note gets a 1-px full-width seam at the content's end.
+        result = _seam_rect_for(200, 700, 560, self.wash.rule_tint)
+        self.assertIsNotNone(result)
+        assert result is not None  # narrow for the type checker
+        color, rect = result
+        self.assertEqual(rect.get_x(), 0.0)
+        self.assertEqual(rect.get_y(), 200.0)
+        self.assertEqual(rect.get_width(), 700.0)
+        self.assertEqual(rect.get_height(), float(_HAIRLINE_THICKNESS_PX))
+        self.assertEqual(
+            _tuple_of(color), _tuple_of(_rgba_from_tint(self.wash.rule_tint)),
+        )
+
+    def test_content_filling_viewport_has_no_seam(self) -> None:
+        # No visible edge → no seam.
+        self.assertIsNone(_seam_rect_for(560, 700, 560, self.wash.rule_tint))
+
+    def test_content_past_viewport_has_no_seam(self) -> None:
+        self.assertIsNone(_seam_rect_for(900, 700, 560, self.wash.rule_tint))
+
+    def test_empty_buffer_has_no_seam(self) -> None:
+        self.assertIsNone(_seam_rect_for(None, 700, 560, self.wash.rule_tint))
+
+    def test_seam_one_pixel_above_bottom_still_paints(self) -> None:
+        # Boundary: a content bottom strictly inside the viewport gets a
+        # seam, even by a single pixel.
+        result = _seam_rect_for(559, 700, 560, self.wash.rule_tint)
+        self.assertIsNotNone(result)
+
+
+def _tuple_of(rgba: Gdk.RGBA) -> tuple[float, float, float, float]:
+    """Channel 4-tuple of a :class:`Gdk.RGBA`, for equality asserts."""
+    return (rgba.red, rgba.green, rgba.blue, rgba.alpha)
+
+
+@unittest.skipUnless(_display_available(), "no GDK display")
+class ArticleTextViewSheetBottomTests(unittest.TestCase):
+    """Drive :meth:`_ArticleTextView._sheet_bottom_px` on a live view.
+
+    The pure rect math is covered by :class:`SheetAndSeamRectTests`;
+    these cover the part that needs a real :class:`Gtk.TextView` — the
+    empty-buffer guard and the end-iter-to-widget coordinate mapping —
+    so they are gated on a display like the wash-rect suite. Assertions
+    stay font-independent: the empty-buffer contract, that a short note
+    ends above the viewport bottom, and that a long note does not.
+    """
+
+    def test_empty_buffer_returns_none(self) -> None:
+        # The parse-error / no-note state: a blank buffer has no sheet
+        # edge, so the caller paints a full-height blank sheet.
+        text_view, _buffer, _table = _build_article_text_view_with_buffer()
+        self.assertIsNone(text_view._sheet_bottom_px())
+
+    def test_short_note_in_tall_view_ends_above_bottom(self) -> None:
+        # A couple of lines in a viewport tall enough to leave room
+        # below: the sheet bottom sits above the viewport bottom, so a
+        # seam (and a strip of revealed desk) results.
+        text_view, buffer, _table = _build_article_text_view_with_buffer()
+        buffer.set_text("A short note.\nTwo lines only.\n")
+        _realize_in_window(text_view, width=700, height=600)
+        try:
+            sheet_bottom = text_view._sheet_bottom_px()
+            self.assertIsNotNone(sheet_bottom)
+            assert sheet_bottom is not None  # narrow for the type checker
+            self.assertLess(sheet_bottom, 600)
+        finally:
+            _destroy_window_of(text_view)
+
+    def test_buffer_taller_than_viewport_ends_below_bottom(self) -> None:
+        # Many lines in a short viewport: the content bottom is past the
+        # viewport, so the sheet fills it and no seam is drawn.
+        text_view, buffer, _table = _build_article_text_view_with_buffer()
+        buffer.set_text("\n".join(f"line {i}" for i in range(200)) + "\n")
+        _realize_in_window(text_view, width=700, height=240)
+        try:
+            sheet_bottom = text_view._sheet_bottom_px()
+            self.assertIsNotNone(sheet_bottom)
+            assert sheet_bottom is not None  # narrow for the type checker
+            self.assertGreaterEqual(sheet_bottom, 240)
+        finally:
+            _destroy_window_of(text_view)
+
+
+def _realize_in_window(widget: Gtk.Widget, *, width: int, height: int) -> None:
+    """Put ``widget`` in a presented window and give it a known allocation.
+
+    The end-of-note mapping reads :meth:`Gtk.TextView.get_line_yrange`
+    and :meth:`Gtk.TextView.get_height`, which only return real values
+    once the widget has been realised and allocated. ``present`` realises
+    it (so its Pango context exists and the text lays out); the explicit
+    :meth:`Gtk.Widget.allocate` then pins a deterministic viewport size,
+    since a headless compositor does not reliably map/allocate the
+    presented surface under test load.
+    """
+    window = Gtk.Window()
+    window.set_default_size(width, height)
+    window.set_child(widget)
+    window.present()
+    context = GLib.MainContext.default()
+    for _ in range(50):
+        while context.pending():
+            context.iteration(False)
+    widget.allocate(width, height, -1, None)
+    for _ in range(20):
+        while context.pending():
+            context.iteration(False)
+
+
+def _destroy_window_of(widget: Gtk.Widget) -> None:
+    """Destroy the toplevel hosting ``widget`` and drain pending events."""
+    root = widget.get_root()
+    if isinstance(root, Gtk.Window):
+        root.destroy()
+    context = GLib.MainContext.default()
+    for _ in range(50):
+        while context.pending():
+            context.iteration(False)
 
 
 @unittest.skipUnless(_display_available(), "no GDK display")
