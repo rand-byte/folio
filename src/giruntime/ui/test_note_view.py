@@ -30,7 +30,7 @@ from giruntime.ui.note_render.tag_table import (
     TagName,
     WashSpec,
     admonition_body_tag_name,
-    build_note_end_wash,
+    build_sheet_wash,
     build_tag_table,
     build_wash_specs,
 )
@@ -43,13 +43,11 @@ from giruntime.ui.note_view import (
     _FALLBACK_CHAR_WIDTH_PX,
     _FALLBACK_LINE_HEIGHT_PX,
     _HAIRLINE_THICKNESS_PX,
-    _bottom_seam_rect_for,
     _format_metadata_line,
     _message_for,
     _placeholder_image_bytes,
     _rgba_from_tint,
     _sheet_rect_for,
-    _top_seam_rect_for,
 )
 from giruntime.ui._dates import format_date_long
 
@@ -2073,124 +2071,62 @@ class ArticleTextViewWashRectTests(unittest.TestCase):
         )
 
 
-class SheetAndSeamRectTests(unittest.TestCase):
-    """Drive the pure sheet / seam helpers.
+class SheetRectTests(unittest.TestCase):
+    """Drive the pure sheet helper.
 
-    :func:`_sheet_rect_for`, :func:`_top_seam_rect_for` and
-    :func:`_bottom_seam_rect_for` are closed over their integer arguments,
-    so they are the display-free seam for the sheet/edge geometry the same
-    way :func:`_rgba_from_tint` is for wash colours. The top desk band
-    mirrors the bottom one: the sheet starts at ``sheet_top`` (leaving desk
-    above) and ends at ``sheet_bottom`` (leaving desk below), each marked by
-    a 1-px seam.
+    :func:`_sheet_rect_for` is closed over its integer arguments, so it
+    is the display-free seam for the sheet geometry the same way
+    :func:`_rgba_from_tint` is for wash colours. The sheet starts at
+    ``sheet_top`` (leaving desk above) and ends at ``sheet_bottom``
+    (leaving desk below).
     """
 
     def setUp(self) -> None:
-        self.wash = build_note_end_wash()
+        self.sheet_tint = build_sheet_wash().tint
 
     def test_short_content_sheet_spans_top_to_content(self) -> None:
         # A short note scrolled to the top: a top desk band of 30 px, then
         # the sheet down to the content's bottom at 200 px.
-        color, rect = _sheet_rect_for(30, 200, 700, 560, self.wash.sheet_tint)
+        color, rect = _sheet_rect_for(30, 200, 700, 560, self.sheet_tint)
         self.assertEqual(rect.get_x(), 0.0)
         self.assertEqual(rect.get_y(), 30.0)
         self.assertEqual(rect.get_width(), 700.0)
         self.assertEqual(rect.get_height(), 170.0)
         self.assertEqual(
-            _tuple_of(color), _tuple_of(_rgba_from_tint(self.wash.sheet_tint)),
+            _tuple_of(color), _tuple_of(_rgba_from_tint(self.sheet_tint)),
         )
 
     def test_zero_top_keeps_sheet_at_the_very_top(self) -> None:
         # The construction default (top gap 0): the sheet starts at y=0,
         # exactly the pre-symmetry behaviour.
-        _color, rect = _sheet_rect_for(0, 200, 700, 560, self.wash.sheet_tint)
+        _color, rect = _sheet_rect_for(0, 200, 700, 560, self.sheet_tint)
         self.assertEqual(rect.get_y(), 0.0)
         self.assertEqual(rect.get_height(), 200.0)
 
     def test_negative_top_is_clamped_to_zero(self) -> None:
         # Scrolled down past the top breathing margin: the sheet fills from
         # the top, no desk band above.
-        _color, rect = _sheet_rect_for(-40, 200, 700, 560, self.wash.sheet_tint)
+        _color, rect = _sheet_rect_for(-40, 200, 700, 560, self.sheet_tint)
         self.assertEqual(rect.get_y(), 0.0)
         self.assertEqual(rect.get_height(), 200.0)
 
     def test_content_filling_viewport_sheet_fills_to_bottom(self) -> None:
         # When content reaches the viewport bottom the sheet covers down to
         # the height (no transparent strip below), still starting at the gap.
-        _color, rect = _sheet_rect_for(30, 560, 700, 560, self.wash.sheet_tint)
+        _color, rect = _sheet_rect_for(30, 560, 700, 560, self.sheet_tint)
         self.assertEqual(rect.get_y(), 30.0)
         self.assertEqual(rect.get_height(), 530.0)
 
     def test_content_past_viewport_sheet_fills_to_bottom(self) -> None:
         # A long note (or one scrolled past the end) still fills downward.
-        _color, rect = _sheet_rect_for(0, 900, 700, 560, self.wash.sheet_tint)
+        _color, rect = _sheet_rect_for(0, 900, 700, 560, self.sheet_tint)
         self.assertEqual(rect.get_height(), 560.0)
 
     def test_empty_buffer_sheet_fills_viewport(self) -> None:
         # ``None`` (empty buffer) with a zero top paints a full-height sheet.
-        _color, rect = _sheet_rect_for(0, None, 700, 560, self.wash.sheet_tint)
+        _color, rect = _sheet_rect_for(0, None, 700, 560, self.sheet_tint)
         self.assertEqual(rect.get_y(), 0.0)
         self.assertEqual(rect.get_height(), 560.0)
-
-    def test_short_content_produces_a_bottom_seam(self) -> None:
-        # A short note gets a 1-px full-width seam at the content's end.
-        result = _bottom_seam_rect_for(200, 700, 560, self.wash.rule_tint)
-        self.assertIsNotNone(result)
-        assert result is not None  # narrow for the type checker
-        color, rect = result
-        self.assertEqual(rect.get_x(), 0.0)
-        self.assertEqual(rect.get_y(), 200.0)
-        self.assertEqual(rect.get_width(), 700.0)
-        self.assertEqual(rect.get_height(), float(_HAIRLINE_THICKNESS_PX))
-        self.assertEqual(
-            _tuple_of(color), _tuple_of(_rgba_from_tint(self.wash.rule_tint)),
-        )
-
-    def test_content_filling_viewport_has_no_bottom_seam(self) -> None:
-        # No visible bottom edge → no seam.
-        self.assertIsNone(
-            _bottom_seam_rect_for(560, 700, 560, self.wash.rule_tint),
-        )
-
-    def test_content_past_viewport_has_no_bottom_seam(self) -> None:
-        self.assertIsNone(
-            _bottom_seam_rect_for(900, 700, 560, self.wash.rule_tint),
-        )
-
-    def test_empty_buffer_has_no_bottom_seam(self) -> None:
-        self.assertIsNone(
-            _bottom_seam_rect_for(None, 700, 560, self.wash.rule_tint),
-        )
-
-    def test_bottom_seam_one_pixel_above_bottom_still_paints(self) -> None:
-        # Boundary: a content bottom strictly inside the viewport gets a
-        # seam, even by a single pixel.
-        result = _bottom_seam_rect_for(559, 700, 560, self.wash.rule_tint)
-        self.assertIsNotNone(result)
-
-    def test_desk_above_produces_a_top_seam(self) -> None:
-        # A note scrolled to the top with a desk band above gets a 1-px
-        # full-width seam sitting just above the sheet's top edge — the
-        # mirror of the bottom seam.
-        result = _top_seam_rect_for(30, 700, self.wash.rule_tint)
-        self.assertIsNotNone(result)
-        assert result is not None  # narrow for the type checker
-        color, rect = result
-        self.assertEqual(rect.get_x(), 0.0)
-        self.assertEqual(rect.get_y(), float(30 - _HAIRLINE_THICKNESS_PX))
-        self.assertEqual(rect.get_width(), 700.0)
-        self.assertEqual(rect.get_height(), float(_HAIRLINE_THICKNESS_PX))
-        self.assertEqual(
-            _tuple_of(color), _tuple_of(_rgba_from_tint(self.wash.rule_tint)),
-        )
-
-    def test_no_desk_above_has_no_top_seam(self) -> None:
-        # Sheet starting at the very top (gap 0) → no top seam.
-        self.assertIsNone(_top_seam_rect_for(0, 700, self.wash.rule_tint))
-
-    def test_negative_top_has_no_top_seam(self) -> None:
-        # Scrolled past the top breathing margin → no desk above, no seam.
-        self.assertIsNone(_top_seam_rect_for(-12, 700, self.wash.rule_tint))
 
 
 def _tuple_of(rgba: Gdk.RGBA) -> tuple[float, float, float, float]:
@@ -2219,7 +2155,7 @@ class ArticleTextViewSheetBottomTests(unittest.TestCase):
     def test_short_note_in_tall_view_ends_above_bottom(self) -> None:
         # A couple of lines in a viewport tall enough to leave room
         # below: the sheet bottom sits above the viewport bottom, so a
-        # seam (and a strip of revealed desk) results.
+        # strip of revealed desk results.
         text_view, buffer, _table = _build_article_text_view_with_buffer()
         buffer.set_text("A short note.\nTwo lines only.\n")
         _realize_in_window(text_view, width=700, height=600)
@@ -2233,7 +2169,7 @@ class ArticleTextViewSheetBottomTests(unittest.TestCase):
 
     def test_buffer_taller_than_viewport_ends_below_bottom(self) -> None:
         # Many lines in a short viewport: the content bottom is past the
-        # viewport, so the sheet fills it and no seam is drawn.
+        # viewport, so the sheet fills it.
         text_view, buffer, _table = _build_article_text_view_with_buffer()
         buffer.set_text("\n".join(f"line {i}" for i in range(200)) + "\n")
         _realize_in_window(text_view, width=700, height=240)
