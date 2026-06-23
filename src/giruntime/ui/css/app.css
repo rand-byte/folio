@@ -1,47 +1,19 @@
 /* Application stylesheet.
  *
- * Three concerns live here, each behind its own class prefix:
- *  - the note-view parse-error banner (`.note-view-banner`);
+ * Two concerns live here, each behind its own class prefix:
  *  - the library sidebar (`.sidebar`) — selection pill + icon-column
- *    alignment, appended below;
+ *    alignment;
  *  - the note-list rows (`.note-title` / `.note-snippet` / `.note-meta`),
  *    appended at the bottom of this file.
+ *
+ * The note view's parse error is *not* styled here: it is rendered as
+ * tagged text inside the note buffer (see the `TagName.ERROR_NOTICE_*`
+ * tags in note_render/tag_table.py), so it needs no CSS box.
  *
  * Loaded once at application startup via Gtk.CssProvider at
  * Gtk.STYLE_PROVIDER_PRIORITY_APPLICATION — see
  * ui/application.py.
  */
-
-/* Note-view parse-error banner.
- *
- * Rendered as a Gtk.Box with class `note-view-banner` inside a
- * Gtk.Revealer that sits at the top of the note view (above the
- * scroller).
- *
- * Visual contract:
- *  - Inline warning notice; not modal, not blocking.
- *  - Yellow accent border (left side) so the eye lands on it
- *    regardless of the surrounding theme.
- *  - Generous padding around the wrapped text — the label inside
- *    is `wrap=True` so long messages flow vertically rather than
- *    overflowing horizontally.
- *  - Background uses a translucent yellow tint that reads on both
- *    light and dark themes; if the host theme is very dark the
- *    border-left and the text colour still contrast.
- */
-
-.note-view-banner {
-    padding: 8px 12px;
-    border-left: 4px solid #d4a017;
-    background-color: rgba(212, 160, 23, 0.12);
-    color: inherit;
-}
-
-.note-view-banner label {
-    /* Slight emphasis without being shouty — the message is a
-       short sentence, not a heading. */
-    font-weight: 500;
-}
 
 /* Rendered article text view.
  *

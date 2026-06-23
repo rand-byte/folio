@@ -80,6 +80,13 @@ class TagNameTests(unittest.TestCase):
             TagName.BLOCKQUOTE_ATTRIBUTION.value, "blockquote_attribution"
         )
         self.assertEqual(TagName.CODE_BLOCK.value, "code_block")
+        self.assertEqual(TagName.METADATA.value, "metadata")
+        self.assertEqual(TagName.ERROR_NOTICE_ICON.value, "error_notice_icon")
+        self.assertEqual(TagName.ERROR_NOTICE_TITLE.value, "error_notice_title")
+        self.assertEqual(
+            TagName.ERROR_NOTICE_DETAIL.value, "error_notice_detail"
+        )
+        self.assertEqual(TagName.ERROR_NOTICE_HINT.value, "error_notice_hint")
 
     def test_no_heading_1_member(self) -> None:
         # The parser produces level-0 (Document.title) and 2..6
@@ -122,6 +129,10 @@ class TagNameTests(unittest.TestCase):
             "BLOCKQUOTE_ATTRIBUTION",
             "CODE_BLOCK",
             "METADATA",
+            "ERROR_NOTICE_ICON",
+            "ERROR_NOTICE_TITLE",
+            "ERROR_NOTICE_DETAIL",
+            "ERROR_NOTICE_HINT",
         }
         self.assertEqual(set(TagName.__members__), expected)
 
@@ -557,6 +568,73 @@ class CodeBlockTagPropertyTests(unittest.TestCase):
         self.assertTrue(tag.get_property("accumulative-margin"))
 
 
+_ERROR_NOTICE_TAGS: tuple[TagName, ...] = (
+    TagName.ERROR_NOTICE_ICON,
+    TagName.ERROR_NOTICE_TITLE,
+    TagName.ERROR_NOTICE_DETAIL,
+    TagName.ERROR_NOTICE_HINT,
+)
+
+
+class ErrorNoticeTagPropertyTests(unittest.TestCase):
+    """The four parse-error notice lines are centred, explicitly
+    coloured, and scaled — and carry no block layout (no margins)."""
+
+    def setUp(self) -> None:
+        self.table = build_tag_table(char_width_px=_TEST_CHAR_WIDTH_PX)
+
+    def test_every_notice_line_is_centre_justified(self) -> None:
+        # Each line is its own paragraph, so the centre justification
+        # must live on every notice tag for the empty-state to read as
+        # centred rather than left-aligned.
+        for name in _ERROR_NOTICE_TAGS:
+            with self.subTest(name=name):
+                tag = self.table.lookup(name.value)
+                self.assertEqual(
+                    tag.get_property("justification"),
+                    Gtk.Justification.CENTER,
+                )
+
+    def test_every_notice_line_sets_an_explicit_foreground(self) -> None:
+        # The sheet is opaque light paper regardless of OS theme, so a
+        # theme-default (inherited) foreground could be invisible. Each
+        # notice line must stamp its own colour.
+        for name in _ERROR_NOTICE_TAGS:
+            with self.subTest(name=name):
+                tag = self.table.lookup(name.value)
+                self.assertTrue(tag.get_property("foreground-set"))
+
+    def test_every_notice_line_sets_a_scale(self) -> None:
+        # Scales are body-size multipliers so the notice tracks the
+        # user's font; all four set one explicitly.
+        for name in _ERROR_NOTICE_TAGS:
+            with self.subTest(name=name):
+                tag = self.table.lookup(name.value)
+                self.assertTrue(tag.get_property("scale-set"))
+
+    def test_icon_is_the_largest_line(self) -> None:
+        # The warning glyph anchors the empty-state, so it is scaled up
+        # past the headline and the body lines.
+        scales = {
+            name: self.table.lookup(name.value).get_property("scale")
+            for name in _ERROR_NOTICE_TAGS
+        }
+        self.assertEqual(
+            scales[TagName.ERROR_NOTICE_ICON], max(scales.values()),
+        )
+        self.assertGreater(scales[TagName.ERROR_NOTICE_ICON], 1.0)
+
+    def test_notice_lines_set_no_block_margins(self) -> None:
+        # Unlike admonitions / blockquotes / code blocks, the notice
+        # sits in the body column with no inset — it must not stamp
+        # left/right margins.
+        for name in _ERROR_NOTICE_TAGS:
+            with self.subTest(name=name):
+                tag = self.table.lookup(name.value)
+                self.assertFalse(tag.get_property("left-margin-set"))
+                self.assertFalse(tag.get_property("right-margin-set"))
+
+
 class WashSpecTests(unittest.TestCase):
     """The :func:`build_wash_specs` map drives the snapshot-time wash painter.
 
@@ -621,6 +699,14 @@ class WashSpecTests(unittest.TestCase):
         # painter paints rects for entries it finds in the map; an
         # absent entry produces no rect.
         self.assertNotIn(TagName.BLOCKQUOTE_ATTRIBUTION, self.specs)
+
+    def test_error_notice_tags_have_no_wash_entry(self) -> None:
+        # The parse-error notice is plain centred text on the normal
+        # sheet — Option C "empty state" paints no tint behind it — so
+        # none of its four lines may appear in the wash map.
+        for name in _ERROR_NOTICE_TAGS:
+            with self.subTest(name=name):
+                self.assertNotIn(name, self.specs)
 
     def test_every_paragraph_background_tag_has_a_wash_spec(self) -> None:
         # The inverted complement of the test above: every tag that

@@ -14,7 +14,10 @@ Principles & invariants
 * The current tag set covers, in addition to the inline subset (bold,
   italic, strikethrough, underline, monospace, link) and the heading
   levels the parser produces, the **block-level paragraph styling** for
-  admonitions, blockquotes, and code blocks. Block-level tags carry
+  admonitions, blockquotes, and code blocks, the under-title metadata
+  line, and the four centred lines of the in-surface parse-error notice
+  (:data:`TagName.ERROR_NOTICE_ICON` … :data:`TagName.ERROR_NOTICE_HINT`).
+  Block-level tags carry
   only the *text position* (``accumulative-margin = True`` plus
   ``left-margin`` / ``right-margin`` = inset + one M-width); the
   matching *tinted wash* is painted by ``_ArticleTextView`` in
@@ -124,6 +127,18 @@ class TagName(StrEnum):
     ``hairline`` :class:`WashSpec` returned for it by
     :func:`build_wash_specs`). It is a :class:`Gtk.TextTag` name only —
     it is never persisted to disk, so it needs no migration.
+
+    :data:`ERROR_NOTICE_ICON` … :data:`ERROR_NOTICE_HINT` are the four
+    centred lines of the in-surface parse-error notice the rendered view
+    shows when a note's source fails to parse. The view clears the
+    buffer and inserts a large amber warning glyph
+    (:data:`ERROR_NOTICE_ICON`), a headline (:data:`ERROR_NOTICE_TITLE`),
+    the kind-specific message (:data:`ERROR_NOTICE_DETAIL`), and a faint
+    recovery hint (:data:`ERROR_NOTICE_HINT`). All four set
+    ``justification = CENTER`` and an explicit foreground so they read on
+    the opaque white sheet regardless of OS theme — like
+    :data:`METADATA`, they are buffer-tag names only and carry **no**
+    wash (they are absent from :func:`build_wash_specs`).
     """
 
     BOLD = "bold"
@@ -163,6 +178,14 @@ class TagName(StrEnum):
     CODE_BLOCK = "code_block"
     # Metadata line under the document title (Created / Modified / tags).
     METADATA = "metadata"
+    # Parse-error notice lines, shown in the rendered surface itself when
+    # a note's source fails to parse (the buffer is cleared first, so the
+    # notice is the only content). Four centred lines: a large warning
+    # glyph, a headline, the kind-specific message, and a recovery hint.
+    ERROR_NOTICE_ICON = "error_notice_icon"
+    ERROR_NOTICE_TITLE = "error_notice_title"
+    ERROR_NOTICE_DETAIL = "error_notice_detail"
+    ERROR_NOTICE_HINT = "error_notice_hint"
 
 
 @dataclass(frozen=True)
@@ -403,6 +426,31 @@ _METADATA_RULE_TINT: tuple[float, float, float, float] = (0.5, 0.5, 0.5, 0.30)
 _METADATA_RULE_INSET_PX: int = 0
 
 
+# Parse-error notice (the "empty state" shown in the rendered surface
+# when a note's source fails to parse). Four centred lines on the normal
+# white sheet: a large warning glyph, a headline, the kind-specific
+# message, and a faint recovery hint. The accent is amber — it reads as
+# a fixable warning and matches the inline notice this replaced; flip
+# ``_ERROR_NOTICE_ICON_FOREGROUND`` to a red (e.g. ``"#c0392b"``) to read
+# as a harder error. The title/detail/hint foregrounds are explicit
+# (not inherited) because the sheet is an opaque light paper regardless
+# of OS theme, so a theme-default foreground could land light-on-white;
+# the dim greys mirror :data:`_METADATA_FOREGROUND`. Scales are
+# multipliers on the body size so the notice tracks the user's font.
+_ERROR_NOTICE_ICON_FOREGROUND: str = "#d4a017"
+_ERROR_NOTICE_ICON_SCALE: float = 3.0
+_ERROR_NOTICE_ICON_PIXELS_ABOVE_PX: int = 24
+_ERROR_NOTICE_TITLE_FOREGROUND: str = "#2c2c2a"
+_ERROR_NOTICE_TITLE_SCALE: float = 1.2
+_ERROR_NOTICE_TITLE_PIXELS_ABOVE_PX: int = 8
+_ERROR_NOTICE_DETAIL_FOREGROUND: str = "#5f5e5a"
+_ERROR_NOTICE_DETAIL_SCALE: float = 1.0
+_ERROR_NOTICE_DETAIL_PIXELS_ABOVE_PX: int = 6
+_ERROR_NOTICE_HINT_FOREGROUND: str = "#888780"
+_ERROR_NOTICE_HINT_SCALE: float = 0.9
+_ERROR_NOTICE_HINT_PIXELS_ABOVE_PX: int = 12
+
+
 # Note "sheet" + end seam. The sheet is the paper the rendered note sits
 # on; it is painted by the article text view itself (its CSS background is
 # transparent) from the top down to the end of the content, so that below
@@ -488,6 +536,39 @@ def build_tag_table(*, char_width_px: int) -> Gtk.TextTagTable:
         _make_code_block_tag(TagName.CODE_BLOCK, char_width_px=char_width_px)
     )
     table.add(_make_metadata_tag(TagName.METADATA))
+    table.add(
+        _make_error_notice_tag(
+            TagName.ERROR_NOTICE_ICON,
+            foreground=_ERROR_NOTICE_ICON_FOREGROUND,
+            scale=_ERROR_NOTICE_ICON_SCALE,
+            pixels_above_px=_ERROR_NOTICE_ICON_PIXELS_ABOVE_PX,
+        )
+    )
+    table.add(
+        _make_error_notice_tag(
+            TagName.ERROR_NOTICE_TITLE,
+            foreground=_ERROR_NOTICE_TITLE_FOREGROUND,
+            scale=_ERROR_NOTICE_TITLE_SCALE,
+            pixels_above_px=_ERROR_NOTICE_TITLE_PIXELS_ABOVE_PX,
+            weight=Pango.Weight.SEMIBOLD,
+        )
+    )
+    table.add(
+        _make_error_notice_tag(
+            TagName.ERROR_NOTICE_DETAIL,
+            foreground=_ERROR_NOTICE_DETAIL_FOREGROUND,
+            scale=_ERROR_NOTICE_DETAIL_SCALE,
+            pixels_above_px=_ERROR_NOTICE_DETAIL_PIXELS_ABOVE_PX,
+        )
+    )
+    table.add(
+        _make_error_notice_tag(
+            TagName.ERROR_NOTICE_HINT,
+            foreground=_ERROR_NOTICE_HINT_FOREGROUND,
+            scale=_ERROR_NOTICE_HINT_SCALE,
+            pixels_above_px=_ERROR_NOTICE_HINT_PIXELS_ABOVE_PX,
+        )
+    )
     return table
 
 
@@ -729,4 +810,35 @@ def _make_metadata_tag(name: TagName) -> Gtk.TextTag:
     tag.set_property("foreground", _METADATA_FOREGROUND)
     tag.set_property("scale", _METADATA_SCALE)
     tag.set_property("pixels-below-lines", _METADATA_PIXELS_BELOW_LINES_PX)
+    return tag
+
+
+def _make_error_notice_tag(
+    name: TagName,
+    *,
+    foreground: str,
+    scale: float,
+    pixels_above_px: int,
+    weight: Pango.Weight | None = None,
+) -> Gtk.TextTag:
+    """Build one centred line of the in-surface parse-error notice.
+
+    Each notice line is its own paragraph, so the tag carries both the
+    *paragraph* property (``justification = CENTER``, plus
+    ``pixels-above-lines`` for the gap above the line) and the
+    *character* appearance (``foreground`` + ``scale``, and an optional
+    ``weight`` for the headline). The foreground is always explicit
+    because the rendered note sits on an opaque light sheet whatever the
+    OS theme — an inherited theme-default foreground could be invisible.
+    Unlike the block-level tags these set no margins (the notice sits in
+    the body column) and paint no wash, so they never appear in
+    :func:`build_wash_specs`.
+    """
+    tag = Gtk.TextTag.new(name.value)
+    tag.set_property("justification", Gtk.Justification.CENTER)
+    tag.set_property("foreground", foreground)
+    tag.set_property("scale", scale)
+    tag.set_property("pixels-above-lines", pixels_above_px)
+    if weight is not None:
+        tag.set_property("weight", weight)
     return tag

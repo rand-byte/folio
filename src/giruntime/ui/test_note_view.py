@@ -1250,17 +1250,13 @@ class NoteViewSmokeTests(unittest.TestCase):
 def _find_scrolled_window(view: NoteView) -> Gtk.ScrolledWindow:
     """Walk the :class:`NoteView` stack and return its ``Gtk.ScrolledWindow``.
 
-    The structure is ``NoteView → [Revealer →] ScrolledWindow → …``. From
-    step 16 onwards the parse-error banner sits in a :class:`Gtk.Revealer`
-    *prepended* to the vertical box, so the helper walks past it; the
-    ``ScrolledWindow`` is the box's *next* sibling. Walking the public
-    child API keeps the tests agnostic to :class:`NoteView`'s field names.
+    The structure is ``NoteView → ScrolledWindow → …``. The parse-error
+    notice is rendered into the note buffer rather than into a separate
+    banner widget, so the ``ScrolledWindow`` is the view's *first*
+    child. Walking the public child API keeps the tests agnostic to
+    :class:`NoteView`'s field names.
     """
-    first = view.get_first_child()
-    if isinstance(first, Gtk.Revealer):
-        scrolled = first.get_next_sibling()
-    else:
-        scrolled = first
+    scrolled = view.get_first_child()
     assert isinstance(scrolled, Gtk.ScrolledWindow), (
         f"expected a ScrolledWindow in the NoteView stack, "
         f"got {type(scrolled).__name__}"
@@ -1271,7 +1267,7 @@ def _find_scrolled_window(view: NoteView) -> Gtk.ScrolledWindow:
 def _find_text_view(view: NoteView) -> Gtk.TextView:
     """Walk the widget tree and pull out the inner :class:`Gtk.TextView`.
 
-    The structure is ``NoteView → [Revealer →] ScrolledWindow →
+    The structure is ``NoteView → ScrolledWindow →
     ArticleContainer → TextView``. Under Option C the
     :class:`ArticleContainer` implements ``Gtk.Scrollable``, so the
     ``ScrolledWindow`` keeps it as its **direct** child and interposes no
@@ -1664,8 +1660,8 @@ class NoteViewRendererWiringTests(unittest.TestCase):
 
 class MessageForTests(unittest.TestCase):
     """Pin the user-facing message helper used by the parse-error
-    banner. Exhaustiveness over :class:`ParseErrorKind` is enforced
-    so a new error kind cannot ship without a banner message.
+    notice. Exhaustiveness over :class:`ParseErrorKind` is enforced
+    so a new error kind cannot ship without a notice message.
     """
 
     def test_every_parse_error_kind_has_a_message(self) -> None:
@@ -1681,13 +1677,13 @@ class MessageForTests(unittest.TestCase):
                 self.assertIsInstance(message, str)
                 self.assertTrue(message)
                 # The line number must appear in the message — the
-                # banner is the only context the user has, so the
+                # notice is the only context the user has, so the
                 # location has to be visible.
                 self.assertIn("42", message)
 
     def test_unsupported_link_scheme_message_lists_supported_schemes(self) -> None:
-        # This banner must name the schemes the user *can* use, so pin
-        # its content explicitly.
+        # This message must name the schemes the user *can* use, so
+        # pin its content explicitly.
         message = _message_for(ParseErrorKind.UNSUPPORTED_LINK_SCHEME, 39)
         self.assertIn("39", message)
         for scheme in ("http", "https", "mailto"):
@@ -1696,44 +1692,45 @@ class MessageForTests(unittest.TestCase):
     def test_message_does_not_leak_internal_message(self) -> None:
         # Smoke check: the developer-oriented strings (square
         # brackets around `cols=` or specific quotes) don't leak
-        # into the user-facing copy. The banner is consumer copy,
+        # into the user-facing copy. The notice is consumer copy,
         # not a developer dump.
         message = _message_for(ParseErrorKind.BAD_COLS_DIRECTIVE, 7)
         self.assertNotIn("'", message)
 
 
 # ---------------------------------------------------------------------------
-# Parse-error banner integration with refresh
+# Parse-error notice integration with refresh
 # ---------------------------------------------------------------------------
 
 
 @unittest.skipUnless(_display_available(), "no GDK display")
-class NoteViewErrorBannerTests(unittest.TestCase):
-    """The parse-error banner is hidden by default, revealed on
-    parse failure with a kind-specific message, and re-hidden when
-    the user navigates to a parseable note."""
+class NoteViewErrorNoticeTests(unittest.TestCase):
+    """The in-surface parse-error notice is absent by default, rendered
+    into the buffer on parse failure with a kind-specific message, and
+    cleared when the user navigates to a parseable note."""
 
-    def test_banner_hidden_initially_with_no_selection(self) -> None:
-        # No note selected at construction → the banner must be
-        # hidden, the buffer empty.
+    def test_notice_absent_initially_with_no_selection(self) -> None:
+        # No note selected at construction → no notice, the buffer
+        # empty.
         repo = _FakeNoteRepository()
         app_state = AppState()
         view = NoteView(note_store=_build_tracking_store(repo), app_state=app_state)
-        self.assertFalse(view.error_banner_visible)
-        self.assertEqual(view.error_banner_text, "")
+        self.assertFalse(view.error_notice_visible)
+        self.assertEqual(view.error_notice_text, "")
 
-    def test_banner_hidden_on_successful_render(self) -> None:
+    def test_notice_absent_on_successful_render(self) -> None:
         repo = _FakeNoteRepository()
         repo.notes["note-A"] = _make_note("note-A")  # parses cleanly
         app_state = AppState()
         view = NoteView(note_store=_build_tracking_store(repo), app_state=app_state)
         app_state.set_selected_note_id("note-A")
-        self.assertFalse(view.error_banner_visible)
-        self.assertEqual(view.error_banner_text, "")
+        self.assertFalse(view.error_notice_visible)
+        self.assertEqual(view.error_notice_text, "")
 
-    def test_banner_revealed_on_parse_error(self) -> None:
-        # A note whose source raises ParseError makes the banner
-        # appear with a kind-specific message AND clears the buffer.
+    def test_notice_shown_on_parse_error(self) -> None:
+        # A note whose source raises ParseError renders the notice into
+        # the surface with a kind-specific message AND replaces any
+        # prior content.
         repo = _FakeNoteRepository()
         # `:bad name:` lexes as a LineToken; the parser raises
         # BAD_ATTRIBUTE_ENTRY against it.
@@ -1745,25 +1742,24 @@ class NoteViewErrorBannerTests(unittest.TestCase):
         view = NoteView(note_store=_build_tracking_store(repo), app_state=app_state)
         app_state.set_selected_note_id("note-A")
 
-        self.assertTrue(view.error_banner_visible)
-        self.assertIn("Line 1", view.error_banner_text)
-        # Buffer must be empty so no stale content sits below the
-        # banner.
+        self.assertTrue(view.error_notice_visible)
+        self.assertIn("Line 1", view.error_notice_text)
+        # The buffer now holds the notice: its headline and the
+        # kind-specific message, and nothing else.
         buffer = _find_text_view_buffer(view)
-        self.assertEqual(
-            buffer.get_text(
-                buffer.get_start_iter(),
-                buffer.get_end_iter(),
-                False,
-            ),
-            "",
+        rendered = buffer.get_text(
+            buffer.get_start_iter(),
+            buffer.get_end_iter(),
+            False,
         )
+        self.assertIn("This note", rendered)
+        self.assertIn("Line 1", rendered)
 
-    def test_banner_message_reflects_specific_error_kind(self) -> None:
+    def test_notice_message_reflects_specific_error_kind(self) -> None:
         # Different parse-error kinds produce different messages.
         repo = _FakeNoteRepository()
         # Unsupported link scheme — an ftp:// link is outside the
-        # allowlist and surfaces a distinct banner message.
+        # allowlist and surfaces a distinct message.
         repo.notes["note-A"] = _make_note(
             "note-A",
             source="link:ftp://example.com[click]\n",
@@ -1772,17 +1768,17 @@ class NoteViewErrorBannerTests(unittest.TestCase):
         view = NoteView(note_store=_build_tracking_store(repo), app_state=app_state)
         app_state.set_selected_note_id("note-A")
 
-        self.assertTrue(view.error_banner_visible)
-        text = view.error_banner_text
+        self.assertTrue(view.error_notice_visible)
+        text = view.error_notice_text
         # The message says it's a link-scheme problem and lists the
         # supported schemes.
         self.assertIn("scheme", text)
         for scheme in ("http", "https", "mailto"):
             self.assertIn(scheme, text)
 
-    def test_banner_recovers_when_selecting_clean_note(self) -> None:
+    def test_notice_recovers_when_selecting_clean_note(self) -> None:
         # After a parse-error display, navigating to a parseable
-        # note re-hides the banner — banner state and buffer state
+        # note clears the notice — surface state and the error flag
         # stay in lockstep with the current selection.
         repo = _FakeNoteRepository()
         repo.notes["bad"] = _make_note(
@@ -1793,15 +1789,15 @@ class NoteViewErrorBannerTests(unittest.TestCase):
         view = NoteView(note_store=_build_tracking_store(repo), app_state=app_state)
 
         app_state.set_selected_note_id("bad")
-        self.assertTrue(view.error_banner_visible)
+        self.assertTrue(view.error_notice_visible)
 
         app_state.set_selected_note_id("good")
-        self.assertFalse(view.error_banner_visible)
-        self.assertEqual(view.error_banner_text, "")
+        self.assertFalse(view.error_notice_visible)
+        self.assertEqual(view.error_notice_text, "")
 
-    def test_banner_hidden_when_selection_clears_after_error(self) -> None:
+    def test_notice_cleared_when_selection_clears_after_error(self) -> None:
         # After a parse error, clearing the selection (None) must
-        # also hide the banner — the user is no longer looking at a
+        # also clear the notice — the user is no longer looking at a
         # note at all.
         repo = _FakeNoteRepository()
         repo.notes["bad"] = _make_note(
@@ -1810,14 +1806,14 @@ class NoteViewErrorBannerTests(unittest.TestCase):
         app_state = AppState()
         view = NoteView(note_store=_build_tracking_store(repo), app_state=app_state)
         app_state.set_selected_note_id("bad")
-        self.assertTrue(view.error_banner_visible)
+        self.assertTrue(view.error_notice_visible)
 
         app_state.set_selected_note_id(None)
-        self.assertFalse(view.error_banner_visible)
+        self.assertFalse(view.error_notice_visible)
 
-    def test_banner_hidden_when_selection_points_to_missing_note(self) -> None:
+    def test_notice_cleared_when_selection_points_to_missing_note(self) -> None:
         # A stale id (note deleted in another window) clears the
-        # banner just like a None selection — the user gets neither
+        # notice just like a None selection — the user gets neither
         # stale content nor a stale error.
         repo = _FakeNoteRepository()
         repo.notes["bad"] = _make_note(
@@ -1826,15 +1822,16 @@ class NoteViewErrorBannerTests(unittest.TestCase):
         app_state = AppState()
         view = NoteView(note_store=_build_tracking_store(repo), app_state=app_state)
         app_state.set_selected_note_id("bad")
-        self.assertTrue(view.error_banner_visible)
+        self.assertTrue(view.error_notice_visible)
 
         app_state.set_selected_note_id("does-not-exist")
-        self.assertFalse(view.error_banner_visible)
+        self.assertFalse(view.error_notice_visible)
 
     def test_navigating_to_bad_note_does_not_show_stale_content(self) -> None:
         # The plan's specific concern: the user clicks a note that
         # doesn't parse and sees the *previous* note's render.
-        # After the fix, the buffer is empty.
+        # After the fix, the buffer holds the error notice, not the
+        # previous note's content.
         repo = _FakeNoteRepository()
         repo.notes["good"] = _make_note(
             "good", source="= Welcome\n\nIts contents.\n",
@@ -1856,11 +1853,11 @@ class NoteViewErrorBannerTests(unittest.TestCase):
         bad_text = buffer.get_text(
             buffer.get_start_iter(), buffer.get_end_iter(), False,
         )
-        # Buffer has been cleared — no leftover from "good".
-        self.assertEqual(bad_text, "")
+        # No leftover from "good"; the notice has taken over the surface.
         self.assertNotIn("Welcome", bad_text)
-        # And the banner explains what happened.
-        self.assertTrue(view.error_banner_visible)
+        self.assertIn("This note", bad_text)
+        # And the notice explains what happened.
+        self.assertTrue(view.error_notice_visible)
 
 
 # ---------------------------------------------------------------------------

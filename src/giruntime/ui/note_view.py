@@ -15,9 +15,10 @@ Principles & invariants
   :class:`ArticleContainer` (a ``Gtk.Widget`` that also implements
   ``Gtk.Scrollable``, with a single child that enforces the fixed-width
   text column rule) → read-only ``Gtk.TextView`` populated by
-  :class:`TextBufferRenderer`. A :class:`Gtk.Revealer` containing the
-  parse-error banner is *prepended* to that stack — it sits above the
-  scroller at the top of the pane and is hidden by default. Because the
+  :class:`TextBufferRenderer`. Parse errors are shown *inside* this
+  same surface — the buffer is cleared and an error notice rendered
+  into it (see the parse-error bullet below) — so the pane is a single
+  scroller with no extra strip above it. Because the
   container is a ``Gtk.Scrollable``, the scrolled window keeps it as its
   **direct** child and interposes **no** ``Gtk.Viewport`` (Option C of
   the plan); the bug that motivated this — no vertical scrollbar on
@@ -153,13 +154,19 @@ Principles & invariants
   re-runs the parser and renderer against the currently selected note,
   but never reshapes the widget tree.
 * **Parse-error handling.** When the parser raises, :meth:`refresh`
-  clears the buffer and reveals the inline-notice banner with a
-  user-facing message keyed by :class:`ParseErrorKind`. Selecting a
-  note that doesn't parse therefore shows an empty article column
-  with a banner pointing at the offending line, *not* the previous
-  note's stale render. Banner state and buffer state are kept in
-  lockstep — there is no combination "stale buffer + visible banner"
-  or "empty buffer + hidden banner".
+  clears the buffer and renders an in-surface *error notice* into it —
+  a centred warning glyph, a headline, a user-facing message keyed by
+  :class:`ParseErrorKind`, and a faint recovery hint — via
+  :meth:`_insert_error_notice`. Selecting a note that doesn't parse
+  therefore shows that notice in the reading column, *not* the previous
+  note's stale render. The notice lives in the buffer (styled by the
+  :data:`ui.note_render.tag_table.TagName.ERROR_NOTICE_*` tags), so
+  there is no always-present banner widget reserving space above the
+  pane when there is nothing to show: an error consumes the rendering
+  surface only while it is being shown. :attr:`_error_message` mirrors
+  the message currently on screen (``None`` when none), keeping the
+  surface and that flag in lockstep — no "stale buffer + cleared flag"
+  or "notice in buffer + ``None`` flag" state is produced here.
 * The user-facing message table (:func:`_message_for`) lives in this
   module rather than as a method on :class:`ParseError` because the
   parser is pure and reusable; embedding UI copy in it would couple
@@ -274,11 +281,27 @@ for the rest of the app's chrome.
 """
 
 
-_BANNER_CSS_CLASS: str = "note-view-banner"
-"""CSS class applied to the banner ``Gtk.Box`` so the bundled
-stylesheet can style it (warning yellow background, padded
-inline-notice look). The class name is stable across releases — the
-stylesheet that targets it is shipped with the application.
+_ERROR_NOTICE_ICON_GLYPH: str = "\u26a0\ufe0e"
+"""The warning glyph shown at the top of the in-surface parse-error
+notice. ``U+26A0`` (warning sign) followed by ``U+FE0E`` (the text
+variation selector) so it renders as a monochrome text glyph rather than
+a colour emoji — the latter would ignore the amber foreground the
+:data:`TagName.ERROR_NOTICE_ICON` tag sets. Scale and colour live in the
+tag table; only the character itself lives here, beside the other notice
+copy.
+"""
+
+
+_ERROR_NOTICE_HEADLINE: str = "This note can\u2019t be displayed"
+"""Headline line of the parse-error notice. User-facing copy, so it
+lives in this module next to :func:`_message_for` rather than in the
+tag table (which owns only the *look*).
+"""
+
+
+_ERROR_NOTICE_HINT: str = "Switch to Source to fix it"
+"""Faint recovery hint under the parse-error message — points the user
+at the editor, where the offending line can be corrected.
 """
 
 
@@ -1387,8 +1410,8 @@ class NoteView(Gtk.Box):
     seven because step 11 introduced two fields
     (:attr:`_attachments`, :attr:`_current_note_id`) on top of the
     five already required to wire the renderer + selection plumbing,
-    and step 16 adds two more (:attr:`_error_banner_revealer`,
-    :attr:`_error_banner_label`) for the inline parse-error banner.
+    and the parse-error notice adds :attr:`_error_message` (the message
+    currently shown in the surface, or ``None``).
     Splitting these into a helper class would obscure the obvious
     "the view holds the things it needs to render" relationship.
     """
@@ -1398,9 +1421,11 @@ class NoteView(Gtk.Box):
     # (``Gtk.TextTagTable``, :class:`ArticleContainer`,
     # ``Gtk.ScrolledWindow``) are kept alive by their GTK parent-child
     # references — adding them as ``self.`` attributes would duplicate
-    # those references for no behavioural benefit. The error banner's
-    # revealer and label *are* stored because :meth:`refresh` toggles
-    # them on every selection change. The :class:`ArticleContainer`'s
+    # those references for no behavioural benefit. The parse-error
+    # notice needs no stored widget: it is buffer text, so only the
+    # :attr:`_error_message` flag (the message currently on screen, or
+    # ``None``) is kept, toggled by :meth:`refresh`. The
+    # :class:`ArticleContainer`'s
     # *outer column width* is stored as a derived ``int``
     # (``_outer_column_width_px``) — not the widget — because
     # :class:`MainWindow` needs the value to size the initial window
@@ -1414,8 +1439,7 @@ class NoteView(Gtk.Box):
     _renderer: TextBufferRenderer
     _current_note_id: str | None
     _current_note: Note | None
-    _error_banner_revealer: Gtk.Revealer
-    _error_banner_label: Gtk.Label
+    _error_message: str | None
     _outer_column_width_px: int
 
     def _apply_article_margins(
@@ -1470,27 +1494,11 @@ class NoteView(Gtk.Box):
         # so the post-title metadata hook can read its timestamps and
         # tags during a render without a second repository round-trip.
         self._current_note = None
-
-        # Build the parse-error banner and prepend it to the vertical
-        # stack. The revealer hides itself by default with a 0 ms
-        # transition so the construction-time refresh does not flash a
-        # banner before its hide-on-success arm fires. When a parse
-        # error fires, ``refresh`` calls ``set_reveal_child(True)``;
-        # on success it calls ``set_reveal_child(False)``.
-        self._error_banner_revealer = Gtk.Revealer()
-        self._error_banner_revealer.set_transition_type(
-            Gtk.RevealerTransitionType.NONE,
-        )
-        self._error_banner_revealer.set_reveal_child(False)
-        banner_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=0)
-        banner_box.add_css_class(_BANNER_CSS_CLASS)
-        self._error_banner_label = Gtk.Label()
-        self._error_banner_label.set_wrap(True)
-        self._error_banner_label.set_xalign(0.0)
-        self._error_banner_label.set_hexpand(True)
-        banner_box.append(self._error_banner_label)
-        self._error_banner_revealer.set_child(banner_box)
-        self.append(self._error_banner_revealer)
+        # The parse-error message currently shown in the surface (or
+        # ``None`` when the buffer holds a real render / is empty). It
+        # is the in-buffer notice's only piece of state — see
+        # :meth:`refresh` and :meth:`_insert_error_notice`.
+        self._error_message = None
 
         # Build the text-rendering widget *before* the tag table so we
         # have a Pango context to measure the M-width against. The
@@ -1655,29 +1663,30 @@ class NoteView(Gtk.Box):
 
         Behaviour:
 
-        * No selection → buffer cleared, banner hidden,
+        * No selection → buffer cleared, error notice cleared,
           ``_current_note_id`` cleared.
         * Selection points to a note that no longer exists → buffer
-          cleared, banner hidden, ``_current_note_id`` cleared. The
-          note-list widget elsewhere will pick a new selection on its
-          next refresh; this view does not second-guess.
-        * Parse error in the source → buffer cleared, banner revealed
-          with a kind-specific message. ``_current_note_id`` IS still
-          updated to the new selection so any image lookup or
-          subsequent re-render targets the right note.
+          cleared, error notice cleared, ``_current_note_id`` cleared.
+          The note-list widget elsewhere will pick a new selection on
+          its next refresh; this view does not second-guess.
+        * Parse error in the source → buffer cleared, then the error
+          notice rendered into it with a kind-specific message.
+          ``_current_note_id`` IS still updated to the new selection so
+          any image lookup or subsequent re-render targets the right
+          note.
         * Successful render → buffer populated with the rendered
-          article, banner hidden.
+          article, error notice cleared.
 
-        Banner state and buffer state are kept in lockstep — there is
-        no combination "stale buffer + visible banner" or "empty
-        buffer + hidden banner" produced by this method.
+        The surface and :attr:`_error_message` are kept in lockstep —
+        there is no combination "stale buffer + cleared flag" or
+        "notice in buffer + ``None`` flag" produced by this method.
         """
         note_id = self._app_state.selected_note_id
         if note_id is None:
             self._current_note_id = None
             self._current_note = None
             self._buffer.set_text("")
-            self._hide_error_banner()
+            self._error_message = None
             return
         try:
             note = self._note_store.get_note(note_id)
@@ -1685,7 +1694,7 @@ class NoteView(Gtk.Box):
             self._current_note_id = None
             self._current_note = None
             self._buffer.set_text("")
-            self._hide_error_banner()
+            self._error_message = None
             return
         # Update the resolver's view of "current note" BEFORE invoking
         # the renderer, so any image macro encountered during the
@@ -1704,33 +1713,56 @@ class NoteView(Gtk.Box):
                 post_title_hook=self._insert_metadata_after_title,
             )
         except ParseError as exc:
-            # Clear the buffer so a stale render from the previously
-            # selected note does not sit under the new note's title;
-            # show the banner with a user-facing message keyed by the
-            # error's kind. This is the failure mode the plan calls
-            # out: without these two lines the user sees the previous
-            # note's content for a note that doesn't parse. The metadata
-            # hook never fired (the renderer raised before reaching it),
-            # so the buffer is genuinely empty.
-            self._buffer.set_text("")
-            self._error_banner_label.set_text(_message_for(exc.kind, exc.line))
-            self._error_banner_revealer.set_reveal_child(True)
+            # The render raised, so the buffer may hold a partial render
+            # (or the previously selected note's content if the renderer
+            # rebuilds in place). Clear it and render the in-surface
+            # error notice instead — without this the user would see the
+            # wrong content for a note that doesn't parse. The metadata
+            # hook never fired (the renderer raised before reaching it).
+            self._insert_error_notice(_message_for(exc.kind, exc.line))
             return
-        # Render succeeded — make sure no stale banner remains visible.
-        self._hide_error_banner()
+        # Render succeeded — drop any error-notice state.
+        self._error_message = None
 
-    def _hide_error_banner(self) -> None:
-        """Hide the parse-error banner.
+    def _insert_error_notice(self, message: str) -> None:
+        """Render the in-surface parse-error notice into the buffer.
 
-        Centralised because both the no-selection / not-found arms
-        and the success path of :meth:`refresh` use it; keeping the
-        sequence (``set_reveal_child(False)`` + clear label text) in
-        one place ensures the banner cannot end up "hidden but with
-        last error's text", which would be a confusing state should
-        the revealer's transition ever be made non-instant.
+        Clears the buffer first (so no partial or stale render remains),
+        then inserts the four centred lines — warning glyph, headline,
+        the kind-specific ``message``, and the recovery hint — each
+        carrying its :data:`ui.note_render.tag_table.TagName.ERROR_NOTICE_*`
+        tag. Records ``message`` on :attr:`_error_message` so
+        :attr:`error_notice_text` can report it and :meth:`refresh`
+        keeps the surface and that flag in lockstep.
+
+        Each line is its own paragraph (the trailing ``\\n`` closes it),
+        which is what lets the per-line tag carry the paragraph-level
+        centre justification; the last line is unterminated so the
+        notice adds no trailing blank line.
         """
-        self._error_banner_revealer.set_reveal_child(False)
-        self._error_banner_label.set_text("")
+        buffer = self._buffer
+        buffer.set_text("")
+        buffer.insert_with_tags_by_name(
+            buffer.get_end_iter(),
+            f"{_ERROR_NOTICE_ICON_GLYPH}\n",
+            TagName.ERROR_NOTICE_ICON.value,
+        )
+        buffer.insert_with_tags_by_name(
+            buffer.get_end_iter(),
+            f"{_ERROR_NOTICE_HEADLINE}\n",
+            TagName.ERROR_NOTICE_TITLE.value,
+        )
+        buffer.insert_with_tags_by_name(
+            buffer.get_end_iter(),
+            f"{message}\n",
+            TagName.ERROR_NOTICE_DETAIL.value,
+        )
+        buffer.insert_with_tags_by_name(
+            buffer.get_end_iter(),
+            _ERROR_NOTICE_HINT,
+            TagName.ERROR_NOTICE_HINT.value,
+        )
+        self._error_message = message
 
     def _insert_metadata_after_title(self, buffer: Gtk.TextBuffer) -> None:
         """Insert the dim-grey metadata line as the renderer's post-title hook.
@@ -1791,8 +1823,9 @@ class NoteView(Gtk.Box):
             latest = self._note_store.get_note(self._current_note_id)
         except KeyError:
             # The displayed note was deleted; the controller also clears
-            # the selection, but refreshing here keeps buffer and banner
-            # in lockstep without depending on signal ordering.
+            # the selection, but refreshing here keeps the buffer and
+            # the error-notice state in lockstep without depending on
+            # signal ordering.
             self.refresh()
             return
         if latest != self._current_note:
@@ -1878,24 +1911,23 @@ class NoteView(Gtk.Box):
         return self._resolve_image_bytes
 
     @property
-    def error_banner_visible(self) -> bool:
-        """``True`` iff the parse-error banner is currently revealed.
+    def error_notice_visible(self) -> bool:
+        """``True`` iff the in-surface parse-error notice is showing.
 
         Public read-only so tests can assert the success / failure
-        bookkeeping without reaching into the revealer's children.
+        bookkeeping without inspecting the buffer's tagged contents.
         """
-        reveal: bool = self._error_banner_revealer.get_reveal_child()
-        return reveal
+        return self._error_message is not None
 
     @property
-    def error_banner_text(self) -> str:
-        """The current text of the parse-error banner.
+    def error_notice_text(self) -> str:
+        """The kind-specific message of the parse-error notice.
 
-        Empty when no parse error is being shown — see
-        :meth:`_hide_error_banner` for the convention.
+        Empty when no parse error is being shown (the buffer holds a
+        real render or is empty). This is the per-error *message* line
+        only — not the static headline or hint.
         """
-        text: str = self._error_banner_label.get_text()
-        return text
+        return self._error_message or ""
 
 
 # ---------------------------------------------------------------------------
