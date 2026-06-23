@@ -69,8 +69,10 @@ Principles & invariants
   (new). Cached for the container's lifetime via the same
   ``_cached_..._px`` pattern. Top and bottom are :data:`ARTICLE_TOP_MARGIN_LINES`
   / :data:`ARTICLE_BOTTOM_MARGIN_LINES` multiplied by the measured line
-  height; left and right are :data:`ARTICLE_INNER_HPADDING_CHARS`
-  multiplied by the measured M-width.
+  height, each **plus** the :data:`config.defaults.ARTICLE_END_GAP_LINES`
+  desk band (so the same gap is reserved before and after the note); left
+  and right are :data:`ARTICLE_INNER_HPADDING_CHARS` multiplied by the
+  measured M-width.
 * :class:`ArticleContainer` exposes three sizing getters:
   :meth:`text_column_width` (the 66-character text area, passed to the
   renderer for table / image layout), :meth:`outer_column_width` (the
@@ -103,19 +105,21 @@ Principles & invariants
   text view is the vertical scrollport, its own background would fill
   the whole viewport, so the view's CSS background is made transparent
   (the ``article-text-view`` class) and ``do_snapshot`` paints an
-  opaque sheet from the top down to the end of the content plus the
-  breathing part of the bottom margin, with a 1-px seam at the edge.
-  Below that the view paints nothing, so the scroller's own background
-  (the "desk") shows through and a short note ends visibly — using the
-  parent's real background rather than an invented colour. The bottom
-  margin is sized at :data:`ARTICLE_BOTTOM_MARGIN_LINES` +
+  opaque sheet covering the content plus the breathing part of the top
+  and bottom margins, with a 1-px seam at each edge. Beyond that (above
+  the top gap and below the bottom gap) the view paints nothing, so the
+  scroller's own background (the "desk") shows through equally before and
+  after the note — using the parent's real background rather than an
+  invented colour. Both the top and bottom margins are sized at
+  :data:`ARTICLE_TOP_MARGIN_LINES` / :data:`ARTICLE_BOTTOM_MARGIN_LINES` +
   :data:`config.defaults.ARTICLE_END_GAP_LINES`: the sheet claims only
-  the breathing lines, leaving the end-gap band as scrollable desk so a
-  note taller than the viewport also ends at a visible edge when
-  scrolled to the bottom (see
+  the breathing lines, leaving an equal desk band at each end so a note
+  meets the desk at a visible edge above and below (and a note taller than
+  the viewport reveals the bottom edge when scrolled down — see
   :func:`ui.note_render.tag_table.build_note_end_wash`,
-  :func:`_sheet_rect_for`, :func:`_seam_rect_for`, and
-  :meth:`_ArticleTextView.set_end_gap_px`).
+  :func:`_sheet_rect_for`, :func:`_top_seam_rect_for`,
+  :func:`_bottom_seam_rect_for`, :meth:`_ArticleTextView.set_top_gap_px`,
+  and :meth:`_ArticleTextView.set_end_gap_px`).
 * The size-allocate vfunc — *not* the ``size-allocate`` signal, which is
   deprecated in GTK 4 — is the documented place to react to a fresh
   allocation. :meth:`ArticleContainer.do_size_allocate` configures the
@@ -560,30 +564,35 @@ class _ArticleTextView(Gtk.TextView):
     is the test seam: tests assert the list of rects directly without
     driving GTK's snapshot machinery.
 
-    **The sheet, and the end-of-note edge.** The view's CSS background is
-    transparent (set via the ``article-text-view`` style class, see
-    ``css/app.css``); the page is instead painted here in
-    :meth:`do_snapshot` as an opaque *sheet* from the top down to the end
-    of the content (plus the breathing part of the bottom margin). Below
-    the content the view paints nothing, so the scroller's own background
-    (the "desk") shows through — that is what gives a short note a visible
-    end, using the *parent's* real background rather than a separately-
-    invented colour that could drift from the theme. A translucent 1-px
-    *seam* is drawn at the sheet's bottom edge. The colours come from
+    **The sheet, and the note's top and bottom edges.** The view's CSS
+    background is transparent (set via the ``article-text-view`` style
+    class, see ``css/app.css``); the page is instead painted here in
+    :meth:`do_snapshot` as an opaque *sheet* covering the content plus the
+    breathing part of the top and bottom margins. Above the sheet's top and
+    below its bottom the view paints nothing, so the scroller's own
+    background (the "desk") shows through — that is what frames the note
+    with an equal gap before and after, using the *parent's* real
+    background rather than a separately-invented colour that could drift
+    from the theme. A translucent 1-px *seam* is drawn at each sheet edge
+    that meets the desk. The colours come from
     :func:`ui.note_render.tag_table.build_note_end_wash` (one place for
     every rendered-view colour) and the geometry is factored into the
-    free functions :func:`_sheet_rect_for` / :func:`_seam_rect_for` so the
-    rect math is unit-testable without a realised font. While a long note
-    is scrolled so that content still extends past the viewport bottom the
-    sheet fills the viewport and no seam is drawn; scrolled to its very
-    end, the end-gap desk band reserved by :meth:`set_end_gap_px` brings
-    the sheet bottom (and the seam) into view with desk beneath, so a long
-    note ends as visibly as a short one. An empty buffer (the parse-error
-    / no-note state) paints a full-height blank sheet.
+    free functions :func:`_sheet_rect_for` / :func:`_top_seam_rect_for` /
+    :func:`_bottom_seam_rect_for` so the rect math is unit-testable without
+    a realised font. While a long note is scrolled so that content still
+    extends past the viewport bottom the sheet fills the lower viewport and
+    no bottom seam is drawn; scrolled to its very end, the end-gap desk band
+    reserved by :meth:`set_end_gap_px` brings the sheet bottom (and its
+    seam) into view with desk beneath. The matching top gap reserved by
+    :meth:`set_top_gap_px` shows the same desk band above the sheet when the
+    note is scrolled to the top; once scrolled past it the sheet fills the
+    upper viewport and no top seam is drawn. An empty buffer (the
+    parse-error / no-note state) paints a full-height blank sheet.
     """
 
     _wash_specs_by_tag: Mapping[Gtk.TextTag, WashSpec]
     _note_end_wash: NoteEndWash
+    _top_gap_px: int
     _end_gap_px: int
 
     def __init__(self) -> None:
@@ -603,10 +612,12 @@ class _ArticleTextView(Gtk.TextView):
         # so they are resolved once at construction from the single
         # rendered-view colour source.
         self._note_end_wash = build_note_end_wash()
-        # The desk band the sheet does not cover. Zero until NoteView
-        # sets it alongside the bottom margin; at zero the sheet covers
-        # the whole bottom margin — the pre-end-gap behaviour that test
-        # code constructing a bare view relies on.
+        # The desk bands the sheet does not cover, above and below the
+        # content. Both zero until NoteView sets them alongside the
+        # margins; at zero the sheet covers the whole top/bottom margin —
+        # the pre-gap behaviour that test code constructing a bare view
+        # relies on. They are set from the same constant so they match.
+        self._top_gap_px = 0
         self._end_gap_px = 0
 
     def install_wash_specs(
@@ -621,6 +632,22 @@ class _ArticleTextView(Gtk.TextView):
         paint. Calling this replaces the previous map outright.
         """
         self._wash_specs_by_tag = specs_by_tag
+
+    def set_top_gap_px(self, top_gap_px: int) -> None:
+        """Set the desk band (in px) reserved above the painted sheet.
+
+        The mirror of :meth:`set_end_gap_px`: this is the slice of the
+        view's ``top-margin`` that the sheet does **not** cover.
+        :meth:`_sheet_top_px` keeps it as desk above the sheet, so when the
+        note is scrolled to the top the same band of desk shows above the
+        sheet as :meth:`set_end_gap_px` reserves below it — the gap before
+        and after the note matches (see
+        :data:`config.defaults.ARTICLE_END_GAP_LINES`). The production
+        wiring in :class:`NoteView` sets this together with the
+        ``top-margin`` so the two cannot drift; left at ``0`` (the
+        construction default) the sheet covers the whole top margin.
+        """
+        self._top_gap_px = top_gap_px
 
     def set_end_gap_px(self, end_gap_px: int) -> None:
         """Set the desk band (in px) reserved below the painted sheet.
@@ -642,36 +669,45 @@ class _ArticleTextView(Gtk.TextView):
     def do_snapshot(  # pylint: disable=arguments-differ
         self, snapshot: Gtk.Snapshot,
     ) -> None:
-        """Paint the sheet, the per-paragraph washes, the text, then the seam.
+        """Paint the sheet, the per-paragraph washes, the text, then the seams.
 
         The view's CSS background is transparent (see ``__init__``), so
         this method paints the page itself. Order is back-to-front, the
         order :meth:`Gtk.Snapshot.append_color` stacks nodes:
 
-        1. the *sheet* — an opaque page background from the top down to
-           the end of the content (or the whole viewport when the content
-           fills it). Below the content the view paints nothing, so the
-           scroller's own background (the "desk") shows through and a
-           short note ends at a visible edge;
+        1. the *sheet* — an opaque page background covering the content
+           (plus the breathing part of the top and bottom margins). Above
+           the sheet's top and below its bottom the view paints nothing, so
+           the scroller's own background (the "desk") shows through and the
+           note meets the desk at a visible edge with an equal gap before
+           and after it;
         2. the per-paragraph *washes*, behind the text;
         3. the *text*, via the parent snapshot;
-        4. the *seam* — a 1-px rule at the sheet's bottom edge, on top.
+        4. the *seams* — a 1-px rule at each sheet edge that meets the
+           desk (top edge, bottom edge), on top.
         """
+        sheet_top = self._sheet_top_px()
         sheet_bottom = self._sheet_bottom_px()
         width = self.get_width()
         height = self.get_height()
         sheet = _sheet_rect_for(
-            sheet_bottom, width, height, self._note_end_wash.sheet_tint,
+            sheet_top, sheet_bottom, width, height,
+            self._note_end_wash.sheet_tint,
         )
         snapshot.append_color(*sheet)
         for color, rect in self._compute_wash_rects():
             snapshot.append_color(color, rect)
         Gtk.TextView.do_snapshot(self, snapshot)
-        seam = _seam_rect_for(
+        top_seam = _top_seam_rect_for(
+            sheet_top, width, self._note_end_wash.rule_tint,
+        )
+        if top_seam is not None:
+            snapshot.append_color(*top_seam)
+        bottom_seam = _bottom_seam_rect_for(
             sheet_bottom, width, height, self._note_end_wash.rule_tint,
         )
-        if seam is not None:
-            snapshot.append_color(*seam)
+        if bottom_seam is not None:
+            snapshot.append_color(*bottom_seam)
 
     def _compute_wash_rects(
         self,
@@ -791,6 +827,38 @@ class _ArticleTextView(Gtk.TextView):
             )
         return matching[0]
 
+    def _sheet_top_px(self) -> int:
+        """Return the widget-coordinate y at which the note's sheet starts.
+
+        The mirror of :meth:`_sheet_bottom_px`. It is the top of the first
+        logical line (mapped to widget coordinates the same way) **minus the
+        breathing part of the top margin**, i.e. the top margin less the
+        top-gap desk band set by :meth:`set_top_gap_px`. The top margin
+        reserves breathing space *plus* the desk gap; the sheet claims only
+        the breathing part, so the gap is left as desk above the sheet —
+        visible when the note is scrolled to the top, mirroring the band
+        below. With the default top gap of ``0`` the sheet starts at the
+        very top.
+
+        The value may be negative once the note is scrolled down (the
+        breathing margin has passed above the viewport); the pure
+        :func:`_sheet_rect_for` / :func:`_top_seam_rect_for` helpers clamp
+        it, so the sheet then fills the upper viewport with no top seam. An
+        empty buffer (the parse-error / no-note state) reports ``0`` so the
+        caller paints a full-height blank sheet from the top.
+        """
+        buffer = self.get_buffer()
+        if buffer.get_char_count() == 0:
+            return 0
+        line_y_buffer, _ = self.get_line_yrange(buffer.get_start_iter())
+        _, line_y_widget = self.buffer_to_window_coords(
+            Gtk.TextWindowType.TEXT, 0, line_y_buffer,
+        )
+        return int(
+            line_y_widget
+            - (self.get_top_margin() - self._top_gap_px)
+        )
+
     def _sheet_bottom_px(self) -> int | None:
         """Return the widget-coordinate y at which the note's sheet ends.
 
@@ -868,6 +936,7 @@ def _rgba_from_tint(tint: tuple[float, float, float, float]) -> Gdk.RGBA:
 
 
 def _sheet_rect_for(
+    sheet_top_px: int,
     sheet_bottom_px: int | None,
     width_px: int,
     height_px: int,
@@ -875,26 +944,78 @@ def _sheet_rect_for(
 ) -> tuple[Gdk.RGBA, Graphene.Rect]:
     """Return the opaque sheet rect painted behind the note's content.
 
-    ``sheet_bottom_px`` is the widget-coordinate y at which the content
-    ends, or ``None`` for an empty buffer. The sheet spans the full width
-    from the top down to that y; it extends to the full ``height_px``
-    when the content fills or passes the viewport (``sheet_bottom_px >=
-    height_px``) or when the buffer is empty (``None``). Below the sheet
-    the view paints nothing, so the parent's background — the desk —
-    shows through.
+    ``sheet_top_px`` is the widget-coordinate y at which the content
+    begins (its breathing margin), and ``sheet_bottom_px`` the y at which
+    it ends, or ``None`` for an empty buffer. The sheet spans the full
+    width between the two; ``sheet_top_px`` is clamped up to ``0`` (the
+    breathing margin scrolled above the viewport top) and
+    ``sheet_bottom_px`` down to ``height_px`` (content filling or passing
+    the viewport, or an empty buffer). Above the top and below the bottom
+    the view paints nothing, so the parent's background — the desk — shows
+    through equally before and after the note.
 
     A free function (not a method) so the rect geometry is unit-testable
     without a realised :class:`Gtk.TextView` or font, mirroring
-    :func:`_seam_rect_for` and :func:`_rgba_from_tint`.
+    :func:`_top_seam_rect_for` / :func:`_bottom_seam_rect_for` and
+    :func:`_rgba_from_tint`.
     """
     if sheet_bottom_px is None or sheet_bottom_px >= height_px:
         sheet_bottom_px = height_px
+    top = max(0, sheet_top_px)
     rect = Graphene.Rect()
-    rect.init(0.0, 0.0, float(width_px), float(sheet_bottom_px))
+    rect.init(
+        0.0, float(top), float(width_px), float(max(0, sheet_bottom_px - top)),
+    )
     return _rgba_from_tint(sheet_tint), rect
 
 
-def _seam_rect_for(
+def _seam_band_for(
+    seam_top_px: int,
+    width_px: int,
+    rule_tint: tuple[float, float, float, float],
+) -> tuple[Gdk.RGBA, Graphene.Rect]:
+    """Return a full-width 1-px seam rule at ``seam_top_px``.
+
+    The shared rect builder behind :func:`_top_seam_rect_for` and
+    :func:`_bottom_seam_rect_for` so the two cannot draw seams of different
+    thickness. The visibility decision (whether a seam shows at all) belongs
+    to the caller; this only places the band.
+    """
+    rect = Graphene.Rect()
+    rect.init(
+        0.0,
+        float(seam_top_px),
+        float(width_px),
+        float(_HAIRLINE_THICKNESS_PX),
+    )
+    return _rgba_from_tint(rule_tint), rect
+
+
+def _top_seam_rect_for(
+    sheet_top_px: int,
+    width_px: int,
+    rule_tint: tuple[float, float, float, float],
+) -> tuple[Gdk.RGBA, Graphene.Rect] | None:
+    """Return the 1-px seam rule at the sheet's top edge, or ``None``.
+
+    Returns ``None`` when there is no desk above the sheet to mark —
+    ``sheet_top_px <= 0`` (an empty buffer, or a note scrolled past its top
+    so the sheet fills the upper viewport). Otherwise the rule sits in the
+    desk just above the sheet's top, mirroring the band
+    :func:`_bottom_seam_rect_for` draws just below the sheet's bottom, so
+    both edges meet the desk with the same crisp line.
+
+    A free function (not a method) so the rect geometry is unit-testable
+    without a realised :class:`Gtk.TextView` or font.
+    """
+    if sheet_top_px <= 0:
+        return None
+    return _seam_band_for(
+        sheet_top_px - _HAIRLINE_THICKNESS_PX, width_px, rule_tint,
+    )
+
+
+def _bottom_seam_rect_for(
     sheet_bottom_px: int | None,
     width_px: int,
     height_px: int,
@@ -914,14 +1035,7 @@ def _seam_rect_for(
     """
     if sheet_bottom_px is None or sheet_bottom_px >= height_px:
         return None
-    rect = Graphene.Rect()
-    rect.init(
-        0.0,
-        float(sheet_bottom_px),
-        float(width_px),
-        float(_HAIRLINE_THICKNESS_PX),
-    )
-    return _rgba_from_tint(rule_tint), rect
+    return _seam_band_for(sheet_bottom_px, width_px, rule_tint)
 
 
 class ArticleContainer(Gtk.Widget, Gtk.Scrollable):
@@ -1454,23 +1568,27 @@ class NoteView(Gtk.Box):
         width and the inner padding to the *same* M-width measurement so
         they cannot drift.
 
-        The bottom margin is the breathing space *plus* the end-gap desk
-        band: the sheet painted by :class:`_ArticleTextView` covers only
-        the breathing lines, so the extra ``end_gap_px`` is scrollable
-        room below the sheet that reveals the desk + seam when a note
-        taller than the viewport is scrolled to its end. The gap is set
-        on the view alongside the margin so the two cannot drift — see
-        :data:`config.defaults.ARTICLE_END_GAP_LINES`.
+        The top and bottom margins are each the breathing space *plus* the
+        same desk gap: the sheet painted by :class:`_ArticleTextView`
+        covers only the breathing lines, so the extra ``end_gap_px`` at
+        each end is room the sheet does not claim, showing the desk + seam
+        with an equal gap before and after the note (at the bottom this
+        doubles as scrollable room that reveals a long note's end). The gap
+        is set on the view alongside both margins so the three cannot drift
+        — see :data:`config.defaults.ARTICLE_END_GAP_LINES`.
         """
         char_w = article_container.char_width_px()
         line_h = article_container.line_height_px()
         end_gap_px = round(ARTICLE_END_GAP_LINES * line_h)
         self._text_view.set_left_margin(ARTICLE_INNER_HPADDING_CHARS * char_w)
         self._text_view.set_right_margin(ARTICLE_INNER_HPADDING_CHARS * char_w)
-        self._text_view.set_top_margin(ARTICLE_TOP_MARGIN_LINES * line_h)
+        self._text_view.set_top_margin(
+            ARTICLE_TOP_MARGIN_LINES * line_h + end_gap_px,
+        )
         self._text_view.set_bottom_margin(
             ARTICLE_BOTTOM_MARGIN_LINES * line_h + end_gap_px,
         )
+        self._text_view.set_top_gap_px(end_gap_px)
         self._text_view.set_end_gap_px(end_gap_px)
 
     def __init__(

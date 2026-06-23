@@ -43,12 +43,13 @@ from giruntime.ui.note_view import (
     _FALLBACK_CHAR_WIDTH_PX,
     _FALLBACK_LINE_HEIGHT_PX,
     _HAIRLINE_THICKNESS_PX,
+    _bottom_seam_rect_for,
     _format_metadata_line,
     _message_for,
     _placeholder_image_bytes,
     _rgba_from_tint,
-    _seam_rect_for,
     _sheet_rect_for,
+    _top_seam_rect_for,
 )
 from giruntime.ui._dates import format_date_long
 
@@ -1502,13 +1503,36 @@ class NoteViewMarginWiringTests(unittest.TestCase):
         ):
             return NoteView(note_store=_build_tracking_store(repo), app_state=state)
 
-    def test_textview_top_margin_is_four_line_heights(self) -> None:
+    def test_textview_top_margin_is_breathing_plus_end_gap(self) -> None:
+        # The top margin now reserves the breathing lines *and* the same
+        # desk band as the bottom, so it is the sum of the two constants —
+        # the gap before the note matches the gap after it.
         view = self._build_view_with_stubbed_font(char_w=10, line_h=20)
         text_view = _find_text_view(view)
         self.assertEqual(
             text_view.get_top_margin(),
+            ARTICLE_TOP_MARGIN_LINES * 20 + round(ARTICLE_END_GAP_LINES * 20),
+        )
+
+    def test_textview_top_gap_is_set_and_below_the_top_margin(self) -> None:
+        # The view's top gap matches the constant, and the breathing sheet
+        # (top margin minus the gap) is exactly the top margin lines — so
+        # the two halves cannot drift apart.
+        view = self._build_view_with_stubbed_font(char_w=10, line_h=20)
+        text_view = _find_text_view(view)
+        gap_px = round(ARTICLE_END_GAP_LINES * 20)
+        self.assertEqual(text_view._top_gap_px, gap_px)
+        self.assertEqual(
+            text_view.get_top_margin() - text_view._top_gap_px,
             ARTICLE_TOP_MARGIN_LINES * 20,
         )
+
+    def test_top_and_bottom_gaps_are_equal(self) -> None:
+        # The whole point of the symmetry: the same desk band before and
+        # after the note, derived from one constant so they cannot drift.
+        view = self._build_view_with_stubbed_font(char_w=10, line_h=20)
+        text_view = _find_text_view(view)
+        self.assertEqual(text_view._top_gap_px, text_view._end_gap_px)
 
     def test_textview_bottom_margin_is_breathing_plus_end_gap(self) -> None:
         # The bottom margin reserves the breathing lines *and* the
@@ -2050,47 +2074,67 @@ class ArticleTextViewWashRectTests(unittest.TestCase):
 
 
 class SheetAndSeamRectTests(unittest.TestCase):
-    """Drive the pure :func:`_sheet_rect_for` / :func:`_seam_rect_for` helpers.
+    """Drive the pure sheet / seam helpers.
 
-    No display needed: both are closed over their integer arguments, so
-    they are the display-free seam for the sheet/edge geometry the same
-    way :func:`_rgba_from_tint` is for wash colours.
+    :func:`_sheet_rect_for`, :func:`_top_seam_rect_for` and
+    :func:`_bottom_seam_rect_for` are closed over their integer arguments,
+    so they are the display-free seam for the sheet/edge geometry the same
+    way :func:`_rgba_from_tint` is for wash colours. The top desk band
+    mirrors the bottom one: the sheet starts at ``sheet_top`` (leaving desk
+    above) and ends at ``sheet_bottom`` (leaving desk below), each marked by
+    a 1-px seam.
     """
 
     def setUp(self) -> None:
         self.wash = build_note_end_wash()
 
-    def test_short_content_sheet_ends_at_content(self) -> None:
-        # A short note: the sheet spans the full width from the top down
-        # to the content's bottom, not the whole viewport.
-        color, rect = _sheet_rect_for(200, 700, 560, self.wash.sheet_tint)
+    def test_short_content_sheet_spans_top_to_content(self) -> None:
+        # A short note scrolled to the top: a top desk band of 30 px, then
+        # the sheet down to the content's bottom at 200 px.
+        color, rect = _sheet_rect_for(30, 200, 700, 560, self.wash.sheet_tint)
         self.assertEqual(rect.get_x(), 0.0)
-        self.assertEqual(rect.get_y(), 0.0)
+        self.assertEqual(rect.get_y(), 30.0)
         self.assertEqual(rect.get_width(), 700.0)
-        self.assertEqual(rect.get_height(), 200.0)
+        self.assertEqual(rect.get_height(), 170.0)
         self.assertEqual(
             _tuple_of(color), _tuple_of(_rgba_from_tint(self.wash.sheet_tint)),
         )
 
-    def test_content_filling_viewport_sheet_fills_viewport(self) -> None:
-        # When content reaches the viewport bottom the sheet covers the
-        # whole height (no transparent strip, nothing to reveal).
-        _color, rect = _sheet_rect_for(560, 700, 560, self.wash.sheet_tint)
-        self.assertEqual(rect.get_height(), 560.0)
+    def test_zero_top_keeps_sheet_at_the_very_top(self) -> None:
+        # The construction default (top gap 0): the sheet starts at y=0,
+        # exactly the pre-symmetry behaviour.
+        _color, rect = _sheet_rect_for(0, 200, 700, 560, self.wash.sheet_tint)
+        self.assertEqual(rect.get_y(), 0.0)
+        self.assertEqual(rect.get_height(), 200.0)
 
-    def test_content_past_viewport_sheet_fills_viewport(self) -> None:
-        # A long note (or one scrolled past the end) still fills.
-        _color, rect = _sheet_rect_for(900, 700, 560, self.wash.sheet_tint)
+    def test_negative_top_is_clamped_to_zero(self) -> None:
+        # Scrolled down past the top breathing margin: the sheet fills from
+        # the top, no desk band above.
+        _color, rect = _sheet_rect_for(-40, 200, 700, 560, self.wash.sheet_tint)
+        self.assertEqual(rect.get_y(), 0.0)
+        self.assertEqual(rect.get_height(), 200.0)
+
+    def test_content_filling_viewport_sheet_fills_to_bottom(self) -> None:
+        # When content reaches the viewport bottom the sheet covers down to
+        # the height (no transparent strip below), still starting at the gap.
+        _color, rect = _sheet_rect_for(30, 560, 700, 560, self.wash.sheet_tint)
+        self.assertEqual(rect.get_y(), 30.0)
+        self.assertEqual(rect.get_height(), 530.0)
+
+    def test_content_past_viewport_sheet_fills_to_bottom(self) -> None:
+        # A long note (or one scrolled past the end) still fills downward.
+        _color, rect = _sheet_rect_for(0, 900, 700, 560, self.wash.sheet_tint)
         self.assertEqual(rect.get_height(), 560.0)
 
     def test_empty_buffer_sheet_fills_viewport(self) -> None:
-        # ``None`` (empty buffer) paints a full-height blank sheet.
-        _color, rect = _sheet_rect_for(None, 700, 560, self.wash.sheet_tint)
+        # ``None`` (empty buffer) with a zero top paints a full-height sheet.
+        _color, rect = _sheet_rect_for(0, None, 700, 560, self.wash.sheet_tint)
+        self.assertEqual(rect.get_y(), 0.0)
         self.assertEqual(rect.get_height(), 560.0)
 
-    def test_short_content_produces_a_seam(self) -> None:
+    def test_short_content_produces_a_bottom_seam(self) -> None:
         # A short note gets a 1-px full-width seam at the content's end.
-        result = _seam_rect_for(200, 700, 560, self.wash.rule_tint)
+        result = _bottom_seam_rect_for(200, 700, 560, self.wash.rule_tint)
         self.assertIsNotNone(result)
         assert result is not None  # narrow for the type checker
         color, rect = result
@@ -2102,21 +2146,51 @@ class SheetAndSeamRectTests(unittest.TestCase):
             _tuple_of(color), _tuple_of(_rgba_from_tint(self.wash.rule_tint)),
         )
 
-    def test_content_filling_viewport_has_no_seam(self) -> None:
-        # No visible edge → no seam.
-        self.assertIsNone(_seam_rect_for(560, 700, 560, self.wash.rule_tint))
+    def test_content_filling_viewport_has_no_bottom_seam(self) -> None:
+        # No visible bottom edge → no seam.
+        self.assertIsNone(
+            _bottom_seam_rect_for(560, 700, 560, self.wash.rule_tint),
+        )
 
-    def test_content_past_viewport_has_no_seam(self) -> None:
-        self.assertIsNone(_seam_rect_for(900, 700, 560, self.wash.rule_tint))
+    def test_content_past_viewport_has_no_bottom_seam(self) -> None:
+        self.assertIsNone(
+            _bottom_seam_rect_for(900, 700, 560, self.wash.rule_tint),
+        )
 
-    def test_empty_buffer_has_no_seam(self) -> None:
-        self.assertIsNone(_seam_rect_for(None, 700, 560, self.wash.rule_tint))
+    def test_empty_buffer_has_no_bottom_seam(self) -> None:
+        self.assertIsNone(
+            _bottom_seam_rect_for(None, 700, 560, self.wash.rule_tint),
+        )
 
-    def test_seam_one_pixel_above_bottom_still_paints(self) -> None:
+    def test_bottom_seam_one_pixel_above_bottom_still_paints(self) -> None:
         # Boundary: a content bottom strictly inside the viewport gets a
         # seam, even by a single pixel.
-        result = _seam_rect_for(559, 700, 560, self.wash.rule_tint)
+        result = _bottom_seam_rect_for(559, 700, 560, self.wash.rule_tint)
         self.assertIsNotNone(result)
+
+    def test_desk_above_produces_a_top_seam(self) -> None:
+        # A note scrolled to the top with a desk band above gets a 1-px
+        # full-width seam sitting just above the sheet's top edge — the
+        # mirror of the bottom seam.
+        result = _top_seam_rect_for(30, 700, self.wash.rule_tint)
+        self.assertIsNotNone(result)
+        assert result is not None  # narrow for the type checker
+        color, rect = result
+        self.assertEqual(rect.get_x(), 0.0)
+        self.assertEqual(rect.get_y(), float(30 - _HAIRLINE_THICKNESS_PX))
+        self.assertEqual(rect.get_width(), 700.0)
+        self.assertEqual(rect.get_height(), float(_HAIRLINE_THICKNESS_PX))
+        self.assertEqual(
+            _tuple_of(color), _tuple_of(_rgba_from_tint(self.wash.rule_tint)),
+        )
+
+    def test_no_desk_above_has_no_top_seam(self) -> None:
+        # Sheet starting at the very top (gap 0) → no top seam.
+        self.assertIsNone(_top_seam_rect_for(0, 700, self.wash.rule_tint))
+
+    def test_negative_top_has_no_top_seam(self) -> None:
+        # Scrolled past the top breathing margin → no desk above, no seam.
+        self.assertIsNone(_top_seam_rect_for(-12, 700, self.wash.rule_tint))
 
 
 def _tuple_of(rgba: Gdk.RGBA) -> tuple[float, float, float, float]:
@@ -2190,6 +2264,60 @@ class ArticleTextViewSheetBottomTests(unittest.TestCase):
             self.assertIsNotNone(with_gap)
             assert without_gap is not None and with_gap is not None  # narrow
             self.assertEqual(without_gap - with_gap, 45)
+        finally:
+            _destroy_window_of(text_view)
+
+
+@unittest.skipUnless(_display_available(), "no GDK display")
+class ArticleTextViewSheetTopTests(unittest.TestCase):
+    """Drive :meth:`_ArticleTextView._sheet_top_px` on a live view.
+
+    The mirror of :class:`ArticleTextViewSheetBottomTests`: the pure rect
+    math is covered by :class:`SheetAndSeamRectTests`, so these cover the
+    part that needs a real :class:`Gtk.TextView` — the empty-buffer guard,
+    the start-iter-to-widget coordinate mapping, and that the top gap lifts
+    the sheet's top edge by exactly its pixels. Assertions stay
+    font-independent.
+    """
+
+    def test_empty_buffer_returns_zero(self) -> None:
+        # The parse-error / no-note state: a blank buffer reports a sheet
+        # top of 0, so the caller paints a full-height blank sheet from the
+        # very top.
+        text_view, _buffer, _table = _build_article_text_view_with_buffer()
+        self.assertEqual(text_view._sheet_top_px(), 0)
+
+    def test_top_gap_shows_desk_above_when_scrolled_to_top(self) -> None:
+        # A short note in a tall viewport sits scrolled to the top, so the
+        # sheet top equals the reserved top gap — the desk band above the
+        # note. With a zero gap the sheet starts at the very top.
+        text_view, buffer, _table = _build_article_text_view_with_buffer()
+        buffer.set_text("A short note.\nTwo lines only.\n")
+        text_view.set_top_margin(80)
+        _realize_in_window(text_view, width=700, height=600)
+        try:
+            text_view.set_top_gap_px(0)
+            self.assertEqual(text_view._sheet_top_px(), 0)
+            text_view.set_top_gap_px(30)
+            self.assertEqual(text_view._sheet_top_px(), 30)
+        finally:
+            _destroy_window_of(text_view)
+
+    def test_top_gap_lifts_sheet_top_by_its_pixels(self) -> None:
+        # The mirror of the end-gap test: the top gap is the slice of the
+        # top-margin the sheet does NOT claim, so raising it by N px lowers
+        # the sheet's top edge by exactly N, independent of font, content,
+        # or scroll position.
+        text_view, buffer, _table = _build_article_text_view_with_buffer()
+        buffer.set_text("A short note.\n")
+        text_view.set_top_margin(120)
+        _realize_in_window(text_view, width=700, height=600)
+        try:
+            text_view.set_top_gap_px(0)
+            without_gap = text_view._sheet_top_px()
+            text_view.set_top_gap_px(45)
+            with_gap = text_view._sheet_top_px()
+            self.assertEqual(with_gap - without_gap, 45)
         finally:
             _destroy_window_of(text_view)
 
