@@ -15,16 +15,24 @@ Principles & invariants
   ``TARGET_CHARS_PER_LINE`` × measured glyph width and cached. Changing
   this value is a typography decision, not a runtime tuning knob, so it is
   intentionally not exposed in any settings panel in v1.
-* The three ``ARTICLE_*`` margin multipliers parameterise the four
-  breathing-space margins applied to the rendered-view ``Gtk.TextView``
-  (top / bottom above-and-below content, plus inner horizontal padding
-  between the article column's edge and the text). Values are expressed
-  in font-relative units: top / bottom are multiples of the body font's
-  measured line height, the inner horizontal padding is a multiple of
-  the body font's "M" glyph width. Like ``TARGET_CHARS_PER_LINE`` these
-  are typography decisions — the live measurement happens once per font
-  in the UI layer, the result is cached for the container's lifetime,
-  and the values are intentionally not exposed in any settings panel.
+* The four ``ARTICLE_*`` multipliers parameterise the rendered-view
+  ``Gtk.TextView``'s spacing. Three are breathing-space margins
+  (``ARTICLE_TOP_MARGIN_LINES`` / ``ARTICLE_BOTTOM_MARGIN_LINES`` above
+  and below the content, ``ARTICLE_INNER_HPADDING_CHARS`` between the
+  article column's edge and the text); the fourth,
+  ``ARTICLE_END_GAP_LINES``, is the minimum band of *desk* (the
+  scroller's own background, not the white sheet) kept below the note
+  when it is scrolled to its end, so a long note ends at a visible edge
+  the way a short one already does. The view's actual ``bottom-margin``
+  is the sum of ``ARTICLE_BOTTOM_MARGIN_LINES`` and
+  ``ARTICLE_END_GAP_LINES`` (breathing sheet + scrollable desk gap),
+  while the painted sheet stops after only the breathing part — the
+  difference is the desk band. Values are font-relative: the line-based
+  ones are multiples of the body font's measured line height, the inner
+  horizontal padding a multiple of its "M" glyph width. Like
+  ``TARGET_CHARS_PER_LINE`` these are typography decisions — measured
+  once per font in the UI layer, cached for the container's lifetime,
+  and intentionally not exposed in any settings panel.
 * :data:`SEED_WELCOME_NOTE_SOURCE` is written to a fresh database by the
   v1 migration. It is never re-applied: a user who deletes the welcome
   note must not see it reappear on the next launch. The migration's own
@@ -60,6 +68,27 @@ ARTICLE_BOTTOM_MARGIN_LINES: int = 4
 """Vertical breathing space below the last rendered content, same units
 as :data:`ARTICLE_TOP_MARGIN_LINES`. Kept symmetric so scrolling to the
 end of a note does not slam the final paragraph into the viewport edge.
+"""
+
+ARTICLE_END_GAP_LINES: float = 1.5
+"""Minimum band of *desk* kept below the note when it is scrolled to the end.
+
+Expressed as a multiple of the body font's line height, like
+:data:`ARTICLE_BOTTOM_MARGIN_LINES`. The rendered view paints an opaque
+white *sheet* down to the end of the content plus the
+:data:`ARTICLE_BOTTOM_MARGIN_LINES` breathing space; below that the
+scroller's own background (the "desk") shows through. To make the sheet's
+bottom edge reachable on a note taller than the viewport, the view's
+``bottom-margin`` is set to ``ARTICLE_BOTTOM_MARGIN_LINES +
+ARTICLE_END_GAP_LINES`` line heights — the extra ``ARTICLE_END_GAP_LINES``
+is scrollable room the sheet does **not** claim, so scrolling to the very
+end brings the seam into view with at least this much desk beneath it. A
+short note already reveals desk; this guarantees a long one does too.
+
+The value is a typographic choice: below ~1 line the gap reads as a clipped
+last line rather than a deliberate end, above ~2.5 it wastes screen on long
+notes. A non-integer value is intentional and allowed — the UI layer rounds
+the pixel result.
 """
 
 ARTICLE_INNER_HPADDING_CHARS: int = 8

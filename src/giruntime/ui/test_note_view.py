@@ -15,6 +15,7 @@ from gi.repository import Gdk, GLib, GObject, Gsk, Gtk
 
 from config.defaults import (
     ARTICLE_BOTTOM_MARGIN_LINES,
+    ARTICLE_END_GAP_LINES,
     ARTICLE_INNER_HPADDING_CHARS,
     ARTICLE_TOP_MARGIN_LINES,
     TARGET_CHARS_PER_LINE,
@@ -1513,11 +1514,26 @@ class NoteViewMarginWiringTests(unittest.TestCase):
             ARTICLE_TOP_MARGIN_LINES * 20,
         )
 
-    def test_textview_bottom_margin_is_four_line_heights(self) -> None:
+    def test_textview_bottom_margin_is_breathing_plus_end_gap(self) -> None:
+        # The bottom margin reserves the breathing lines *and* the
+        # end-gap desk band, so it is the sum of the two constants.
         view = self._build_view_with_stubbed_font(char_w=10, line_h=20)
         text_view = _find_text_view(view)
         self.assertEqual(
             text_view.get_bottom_margin(),
+            ARTICLE_BOTTOM_MARGIN_LINES * 20 + round(ARTICLE_END_GAP_LINES * 20),
+        )
+
+    def test_textview_end_gap_is_set_and_below_the_bottom_margin(self) -> None:
+        # The view's end-gap matches the constant, and the breathing
+        # sheet (bottom margin minus the gap) is exactly the bottom
+        # margin lines — so the two halves cannot drift apart.
+        view = self._build_view_with_stubbed_font(char_w=10, line_h=20)
+        text_view = _find_text_view(view)
+        end_gap_px = round(ARTICLE_END_GAP_LINES * 20)
+        self.assertEqual(text_view._end_gap_px, end_gap_px)
+        self.assertEqual(
+            text_view.get_bottom_margin() - text_view._end_gap_px,
             ARTICLE_BOTTOM_MARGIN_LINES * 20,
         )
 
@@ -2155,6 +2171,28 @@ class ArticleTextViewSheetBottomTests(unittest.TestCase):
             self.assertIsNotNone(sheet_bottom)
             assert sheet_bottom is not None  # narrow for the type checker
             self.assertGreaterEqual(sheet_bottom, 240)
+        finally:
+            _destroy_window_of(text_view)
+
+    def test_end_gap_lifts_sheet_bottom_by_its_pixels(self) -> None:
+        # The end gap is the slice of bottom-margin the sheet does NOT
+        # claim: raising it by N px lowers the reported sheet bottom by
+        # exactly N, independent of font, content, or scroll position.
+        # This is the decoupling that lets a long note reveal desk + seam
+        # at its end rather than filling the viewport.
+        text_view, buffer, _table = _build_article_text_view_with_buffer()
+        buffer.set_text("A short note.\n")
+        text_view.set_bottom_margin(120)
+        _realize_in_window(text_view, width=700, height=600)
+        try:
+            text_view.set_end_gap_px(0)
+            without_gap = text_view._sheet_bottom_px()
+            text_view.set_end_gap_px(45)
+            with_gap = text_view._sheet_bottom_px()
+            self.assertIsNotNone(without_gap)
+            self.assertIsNotNone(with_gap)
+            assert without_gap is not None and with_gap is not None  # narrow
+            self.assertEqual(without_gap - with_gap, 45)
         finally:
             _destroy_window_of(text_view)
 
