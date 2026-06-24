@@ -22,7 +22,12 @@ Principles & invariants
 * The seed welcome note is part of the v1 migration and is applied
   **exactly once**: the ``schema_version`` table records that v1 has
   run, and v1 is never replayed. A user who deletes the welcome note
-  will not see it reappear on the next launch.
+  will not see it reappear on the next launch. v1 reads the welcome
+  *source* directly from the ``system_docs`` package
+  (:data:`enums.SystemDocument.WELCOME`) via the gi-free
+  :func:`system_docs.load_text` loader — the same config-tier home the
+  help window reads from — rather than a ``config`` constant; ``storage``
+  stays gi-free because that loader uses only :func:`importlib.resources`.
 * This module derives cached note columns through
   :func:`asciidoc.summary.derive_summary` (the v1 seed, the v2
   backfill, and the v3 tag backfill). ``storage`` is allowed to import
@@ -42,11 +47,10 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 
 from asciidoc.summary import derive_summary
-from config.defaults import (
-    SEED_WELCOME_NOTE_ID,
-    SEED_WELCOME_NOTE_SOURCE,
-)
+from config.defaults import SEED_WELCOME_NOTE_ID
+from enums import SystemDocument
 from storage.database import Database
+from system_docs import load_text
 
 
 # ---------------------------------------------------------------------------
@@ -180,7 +184,14 @@ def _apply_v1(connection: sqlite3.Connection, now: datetime) -> None:
         )
 
     timestamp = now.isoformat()
-    welcome_summary = derive_summary(SEED_WELCOME_NOTE_SOURCE)
+    # The welcome source is config-tier package data in ``system_docs``,
+    # read gi-free via ``importlib.resources`` — the same mechanism the
+    # help window uses for its own source and image. v1 is a frozen
+    # migration: reading the bytes from a file instead of a module-level
+    # constant preserves its data behaviour exactly (a golden test pins
+    # the seeded bytes against an accidental future edit to welcome.adoc).
+    welcome_source = load_text(SystemDocument.WELCOME)
+    welcome_summary = derive_summary(welcome_source)
     connection.execute(
         "INSERT INTO notes "
         "(id, title, notebook_id, source, snippet, created_at, modified_at) "
@@ -189,7 +200,7 @@ def _apply_v1(connection: sqlite3.Connection, now: datetime) -> None:
             SEED_WELCOME_NOTE_ID,
             welcome_summary.title,
             _V1_SEED_NOTEBOOK_ID_PERSONAL,
-            SEED_WELCOME_NOTE_SOURCE,
+            welcome_source,
             welcome_summary.snippet,
             timestamp,
             timestamp,

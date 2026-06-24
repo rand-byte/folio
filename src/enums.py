@@ -198,3 +198,51 @@ class AttachmentRejectionReason(Enum):
 
     EXCEEDS_SIZE_LIMIT = auto()
     UNREADABLE_SOURCE = auto()
+
+
+class SystemDocument(StrEnum):
+    """The application's bundled "system documents".
+
+    These are the texts and the one image the application ships as
+    package data (not user content): the seed welcome note inserted on
+    first launch, and the AsciiDoc help reference (plus the small image
+    its ``image::`` example demonstrates). They live in the
+    ``system_docs`` package and are read gi-free via
+    :func:`importlib.resources` by the shared loader in
+    :mod:`system_docs`.
+
+    Each member's *value is the package-relative filename* the loader
+    joins onto the ``system_docs`` package — so the enum is the single
+    home for "which file backs which system document". The values are not
+    persisted to disk (they only locate package data at runtime), but
+    they are stable: the files ship under exactly these names, and
+    renaming one is a deliberate change to both the file and this member.
+    """
+
+    WELCOME = "welcome.adoc"
+    HELP = "help.adoc"
+    HELP_DEMO_IMAGE = "help-demo.png"
+
+
+class HelpSection(StrEnum):
+    """The navigable top-level sections of the AsciiDoc help reference.
+
+    The help window renders a single scrolling page whose top-level
+    buckets match the parser's structure/inline/block split. Both the
+    contents-sidebar entries **and** the ``Gtk.TextMark`` placed at each
+    section's heading are keyed off this enum, so the navigation list and
+    the scroll targets cannot drift: a member with no matching heading (or
+    a heading matching no member) is caught at window-build time.
+
+    Each member's *value is the exact heading text* it labels in
+    ``help.adoc`` — the contents sidebar shows it as the row label, and
+    the post-render mark-placement pass matches a rendered level-2 heading
+    line against it. The order of declaration is the order the rows appear
+    in the sidebar, matching the document order of the headings. The
+    values are in-memory only (never persisted), so they carry no
+    migration implication.
+    """
+
+    STRUCTURE = "Structure"
+    TEXT_AND_EMPHASIS = "Text & emphasis"
+    BLOCKS = "Blocks"

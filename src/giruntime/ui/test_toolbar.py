@@ -211,5 +211,39 @@ class SearchBindingTests(unittest.TestCase):
         self.assertEqual(toolbar.search_entry.get_text(), "seed")
 
 
+@unittest.skipUnless(_display_available(), "no GDK display")
+class PrimaryMenuTests(unittest.TestCase):
+    """The app-scoped primary (hamburger) menu surfaces the Help item."""
+
+    def test_primary_menu_button_uses_open_menu_icon(self) -> None:
+        toolbar = _build_toolbar(AppState())
+        self.assertEqual(
+            toolbar.primary_menu_button.get_icon_name(),
+            "open-menu-symbolic",
+        )
+
+    def test_primary_menu_has_single_help_item(self) -> None:
+        toolbar = _build_toolbar(AppState())
+        menu = toolbar.primary_menu_button.get_menu_model()
+        self.assertIsNotNone(menu)
+        assert menu is not None
+        self.assertEqual(menu.get_n_items(), 1)
+
+    def test_help_item_targets_app_help_action(self) -> None:
+        toolbar = _build_toolbar(AppState())
+        menu = toolbar.primary_menu_button.get_menu_model()
+        assert menu is not None
+        action = menu.get_item_attribute_value(0, "action", None)
+        self.assertIsNotNone(action)
+        assert action is not None
+        self.assertEqual(action.get_string(), "app.help")
+
+    def test_primary_menu_is_not_note_scoped(self) -> None:
+        # Unlike the note-scoped More menu (disabled with no selection),
+        # the app-scoped primary menu is always available.
+        toolbar = _build_toolbar(AppState())
+        self.assertTrue(toolbar.primary_menu_button.get_sensitive())
+
+
 if __name__ == "__main__":
     unittest.main()

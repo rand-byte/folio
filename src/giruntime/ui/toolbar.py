@@ -16,7 +16,9 @@ Principles & invariants
   * a View / Source segmented toggle on the right that mirrors
     :attr:`AppState.view_mode` bidirectionally;
   * a *More* menu button whose popover surfaces the *Duplicate note*
-    and *Delete note* actions matching the design's three-dot menu.
+    and *Delete note* actions matching the design's three-dot menu;
+  * a primary (hamburger) menu whose model surfaces the app-scoped
+    *Help* item, targeting the application's ``app.help`` action.
 
   The toolbar sits in the window via :meth:`Gtk.Window.set_titlebar`
   on :class:`MainWindow`.
@@ -65,7 +67,7 @@ from __future__ import annotations
 
 from typing import Final
 
-from gi.repository import GObject, Gtk
+from gi.repository import Gio, GObject, Gtk
 
 from enums import ViewMode
 from giruntime.controllers.app_state import AppState
@@ -92,6 +94,16 @@ _MODE_SOURCE_LABEL: Final[str] = "Source"
 
 _MORE_BUTTON_TOOLTIP: Final[str] = "More"
 _MORE_BUTTON_ICON: Final[str] = "view-more-symbolic"
+
+_PRIMARY_MENU_TOOLTIP: Final[str] = "Main menu"
+_PRIMARY_MENU_ICON: Final[str] = "open-menu-symbolic"
+_MENU_HELP_LABEL: Final[str] = "Help"
+_HELP_ACTION_DETAILED_NAME: Final[str] = "app.help"
+"""Detailed name of the application-level help action the primary menu
+item targets. The action and its ``F1`` accelerator are registered by
+:class:`giruntime.ui.application.NotesApplication`; the menu only points
+at it, keeping Help app-scoped rather than note-scoped like the More
+menu's Duplicate / Delete."""
 
 _NEW_BUTTON_ICON: Final[str] = "list-add-symbolic"
 
@@ -130,6 +142,7 @@ class Toolbar(  # pylint: disable=too-many-instance-attributes
     _source_button: Gtk.ToggleButton
     _more_menu_button: Gtk.MenuButton
     _more_popover: Gtk.Popover
+    _primary_menu_button: Gtk.MenuButton
 
     _suppress_signal_writeback: bool
 
@@ -171,6 +184,7 @@ class Toolbar(  # pylint: disable=too-many-instance-attributes
         self._view_button, self._source_button = self._build_mode_toggle()
         self._more_popover = self._build_more_popover()
         self._more_menu_button = self._build_more_menu_button(self._more_popover)
+        self._primary_menu_button = self._build_primary_menu_button()
 
         right_box = Gtk.Box.new(
             Gtk.Orientation.HORIZONTAL,
@@ -181,6 +195,7 @@ class Toolbar(  # pylint: disable=too-many-instance-attributes
         mode_box.append(self._source_button)
         right_box.append(mode_box)
         right_box.append(self._more_menu_button)
+        right_box.append(self._primary_menu_button)
         self.pack_end(right_box)
 
         # ---------- AppState bindings & subscriptions ----------
@@ -269,6 +284,26 @@ class Toolbar(  # pylint: disable=too-many-instance-attributes
         button.set_icon_name(_MORE_BUTTON_ICON)
         button.set_tooltip_text(_MORE_BUTTON_TOOLTIP)
         button.set_popover(popover)
+        return button
+
+    def _build_primary_menu_button(self) -> Gtk.MenuButton:
+        """Build the app-scoped primary (hamburger) menu.
+
+        A :class:`Gio.Menu` model with a single *Help* item pointing at
+        the application-level ``app.help`` action — the same action the
+        ``F1`` accelerator triggers. The menu is app-scoped (always
+        available, never note-dependent), which is why it is a separate
+        button from the note-scoped *More* menu and why it carries a
+        menu *model* (an action reference) rather than hand-built button
+        rows. GTK resolves ``app.help`` against the window's
+        application when the menu is shown.
+        """
+        menu = Gio.Menu.new()
+        menu.append(_MENU_HELP_LABEL, _HELP_ACTION_DETAILED_NAME)
+        button = Gtk.MenuButton.new()
+        button.set_icon_name(_PRIMARY_MENU_ICON)
+        button.set_tooltip_text(_PRIMARY_MENU_TOOLTIP)
+        button.set_menu_model(menu)
         return button
 
     # ------------------------------------------------------------------
@@ -391,3 +426,7 @@ class Toolbar(  # pylint: disable=too-many-instance-attributes
     @property
     def more_popover(self) -> Gtk.Popover:
         return self._more_popover
+
+    @property
+    def primary_menu_button(self) -> Gtk.MenuButton:
+        return self._primary_menu_button

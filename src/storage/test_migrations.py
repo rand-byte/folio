@@ -2,20 +2,26 @@
 
 from __future__ import annotations
 
+import hashlib
 import unittest
 from datetime import UTC, datetime
 
 from asciidoc.summary import derive_summary
-from config.defaults import SEED_WELCOME_NOTE_ID, SEED_WELCOME_NOTE_SOURCE
+from config.defaults import SEED_WELCOME_NOTE_ID
+from enums import SystemDocument
 from storage.database import Database
 from storage.migrations import (
     ALL_MIGRATIONS,
     apply_pending,
     current_schema_version,
 )
+from system_docs import load_text
 
 
 _FIXED_NOW: datetime = datetime(2026, 1, 15, 12, 0, 0, tzinfo=UTC)
+
+_WELCOME_SOURCE: str = load_text(SystemDocument.WELCOME)
+"""The welcome source the v1 migration seeds, read from ``system_docs``."""
 
 
 def _all_table_names(database: Database) -> set[str]:
@@ -155,9 +161,9 @@ class SeedWelcomeNoteTests(unittest.TestCase):
         )
         row = cursor.fetchone()
         self.assertIsNotNone(row)
-        expected = derive_summary(SEED_WELCOME_NOTE_SOURCE)
+        expected = derive_summary(_WELCOME_SOURCE)
         self.assertEqual(row["title"], expected.title)
-        self.assertEqual(row["source"], SEED_WELCOME_NOTE_SOURCE)
+        self.assertEqual(row["source"], _WELCOME_SOURCE)
 
     def test_welcome_note_has_welcome_tag(self) -> None:
         cursor = self.db.connection.execute(
@@ -166,6 +172,63 @@ class SeedWelcomeNoteTests(unittest.TestCase):
         )
         tags = [row[0] for row in cursor.fetchall()]
         self.assertEqual(tags, ["welcome"])
+
+
+# ---------------------------------------------------------------------------
+# Frozen-migration golden test: the exact bytes v1 seeds must not drift
+# ---------------------------------------------------------------------------
+
+
+class V1SeedGoldenTests(unittest.TestCase):
+    """Pin the exact welcome bytes the v1 migration inserts.
+
+    v1 is a shipped, frozen migration ("never edit a shipped one"): its
+    *data behaviour* must not change for any existing upgrade path. The
+    welcome source now lives in ``system_docs/welcome.adoc`` and is read
+    at seed time, so an accidental edit to that file would silently
+    change what v1 seeds. This golden test fixes the exact byte content
+    (by length and SHA-256) so such an edit fails loudly instead.
+
+    The digest is over the UTF-8 encoding of the seeded ``source`` column
+    — identical to the bytes of ``welcome.adoc`` on disk. If the welcome
+    text is *intentionally* revised, that is a new note for users to
+    receive via a *new* migration, not an edit to v1; this test failing
+    is the reminder.
+    """
+
+    _EXPECTED_LENGTH: int = 960
+    _EXPECTED_SHA256: str = (
+        "26d9fcbb8c098f38e6213a46cb939f4578b281b653554c8fea3992313ff9b5a3"
+    )
+
+    def setUp(self) -> None:
+        self.db = Database.in_memory()
+        self.addCleanup(self.db.close)
+        apply_pending(self.db, now=_FIXED_NOW)
+
+    def _seeded_source(self) -> str:
+        cursor = self.db.connection.execute(
+            "SELECT source FROM notes WHERE id = ?",
+            (SEED_WELCOME_NOTE_ID,),
+        )
+        row = cursor.fetchone()
+        self.assertIsNotNone(row)
+        source: str = row["source"]
+        return source
+
+    def test_seeded_welcome_source_length_is_pinned(self) -> None:
+        self.assertEqual(len(self._seeded_source()), self._EXPECTED_LENGTH)
+
+    def test_seeded_welcome_source_digest_is_pinned(self) -> None:
+        digest = hashlib.sha256(
+            self._seeded_source().encode("utf-8"),
+        ).hexdigest()
+        self.assertEqual(digest, self._EXPECTED_SHA256)
+
+    def test_loader_source_matches_seeded_source(self) -> None:
+        # The migration and the loader must agree: what v1 writes is what
+        # ``system_docs`` serves, so the two can never diverge silently.
+        self.assertEqual(self._seeded_source(), _WELCOME_SOURCE)
 
 
 # ---------------------------------------------------------------------------

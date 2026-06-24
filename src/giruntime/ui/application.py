@@ -54,6 +54,13 @@ Principles & invariants
   :class:`NoteView`) closes over the same store to fetch bytes by
   filename when an image macro is encountered. The step-10
   :class:`_PlaceholderAttachmentStore` is removed.
+* The application owns the single, non-modal :class:`HelpWindow`. It
+  registers an app-scoped ``help`` action (``F1``) on first activation
+  and, when that action fires (from the accelerator or the toolbar's
+  primary menu), builds the help window once and reuses it thereafter —
+  re-opening :meth:`Gtk.Window.present`-s the existing window rather than
+  spawning a duplicate. The help is app-scoped, so the action and the
+  window live here rather than on any per-note widget.
 """
 
 from __future__ import annotations
@@ -67,6 +74,7 @@ from config.paths import database_path
 from giruntime.controllers.app_state import AppState
 from giruntime.controllers.note_controller import NoteController
 from giruntime.controllers.note_list_store import NoteListStore
+from giruntime.ui.help_window import HelpWindow
 from giruntime.ui.main_window import MainWindow
 from storage.attachment_store import AttachmentStore
 from storage.database import Database
@@ -105,6 +113,22 @@ later, any other application-level visuals that need theming).
 """
 
 
+_HELP_ACTION_NAME: str = "help"
+"""Name of the application-level action that opens the help window.
+
+Registered on the :class:`Gio.ApplicationActionGroup` as ``app.help`` and
+bound to :data:`_HELP_ACCELERATOR`. Window-independent on purpose — the
+help is app-scoped, not tied to any one note or window.
+"""
+
+_HELP_ACTION_DETAILED_NAME: str = "app.help"
+"""The detailed action name used for the accelerator binding and menus."""
+
+_HELP_ACCELERATOR: str = "F1"
+"""The keyboard accelerator that triggers ``app.help`` — the platform
+convention for help."""
+
+
 class NotesApplication(Gtk.Application):
     """The application's :class:`Gtk.Application` subclass.
 
@@ -120,6 +144,7 @@ class NotesApplication(Gtk.Application):
     _attachment_store: AttachmentStore | None
     _app_state: AppState | None
     _note_controller: NoteController | None
+    _help_window: HelpWindow | None
 
     def __init__(self) -> None:
         super().__init__(
@@ -132,6 +157,7 @@ class NotesApplication(Gtk.Application):
         self._attachment_store = None
         self._app_state = None
         self._note_controller = None
+        self._help_window = None
 
     def do_activate(self) -> None:  # pylint: disable=arguments-differ
         """Build the world if it does not yet exist, then present a
@@ -184,7 +210,24 @@ class NotesApplication(Gtk.Application):
             attachments=self._attachment_store,
             app_state=self._app_state,
         )
+        self._install_help_action()
         _load_application_css()
+
+    def _install_help_action(self) -> None:
+        """Register the app-level ``help`` action and its ``F1`` accel.
+
+        The action is window-independent (app-scoped), so it lives on the
+        :class:`Gtk.Application` rather than any window — both the
+        accelerator and any menu item route to the same action. Runs once
+        per process, alongside the rest of the one-time runtime setup.
+        """
+        help_action = Gio.SimpleAction.new(_HELP_ACTION_NAME, None)
+        help_action.connect("activate", self._on_help_activated)
+        self.add_action(help_action)
+        self.set_accels_for_action(
+            _HELP_ACTION_DETAILED_NAME,
+            [_HELP_ACCELERATOR],
+        )
 
     def _build_initial_window(self) -> MainWindow:
         """Construct the first :class:`MainWindow` and seed the
@@ -215,6 +258,42 @@ class NotesApplication(Gtk.Application):
         )
         self._select_initial_note(self._note_store, self._app_state)
         return window
+
+    def _on_help_activated(
+        self,
+        _action: Gio.SimpleAction,
+        _parameter: object,
+    ) -> None:
+        """Open (or raise) the help window when ``app.help`` activates.
+
+        Wired to both the ``F1`` accelerator and the primary-menu Help
+        item. The ``_parameter`` is unused — the action carries no
+        target — but it is part of the ``activate`` signal signature.
+        """
+        self._present_help_window()
+
+    def _present_help_window(self) -> None:
+        """Show the single help window, building it on first use.
+
+        Single-instance reuse-and-raise: the application keeps the one
+        :class:`HelpWindow`; a second open request
+        :meth:`Gtk.Window.present`-s the existing one rather than
+        spawning a duplicate, so the non-modal reference never stacks up.
+        """
+        self._ensure_help_window().present()
+
+    def _ensure_help_window(self) -> HelpWindow:
+        """Return the single help window, building it on first call.
+
+        The reuse seam: the first call constructs the window and caches
+        it; every later call returns that same instance. Kept separate
+        from the :meth:`Gtk.Window.present` in :meth:`_present_help_window`
+        so the build-once contract is testable without a window-raising
+        side effect.
+        """
+        if self._help_window is None:
+            self._help_window = HelpWindow(application=self)
+        return self._help_window
 
     @staticmethod
     def _select_initial_note(

@@ -38,10 +38,14 @@ Principles & invariants
   decisions — measured once per font in the UI layer, cached for the
   container's lifetime, and intentionally not exposed in any settings
   panel.
-* :data:`SEED_WELCOME_NOTE_SOURCE` is written to a fresh database by the
-  v1 migration. It is never re-applied: a user who deletes the welcome
-  note must not see it reappear on the next launch. The migration's own
-  version-tracking enforces this.
+* :data:`SEED_WELCOME_NOTE_ID` is the stable id of the welcome note the
+  v1 migration seeds into a fresh database. The note's *source* is no
+  longer kept here: it moved to the ``system_docs`` package
+  (:data:`enums.SystemDocument.WELCOME`), the one config-tier home for
+  system documents, so ``defaults.py`` carries only tunable constants
+  and stable identifiers. The migration still applies the seed exactly
+  once — its own version tracking, not anything in this module, is what
+  keeps a deleted welcome note from reappearing.
 """
 
 from __future__ import annotations
@@ -137,44 +141,11 @@ title, so the note list always has a non-empty title to show.
 # ---------------------------------------------------------------------------
 
 SEED_WELCOME_NOTE_ID: str = "seed-welcome-note"
+"""Stable id of the welcome note the v1 migration seeds on first launch.
 
-
-# ---------------------------------------------------------------------------
-# Seed welcome note
-# ---------------------------------------------------------------------------
-
-SEED_WELCOME_NOTE_SOURCE: str = """\
-= Welcome to your notes
-:tags: welcome
-
-This is your first note. You can keep it, edit it, or delete it.
-
-Notes are written in *AsciiDoc* — a plain-text format. The toolbar above
-gives you formatting buttons for the most common things, but you can also
-type the markup directly.
-
-== A few features to try
-
-* Type _italic_ or *bold* text inline
-* Mark something as [.line-through]#done# or [.underline]#important#
-* Group related ideas under a heading like the one above this list
-
-== Step-by-step lists
-
-. Click *New note* on the toolbar to create a note
-. Add a ``:tags: foo, bar`` line under the title to file it
-. Use the search box to find any note across the whole library
-
-== Code blocks
-
-----
-def hello():
-    print("Hello!")
-----
-
-Code is rendered verbatim — the editor highlights AsciiDoc itself, but
-the rendered view shows the code as you wrote it.
-
-When you are ready to start your own notes, you can safely delete this
-one. It will not come back.
+The note's *source* lives in the ``system_docs`` package
+(:data:`enums.SystemDocument.WELCOME`), read gi-free by
+:func:`system_docs.load_text`; only this identifier stays here. The
+application's initial-selection logic looks the note up by this id and
+falls back to the newest note if the user has deleted it.
 """

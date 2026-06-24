@@ -35,9 +35,13 @@ from asciidoc.ast import (
     UnorderedList,
 )
 from asciidoc.parser import parse
-from config.defaults import SEED_WELCOME_NOTE_SOURCE
-from enums import AdmonitionKind, ParseErrorKind
+from enums import AdmonitionKind, ParseErrorKind, SystemDocument
 from models.parse_error import ParseError
+from system_docs import load_text
+
+
+_WELCOME_SOURCE: str = load_text(SystemDocument.WELCOME)
+"""The seed welcome note source, read from the ``system_docs`` package."""
 
 
 # ---------------------------------------------------------------------------
@@ -1228,14 +1232,14 @@ class WelcomeNoteRoundTripTests(unittest.TestCase):
     """
 
     def test_round_trip(self) -> None:
-        doc = parse(SEED_WELCOME_NOTE_SOURCE)
+        doc = parse(_WELCOME_SOURCE)
         # Title is present.
         self.assertIsNotNone(doc.title)
         # Document has a meaningful number of top-level blocks.
         self.assertGreater(len(doc.blocks), 0)
 
     def test_top_level_block_kinds(self) -> None:
-        doc = parse(SEED_WELCOME_NOTE_SOURCE)
+        doc = parse(_WELCOME_SOURCE)
         kinds = [type(block).__name__ for block in doc.blocks]
         # The welcome note structure is: two paragraphs, then three
         # level-2 sections.
@@ -1243,7 +1247,7 @@ class WelcomeNoteRoundTripTests(unittest.TestCase):
         self.assertEqual(kinds.count("Section"), 3)
 
     def test_features_section_contains_unordered_list(self) -> None:
-        doc = parse(SEED_WELCOME_NOTE_SOURCE)
+        doc = parse(_WELCOME_SOURCE)
         sections = [block for block in doc.blocks if isinstance(block, Section)]
         features = sections[0]
         contains_unordered = any(
@@ -1253,7 +1257,7 @@ class WelcomeNoteRoundTripTests(unittest.TestCase):
         self.assertTrue(contains_unordered)
 
     def test_steps_section_contains_ordered_list(self) -> None:
-        doc = parse(SEED_WELCOME_NOTE_SOURCE)
+        doc = parse(_WELCOME_SOURCE)
         sections = [block for block in doc.blocks if isinstance(block, Section)]
         steps = sections[1]
         contains_ordered = any(
@@ -1263,7 +1267,7 @@ class WelcomeNoteRoundTripTests(unittest.TestCase):
         self.assertTrue(contains_ordered)
 
     def test_code_section_contains_code_block(self) -> None:
-        doc = parse(SEED_WELCOME_NOTE_SOURCE)
+        doc = parse(_WELCOME_SOURCE)
         sections = [block for block in doc.blocks if isinstance(block, Section)]
         code_section = sections[2]
         code_blocks = [

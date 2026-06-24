@@ -1,0 +1,125 @@
+= Folio help: the AsciiDoc subset
+:tags: help
+
+Folio notes are written in a strict subset of *AsciiDoc*, a plain-text
+format. The promise is simple: well-formed markup renders, while
+malformed inline markup surfaces an _error_ in the read view rather than
+quietly rendering garbage — and a note still saves while you are
+mid-edit, so a half-finished line never loses your work.
+
+This reference shows each supported construct: its literal markup (in a
+monospace span or a code block, so the markup itself is visible), then
+how it renders, then the one limit worth remembering. The reference is
+itself a Folio note, written in exactly the subset it documents.
+
+== Structure
+
+A note's first non-blank line may be its title, written `= Title`. Only
+the very first line may be a level-0 title.
+
+Directly under the title, a `:tags:` header files the note. Both lines
+look like this:
+
+----
+= My note title
+:tags: work, ideas
+----
+
+Section headings use two to six `=` signs — `==` through `======`. A
+deeper heading nests under a shallower one; an equal-or-shallower
+heading closes it.
+
+----
+== A section
+=== A nested subsection
+----
+
+Limit: level 0 is the title and is valid only on the first line; a `=`
+heading anywhere later is rejected.
+
+== Text & emphasis
+
+Inline markup wraps a span inside a single line. Each item below shows
+the markup verbatim, then the rendered result.
+
+* Bold uses `*stars*` and renders as *bold*.
+* Italic uses `_underscores_` and renders as _italic_.
+* Strike uses `[.line-through]#text#` and renders as [.line-through]#struck through#.
+* Underline uses `[.underline]#text#` and renders as [.underline]#underlined#.
+* Monospace uses a backtick span and renders as `monospace`.
+
+Limit: a marker does not nest inside the same marker, and a monospace
+span's contents are shown verbatim — they are never re-parsed, which is
+exactly why the markup samples above survive intact.
+
+== Blocks
+
+Blocks are the larger structures: links, lists, code, quotes,
+admonitions, tables, and images.
+
+Links may be a bare URL such as https://example.com, a URL with display
+text in the `URL[label]` form, or the explicit `link:URL[label]` macro.
+The allowed schemes are exactly `http`, `https`, and `mailto`; anything
+else stays plain text. A rendered example: https://example.com[the Folio website]. For a URL that itself contains markup characters, wrap it in a
+`link:++URL++[label]` passthrough so the `++ ... ++` keeps every
+character literal. Limit: links never nest inside other links.
+
+An unordered list uses a leading `*`:
+
+* First point
+* Second point
+* Third point
+
+An ordered list uses a leading `.`:
+
+. First step
+. Second step
+. Third step
+
+Limit: list items are single-line only — no nesting and no continuation
+lines.
+
+A code block is fenced by `----`, with an optional `[source,lang]`
+directive. Its body is verbatim and never re-parsed:
+
+[source,python]
+----
+def hello():
+    print("Hello!")
+----
+
+A block quote is fenced by `____`, with an optional
+`[quote, Author, Source]` attribution. Its body is paragraphs only:
+
+[quote, Ada Lovelace, Notes]
+____
+That brain of mine is something more than merely mortal, as time will
+show.
+____
+
+Admonitions call out a NOTE, TIP, IMPORTANT, WARNING, or CAUTION. The
+single-line form is `KIND: text`:
+
+NOTE: This is the single-line admonition form.
+
+The block form pairs a `[KIND]` directive with a `====` fence and an
+inline-only body:
+
+[TIP]
+====
+This is the block admonition form.
+====
+
+A table is fenced by `|===`; each `|cell` is single-line and
+inline-only. The first row reads as the header:
+
+|===
+|Markup |Renders
+|*stars* |bold text
+|_score_ |italic text
+|===
+
+An image is placed with the `image::file[attrs]` block macro; it renders
+inline, capped at the column width:
+
+image::help-demo.png[Folio demo image,width=160]
