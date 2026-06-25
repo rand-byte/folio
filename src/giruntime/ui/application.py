@@ -60,7 +60,10 @@ Principles & invariants
   primary menu), builds the help window once and reuses it thereafter —
   re-opening :meth:`Gtk.Window.present`-s the existing window rather than
   spawning a duplicate. The help is app-scoped, so the action and the
-  window live here rather than on any per-note widget.
+  window live here rather than on any per-note widget. Reuse depends on
+  the window being **hide-on-close** (set in :class:`HelpWindow` itself):
+  closing it hides rather than destroys it, so the cached reference stays
+  a live window across close/re-open.
 """
 
 from __future__ import annotations

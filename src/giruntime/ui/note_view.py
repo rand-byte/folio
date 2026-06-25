@@ -87,7 +87,7 @@ Principles & invariants
   chrome. (Same lifecycle invariant the rest of this docstring states
   for the widget tree.)
 * The article's :class:`Gtk.TextView` is a private subclass
-  :class:`_ArticleTextView` that paints tinted block backgrounds
+  :class:`ArticleTextView` that paints tinted block backgrounds
   (admonition, blockquote, code block) at snapshot time. The
   paragraph tags from :mod:`ui.note_render.tag_table` deliberately
   carry only the *text position* (``accumulative-margin = True`` plus
@@ -117,8 +117,8 @@ Principles & invariants
   meets the desk at a visible edge above and below (and a note taller than
   the viewport reveals the bottom edge when scrolled down — see
   :func:`ui.note_render.tag_table.build_sheet_wash`,
-  :func:`_sheet_rect_for`, :meth:`_ArticleTextView.set_top_gap_px`,
-  and :meth:`_ArticleTextView.set_end_gap_px`).
+  :func:`_sheet_rect_for`, :meth:`ArticleTextView.set_top_gap_px`,
+  and :meth:`ArticleTextView.set_end_gap_px`).
 * The size-allocate vfunc — *not* the ``size-allocate`` signal, which is
   deprecated in GTK 4 — is the documented place to react to a fresh
   allocation. :meth:`ArticleContainer.do_size_allocate` configures the
@@ -188,7 +188,7 @@ Principles & invariants
   :attr:`_current_note` before the render so the hook can read it).
   A note with no tags shows only the two dates. A thin horizontal rule
   separating the metadata from the body is painted by
-  :class:`_ArticleTextView` as the ``hairline`` wash for the metadata
+  :class:`ArticleTextView` as the ``hairline`` wash for the metadata
   tag (see :func:`ui.note_render.tag_table.build_wash_specs`), so the
   whole rendered-view styling stays in the tag table / wash painter
   and introduces no child widget. Because the right pane is a
@@ -199,7 +199,7 @@ Principles & invariants
 
 # pylint: disable=too-many-lines
 # This step pushed the file past pylint's default 1000-line ceiling
-# because the snapshot-time wash painter (:class:`_ArticleTextView`)
+# because the snapshot-time wash painter (:class:`ArticleTextView`)
 # adds the new subclass, its rect-computation seam, and the wash-spec
 # wiring inside :meth:`NoteView.__init__`. The new class is tightly
 # coupled to the existing :class:`ArticleContainer` / :class:`NoteView`
@@ -309,10 +309,10 @@ at the editor, where the offending line can be corrected.
 
 
 _ARTICLE_TEXT_VIEW_CSS_CLASS: str = "article-text-view"
-"""CSS class applied to :class:`_ArticleTextView` so the bundled
+"""CSS class applied to :class:`ArticleTextView` so the bundled
 stylesheet can make its background (and its text window's background)
 transparent. The view paints its own opaque *sheet* in
-:meth:`_ArticleTextView.do_snapshot`, ending at the note's content, so
+:meth:`ArticleTextView.do_snapshot`, ending at the note's content, so
 the scroller's background shows through below it; if the framework
 painted the view's background it would fill the whole viewport and hide
 that. The class name is stable across releases — the stylesheet that
@@ -344,7 +344,7 @@ _HAIRLINE_THICKNESS_PX: int = 1
 """Height, in pixels, of the hairline rule the wash painter draws at
 the bottom of a :class:`WashSpec` flagged ``hairline`` (the metadata
 line's divider). Painted as a 1-px band rather than a full-height
-fill — see :meth:`_ArticleTextView._wash_rect_for_line`."""
+fill — see :meth:`ArticleTextView._wash_rect_for_line`."""
 
 
 _HSCROLL_STEP_FRACTION: float = 0.1
@@ -522,7 +522,7 @@ class _WidgetXMetrics:
     """Horizontal layout metrics for the article text view, captured once
     per snapshot.
 
-    :class:`_ArticleTextView` reads three GTK getters
+    :class:`ArticleTextView` reads three GTK getters
     (:meth:`Gtk.Widget.get_width`, :meth:`Gtk.TextView.get_left_margin`,
     :meth:`Gtk.TextView.get_right_margin`) on every paint. Bundling the
     three into one frozen value lets the per-line rect computation
@@ -538,7 +538,7 @@ class _WidgetXMetrics:
     right_margin: int
 
 
-class _ArticleTextView(Gtk.TextView):
+class ArticleTextView(Gtk.TextView):
     """A :class:`Gtk.TextView` subclass that paints wider washes for tinted block paragraphs.
 
     The paragraph tags in :mod:`ui.note_render.tag_table`
@@ -629,6 +629,29 @@ class _ArticleTextView(Gtk.TextView):
         paint. Calling this replaces the previous map outright.
         """
         self._wash_specs_by_tag = specs_by_tag
+
+    def install_wash_specs_from_table(
+        self, tag_table: Gtk.TextTagTable,
+    ) -> None:
+        """Build the wash-spec map from ``tag_table`` and install it.
+
+        The one place that translates :func:`build_wash_specs` (keyed by
+        :class:`TagName`) into the :class:`Gtk.TextTag`-keyed map
+        :meth:`install_wash_specs` wants, resolving each name against
+        ``tag_table``. Every consumer that wants the standard block
+        tints (the note view *and* the help window) calls this rather
+        than re-deriving the loop, so the two cannot drift in how they
+        wire the painter. ``lookup`` returns ``None`` only for an unknown
+        tag name; every key in :func:`build_wash_specs` is registered by
+        :func:`build_tag_table`, so the lookups succeed — the defensive
+        filter merely keeps the type narrow.
+        """
+        specs_by_tag: dict[Gtk.TextTag, WashSpec] = {}
+        for tag_name, spec in build_wash_specs().items():
+            tag = tag_table.lookup(tag_name.value)
+            if tag is not None:
+                specs_by_tag[tag] = spec
+        self.install_wash_specs(specs_by_tag)
 
     def set_top_gap_px(self, top_gap_px: int) -> None:
         """Set the desk band (in px) reserved above the painted sheet.
@@ -909,7 +932,7 @@ def _format_metadata_line(
 def _rgba_from_tint(tint: tuple[float, float, float, float]) -> Gdk.RGBA:
     """Build a :class:`Gdk.RGBA` from a 4-tuple of floats in ``[0, 1]``.
 
-    Used by :class:`_ArticleTextView` to translate a
+    Used by :class:`ArticleTextView` to translate a
     :class:`ui.note_render.tag_table.WashSpec`'s tint into the
     colour type :meth:`Gtk.Snapshot.append_color` expects. A free
     function (rather than a static method on the subclass) so the
@@ -1418,6 +1441,130 @@ def _translate_x_transform(dx: int) -> Gsk.Transform | None:
     return Gsk.Transform.new().translate(point)
 
 
+@dataclass(frozen=True)
+class ArticleSurface:
+    """The shared fixed-width article reading surface.
+
+    Bundles everything that makes a rendered note *look* like a note: the
+    painted :class:`ArticleTextView` (which draws the paper sheet and the
+    block-tint washes), its buffer and tag table, and the fixed-width
+    :class:`ArticleContainer` that wraps the view (child already set,
+    the four font-relative margins and the desk gaps already applied).
+
+    Both :class:`NoteView` and :class:`giruntime.ui.help_window.HelpWindow`
+    build their reading surface from :func:`build_article_surface`, so a
+    note and the help reference share one column geometry: same centred
+    fixed-width column on a desk, same paper sheet, and — because the
+    block-tint washes are painted relative to that column — the same
+    correctly-placed admonition / blockquote / code tints. The renderer
+    is *not* built here (its image resolver differs per caller); the
+    surface exposes the :attr:`tag_table` and
+    :attr:`container` the caller passes into its own
+    :class:`TextBufferRenderer`.
+
+    The container is held so callers can read
+    :meth:`ArticleContainer.text_column_width` for the renderer and parent
+    the container into a :class:`Gtk.ScrolledWindow`;
+    :attr:`outer_column_width_px` is the cached outer width (for sizing a
+    host window) so a caller that only needs the number need not retain
+    the widget.
+    """
+
+    text_view: ArticleTextView
+    buffer: Gtk.TextBuffer
+    tag_table: Gtk.TextTagTable
+    container: ArticleContainer
+    outer_column_width_px: int
+
+
+def _apply_article_margins(
+    container: ArticleContainer, text_view: ArticleTextView,
+) -> None:
+    """Set the four font-relative margins (plus desk gaps) on ``text_view``.
+
+    All four are font-relative: top / bottom are multiples of the
+    measured line height, left / right of the measured "M" width.
+    Reading the cached values back from ``container`` (rather than calling
+    the measurer callables again) ties the column width and the inner
+    padding to the *same* M-width measurement so they cannot drift.
+
+    The top and bottom margins are each the breathing space *plus* the
+    same desk gap: the sheet painted by :class:`ArticleTextView` covers
+    only the breathing lines, so the extra ``end_gap_px`` at each end is
+    room the sheet does not claim, showing the desk with an equal gap
+    before and after the note (at the bottom this doubles as scrollable
+    room that reveals a long note's end). The gap is set on the view
+    alongside both margins so the three cannot drift — see
+    :data:`config.defaults.ARTICLE_END_GAP_LINES`.
+    """
+    char_w = container.char_width_px()
+    line_h = container.line_height_px()
+    end_gap_px = round(ARTICLE_END_GAP_LINES * line_h)
+    text_view.set_left_margin(ARTICLE_INNER_HPADDING_CHARS * char_w)
+    text_view.set_right_margin(ARTICLE_INNER_HPADDING_CHARS * char_w)
+    text_view.set_top_margin(ARTICLE_TOP_MARGIN_LINES * line_h + end_gap_px)
+    text_view.set_bottom_margin(
+        ARTICLE_BOTTOM_MARGIN_LINES * line_h + end_gap_px,
+    )
+    text_view.set_top_gap_px(end_gap_px)
+    text_view.set_end_gap_px(end_gap_px)
+
+
+def build_article_surface() -> ArticleSurface:
+    """Build the shared fixed-width article reading surface.
+
+    The single constructor for the "rendered note" surface, used by both
+    the note view and the help window so they render identically. Steps,
+    in the order the dependencies require:
+
+    1. a read-only, word-wrapping :class:`ArticleTextView` (the painter of
+       the sheet + washes);
+    2. the body-font measurers (M-width + line height) off that view's
+       Pango context — :func:`_build_font_measurers` is the single seam
+       tests stub;
+    3. the shared tag table, parameterised by the measured M-width, and a
+       buffer on it;
+    4. the block-tint wash map, installed via the one shared seam
+       :meth:`ArticleTextView.install_wash_specs_from_table`;
+    5. the fixed-width :class:`ArticleContainer` wrapping the view, with
+       the four font-relative margins + desk gaps applied.
+
+    Returns the bundle; the caller owns the renderer (its image resolver
+    is caller-specific) and parents :attr:`ArticleSurface.container` into
+    its own scroller.
+    """
+    text_view = ArticleTextView()
+    text_view.set_editable(False)
+    text_view.set_cursor_visible(False)
+    text_view.set_wrap_mode(Gtk.WrapMode.WORD_CHAR)
+    text_view.set_hexpand(True)
+    text_view.set_vexpand(True)
+
+    char_width_measurer, line_height_measurer = _build_font_measurers(
+        text_view,
+    )
+
+    tag_table = build_tag_table(char_width_px=char_width_measurer())
+    buffer = Gtk.TextBuffer.new(tag_table)
+    text_view.set_buffer(buffer)
+    text_view.install_wash_specs_from_table(tag_table)
+
+    container = ArticleContainer(
+        char_width_measurer=char_width_measurer,
+        line_height_measurer=line_height_measurer,
+    )
+    container.set_child(text_view)
+    _apply_article_margins(container, text_view)
+
+    return ArticleSurface(
+        text_view=text_view,
+        buffer=buffer,
+        tag_table=tag_table,
+        container=container,
+        outer_column_width_px=container.outer_column_width(),
+    )
+
+
 class NoteView(Gtk.Box):
     # pylint: disable=too-many-instance-attributes
     """The rendered-note pane.
@@ -1464,47 +1611,12 @@ class NoteView(Gtk.Box):
     _attachments: AttachmentStoreProtocol | None
     _app_state: AppState
     _buffer: Gtk.TextBuffer
-    _text_view: _ArticleTextView
+    _text_view: ArticleTextView
     _renderer: TextBufferRenderer
     _current_note_id: str | None
     _current_note: Note | None
     _error_message: str | None
     _outer_column_width_px: int
-
-    def _apply_article_margins(
-        self, article_container: ArticleContainer,
-    ) -> None:
-        """Set the four font-relative margins on the rendered-view text view.
-
-        All four are font-relative: top / bottom are multiples of the
-        measured line height, left / right of the measured "M" width.
-        Reading the cached values back from ``article_container`` (rather
-        than calling the measurer callables directly) ties the column
-        width and the inner padding to the *same* M-width measurement so
-        they cannot drift.
-
-        The top and bottom margins are each the breathing space *plus* the
-        same desk gap: the sheet painted by :class:`_ArticleTextView`
-        covers only the breathing lines, so the extra ``end_gap_px`` at
-        each end is room the sheet does not claim, showing the desk
-        with an equal gap before and after the note (at the bottom this
-        doubles as scrollable room that reveals a long note's end). The gap
-        is set on the view alongside both margins so the three cannot drift
-        — see :data:`config.defaults.ARTICLE_END_GAP_LINES`.
-        """
-        char_w = article_container.char_width_px()
-        line_h = article_container.line_height_px()
-        end_gap_px = round(ARTICLE_END_GAP_LINES * line_h)
-        self._text_view.set_left_margin(ARTICLE_INNER_HPADDING_CHARS * char_w)
-        self._text_view.set_right_margin(ARTICLE_INNER_HPADDING_CHARS * char_w)
-        self._text_view.set_top_margin(
-            ARTICLE_TOP_MARGIN_LINES * line_h + end_gap_px,
-        )
-        self._text_view.set_bottom_margin(
-            ARTICLE_BOTTOM_MARGIN_LINES * line_h + end_gap_px,
-        )
-        self._text_view.set_top_gap_px(end_gap_px)
-        self._text_view.set_end_gap_px(end_gap_px)
 
     def __init__(
         self,
@@ -1533,79 +1645,21 @@ class NoteView(Gtk.Box):
         # :meth:`refresh` and :meth:`_insert_error_notice`.
         self._error_message = None
 
-        # Build the text-rendering widget *before* the tag table so we
-        # have a Pango context to measure the M-width against. The
-        # subclass :class:`_ArticleTextView` adds the snapshot-time
-        # wash painter on top of the standard :class:`Gtk.TextView`
-        # behaviour; everything below treats it as a regular text view
-        # because that is the type-correct view.
-        self._text_view = _ArticleTextView()
-        self._text_view.set_editable(False)
-        self._text_view.set_cursor_visible(False)
-        self._text_view.set_wrap_mode(Gtk.WrapMode.WORD_CHAR)
-        # The text view itself fills the inner column. Vertical expand
-        # is what gives the scroller something to scroll.
-        self._text_view.set_hexpand(True)
-        self._text_view.set_vexpand(True)
-
-        # Measure the body font's M-width and line-height now — both
-        # the tag table (for paragraph margins) and the article
-        # container (for the column width) need it.
-        char_width_measurer, line_height_measurer = _build_font_measurers(
-            self._text_view,
-        )
-
-        # Build the tag table parameterised by the measured M-width so
-        # the paragraph margins encode "inset + M-width" — see
-        # :class:`ui.note_render.tag_table.WashSpec` for the split
-        # between text position (tag margins) and wash position
-        # (paint-time, in :class:`_ArticleTextView`).
-        tag_table = build_tag_table(char_width_px=char_width_measurer())
-        self._buffer = Gtk.TextBuffer.new(tag_table)
-        self._text_view.set_buffer(self._buffer)
-
-        # Translate the wash-spec map (keyed by :class:`TagName`) to a
-        # map keyed by :class:`Gtk.TextTag` objects so the snapshot
-        # path can membership-test in O(1) without re-resolving tag
-        # names on every paint. ``lookup`` returns ``None`` only for
-        # an unknown tag name; every key in :func:`build_wash_specs`
-        # is registered in the table by :func:`build_tag_table`, so
-        # the lookups always succeed — but a defensive filter keeps
-        # the type narrow.
-        wash_specs_by_tag: dict[Gtk.TextTag, WashSpec] = {}
-        for tag_name, spec in build_wash_specs().items():
-            tag = tag_table.lookup(tag_name.value)
-            if tag is not None:
-                wash_specs_by_tag[tag] = spec
-        self._text_view.install_wash_specs(wash_specs_by_tag)
-
-        # The article container: a fixed-width column wrapping the
-        # text view. Production wires the two measurers (M-width and
-        # line-height) — see :func:`_build_font_measurers` for the
-        # single seam tests monkey-patch. We pass the *same*
-        # measurer callables that already ran above; their results
-        # are cached on first call inside the container, so this is
-        # not a double measurement.
-        article_container = ArticleContainer(
-            char_width_measurer=char_width_measurer,
-            line_height_measurer=line_height_measurer,
-        )
-        article_container.set_child(self._text_view)
-
-        # Cache the outer column width as a plain ``int`` (the widget
-        # itself is not retained — see the stored-fields note above).
-        # :class:`MainWindow` reads this via
-        # :meth:`preferred_column_width_px` to size the initial window
-        # so the column fits without a horizontal scroll. Caching the
-        # derived value keeps it tied to the *same* M-width measurement
-        # the column and margins already use, so the window cannot drift
-        # from the column it renders.
-        self._outer_column_width_px = article_container.outer_column_width()
-
-        # The four font-relative margins on the rendered-view text view,
-        # plus the end-gap desk band, applied in one place — see
-        # :meth:`_apply_article_margins`.
-        self._apply_article_margins(article_container)
+        # The shared fixed-width article surface: the painted text view
+        # (sheet + washes), its buffer + tag table, and the
+        # :class:`ArticleContainer` that gives the column its width, desk
+        # margins, and centring. The help window builds the *same* surface
+        # so a note and the help reference render identically — see
+        # :func:`build_article_surface`.
+        surface = build_article_surface()
+        self._text_view = surface.text_view
+        self._buffer = surface.buffer
+        # Cache the outer column width as a plain ``int`` (the container
+        # widget is not retained on ``self`` — it is kept alive by the
+        # scroller below). :class:`MainWindow` reads this via
+        # :meth:`preferred_column_width_px` to size the initial window so
+        # the column fits without a horizontal scroll.
+        self._outer_column_width_px = surface.outer_column_width_px
 
         # ----- Metadata line -----
         # The dim-grey metadata line (Created · Modified · #tags) is
@@ -1613,18 +1667,19 @@ class NoteView(Gtk.Box):
         # renderer's post-title hook (see
         # :meth:`_insert_metadata_after_title`). There is no widget to
         # build here — the text lives in the buffer and the hairline
-        # rule below it is painted by :class:`_ArticleTextView`.
+        # rule below it is painted by :class:`ArticleTextView`.
 
         # The scroller: AUTOMATIC on both axes. Vertical scrolling is
         # the prose-reading direction; horizontal kicks in only when
         # the window is too narrow to fit the column at its target
-        # width.
+        # width. The container is the scroller's direct child (it is a
+        # ``Gtk.Scrollable``), so no ``Gtk.Viewport`` is interposed.
         scrolled_window = Gtk.ScrolledWindow.new()
         scrolled_window.set_policy(
             Gtk.PolicyType.AUTOMATIC,
             Gtk.PolicyType.AUTOMATIC,
         )
-        scrolled_window.set_child(article_container)
+        scrolled_window.set_child(surface.container)
         scrolled_window.set_hexpand(True)
         scrolled_window.set_vexpand(True)
         self.append(scrolled_window)
@@ -1639,8 +1694,8 @@ class NoteView(Gtk.Box):
         # widget's outer footprint.
         self._renderer = TextBufferRenderer(
             image_bytes_for=self._resolve_image_bytes,
-            column_width_px=article_container.text_column_width,
-            tag_table=tag_table,
+            column_width_px=surface.container.text_column_width,
+            tag_table=surface.tag_table,
         )
 
         # Subscribe to the selected-note signal. The handler is a bound

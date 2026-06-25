@@ -14,6 +14,8 @@ from enums import HelpSection, SystemDocument
 from giruntime.ui.application import NotesApplication
 from giruntime.ui.help_window import HelpWindow, _section_mark_name
 from giruntime.ui.link_handler import UriLauncherProtocol
+from giruntime.ui.note_render.tag_table import build_wash_specs
+from giruntime.ui.note_view import ArticleContainer, ArticleTextView
 from giruntime.ui.test_main_window import _display_available, _test_application
 from models.parse_error import ParseError
 from system_docs import load_bytes, load_text
@@ -269,6 +271,57 @@ class HelpWindowTests(unittest.TestCase):
             found_paintable,
             "the demo image did not render as an inline paintable",
         )
+
+    def test_view_is_the_shared_painted_view(self) -> None:
+        # The help renders into the same painted subclass the note view
+        # uses (:class:`ArticleTextView`), which is what paints the
+        # opaque "paper" sheet behind the content. A plain
+        # :class:`Gtk.TextView` — the pre-fix state — painted no sheet,
+        # so the help looked flat rather than like a rendered note.
+        window = self._build_window()
+        self.assertIsInstance(window.text_view, ArticleTextView)
+
+    def test_view_is_wrapped_in_a_fixed_width_column(self) -> None:
+        # Fidelity with the note view's paper-on-desk look depends on the
+        # text view living inside the shared fixed-width
+        # :class:`ArticleContainer` (which centres the column on a desk and
+        # gives the washes the column geometry they are painted against).
+        # Before this, the help put the bare text view straight in the
+        # scroller, so it filled the pane edge-to-edge with no desk and
+        # over-wide tints.
+        window = self._build_window()
+        self.assertIsInstance(window.text_view.get_parent(), ArticleContainer)
+
+    def test_block_tints_are_installed(self) -> None:
+        # Block tints (admonition / blockquote / code-block washes) are
+        # painted by the view from an installed wash-spec map, *not* by
+        # the tag table (which only positions text). The pre-fix help
+        # installed no map, so its admonitions rendered untinted — the
+        # exact symptom in the bug report. Assert every spec from the
+        # single source resolved against the help's tag table and got
+        # installed, so no block kind can render flat.
+        window = self._build_window()
+        view = window.text_view
+        assert isinstance(view, ArticleTextView)
+        installed = view._wash_specs_by_tag
+        self.assertEqual(len(installed), len(build_wash_specs()))
+
+    def test_window_hides_rather_than_destroys_on_close(self) -> None:
+        # Reuse-and-raise (owned by the application) only holds if the one
+        # built window *hides* on close instead of being destroyed —
+        # otherwise the cached reference becomes a disposed, chrome-less
+        # window whose close button is dead on the second open.
+        window = self._build_window()
+        self.assertTrue(window.get_hide_on_close())
+
+    def test_buffer_survives_a_close(self) -> None:
+        # Concretely: closing the (hide-on-close) window leaves the same
+        # instance alive with its rendered content intact, ready to be
+        # re-presented — the behaviour the destroy-on-close default broke.
+        window = self._build_window()
+        before = window.rendered_text
+        window.close()
+        self.assertEqual(window.rendered_text, before)
 
 
 # ---------------------------------------------------------------------------

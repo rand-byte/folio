@@ -28,7 +28,6 @@ from giruntime.controllers.note_list_store import NoteListStore
 from giruntime.ui import note_view as note_view_module
 from giruntime.ui.note_render.tag_table import (
     TagName,
-    WashSpec,
     admonition_body_tag_name,
     build_sheet_wash,
     build_tag_table,
@@ -39,7 +38,7 @@ from giruntime.ui.note_view import (
     CharWidthMeasurer,
     LineHeightMeasurer,
     NoteView,
-    _ArticleTextView,
+    ArticleTextView,
     _FALLBACK_CHAR_WIDTH_PX,
     _FALLBACK_LINE_HEIGHT_PX,
     _HAIRLINE_THICKNESS_PX,
@@ -48,6 +47,7 @@ from giruntime.ui.note_view import (
     _placeholder_image_bytes,
     _rgba_from_tint,
     _sheet_rect_for,
+    build_article_surface,
 )
 from giruntime.ui._dates import format_date_long
 
@@ -1883,10 +1883,10 @@ class NoteViewErrorNoticeTests(unittest.TestCase):
 
 
 # ---------------------------------------------------------------------------
-# _ArticleTextView wash-painting tests
+# ArticleTextView wash-painting tests
 # ---------------------------------------------------------------------------
 #
-# The :meth:`_ArticleTextView._compute_wash_rects` method is the test
+# The :meth:`ArticleTextView._compute_wash_rects` method is the test
 # seam: it returns the list of ``(colour, rect)`` pairs the snapshot
 # painter would append, without driving GTK's snapshot machinery. The
 # tests below exercise it directly. The plain :class:`Gtk.TextView`
@@ -1897,28 +1897,23 @@ class NoteViewErrorNoticeTests(unittest.TestCase):
 
 
 def _build_article_text_view_with_buffer() -> tuple[
-    _ArticleTextView, Gtk.TextBuffer, Gtk.TextTagTable,
+    ArticleTextView, Gtk.TextBuffer, Gtk.TextTagTable,
 ]:
-    """Construct a wired :class:`_ArticleTextView` for direct testing.
+    """Construct a wired :class:`ArticleTextView` for direct testing.
 
     Builds a tag table (with the same M-width fake used elsewhere in
     this module, ``9``), attaches a buffer to a fresh
-    :class:`_ArticleTextView`, and installs the wash specs translated
-    to :class:`Gtk.TextTag` keys — the exact wiring
-    :class:`NoteView` performs. Returns the trio so individual tests
-    can populate the buffer with tagged content and probe the
-    painter.
+    :class:`ArticleTextView`, and installs the wash specs via the same
+    :meth:`ArticleTextView.install_wash_specs_from_table` seam
+    :class:`NoteView` and :class:`HelpWindow` use. Returns the trio so
+    individual tests can populate the buffer with tagged content and
+    probe the painter.
     """
     table = build_tag_table(char_width_px=9)
-    text_view = _ArticleTextView()
+    text_view = ArticleTextView()
     buffer = Gtk.TextBuffer.new(table)
     text_view.set_buffer(buffer)
-    specs_by_tag: dict[Gtk.TextTag, WashSpec] = {}
-    for tag_name, spec in build_wash_specs().items():
-        tag = table.lookup(tag_name.value)
-        if tag is not None:
-            specs_by_tag[tag] = spec
-    text_view.install_wash_specs(specs_by_tag)
+    text_view.install_wash_specs_from_table(table)
     return text_view, buffer, table
 
 
@@ -1943,8 +1938,88 @@ def _apply_tag_across_line(
 
 
 @unittest.skipUnless(_display_available(), "no GDK display")
+class BuildArticleSurfaceTests(unittest.TestCase):
+    """The shared article-surface constructor.
+
+    :func:`build_article_surface` is the single place that assembles the
+    "rendered note" surface both :class:`NoteView` and
+    :class:`giruntime.ui.help_window.HelpWindow` build on, so they render
+    identically. The surface must come back fully wired: the painted view
+    parented into a fixed-width :class:`ArticleContainer`, the block-tint
+    washes installed, the font-relative margins applied, and the outer
+    column width cached. Font dimensions are stubbed (10 px M, 20 px line)
+    so the margin assertions are exact.
+    """
+
+    def _build(self) -> note_view_module.ArticleSurface:
+        with mock.patch.object(
+            note_view_module,
+            "_build_font_measurers",
+            _stub_font_measurers_factory(char_w=10, line_h=20),
+        ):
+            return build_article_surface()
+
+    def test_view_is_parented_into_a_fixed_width_container(self) -> None:
+        surface = self._build()
+        self.assertIsInstance(surface.text_view, ArticleTextView)
+        self.assertIsInstance(surface.container, ArticleContainer)
+        self.assertIs(surface.text_view.get_parent(), surface.container)
+
+    def test_block_tints_are_installed(self) -> None:
+        surface = self._build()
+        self.assertEqual(
+            len(surface.text_view._wash_specs_by_tag), len(build_wash_specs()),
+        )
+
+    def test_outer_column_width_matches_the_container(self) -> None:
+        surface = self._build()
+        self.assertEqual(
+            surface.outer_column_width_px,
+            surface.container.outer_column_width(),
+        )
+
+    def test_font_relative_margins_are_applied(self) -> None:
+        surface = self._build()
+        view = surface.text_view
+        self.assertEqual(
+            view.get_left_margin(), ARTICLE_INNER_HPADDING_CHARS * 10,
+        )
+        self.assertEqual(
+            view.get_right_margin(), ARTICLE_INNER_HPADDING_CHARS * 10,
+        )
+        end_gap_px = round(ARTICLE_END_GAP_LINES * 20)
+        self.assertEqual(
+            view.get_top_margin(), ARTICLE_TOP_MARGIN_LINES * 20 + end_gap_px,
+        )
+        self.assertEqual(
+            view.get_bottom_margin(),
+            ARTICLE_BOTTOM_MARGIN_LINES * 20 + end_gap_px,
+        )
+
+
+@unittest.skipUnless(_display_available(), "no GDK display")
+class InstallWashSpecsFromTableTests(unittest.TestCase):
+    """The shared seam that wires the block-tint painter.
+
+    :meth:`ArticleTextView.install_wash_specs_from_table` is the single
+    place that translates the :class:`TagName`-keyed
+    :func:`build_wash_specs` map into the :class:`Gtk.TextTag`-keyed map
+    the painter membership-tests against. Both the note view and the
+    help window call it, so it must resolve *every* spec against a
+    standard tag table — a dropped name would silently leave one block
+    kind untinted.
+    """
+
+    def test_installs_a_spec_for_every_wash_name(self) -> None:
+        text_view, _buffer, _table = _build_article_text_view_with_buffer()
+        self.assertEqual(
+            len(text_view._wash_specs_by_tag), len(build_wash_specs()),
+        )
+
+
+@unittest.skipUnless(_display_available(), "no GDK display")
 class ArticleTextViewWashRectTests(unittest.TestCase):
-    """Drive :meth:`_ArticleTextView._compute_wash_rects` directly.
+    """Drive :meth:`ArticleTextView._compute_wash_rects` directly.
 
     Without wash-bearing tags applied, the painter must produce no
     rects (empty buffer included). With one wash-bearing tag applied
@@ -2027,13 +2102,13 @@ class ArticleTextViewWashRectTests(unittest.TestCase):
         self.assertEqual(text_view._compute_wash_rects(), [])
 
     def test_no_wash_specs_installed_produces_no_rects(self) -> None:
-        # The default state of :class:`_ArticleTextView` (before
+        # The default state of :class:`ArticleTextView` (before
         # :meth:`install_wash_specs` is called) is "no specs", so the
         # painter is a no-op. This is the right behaviour for tests
         # that construct the subclass standalone, and for the brief
         # window between constructor and wash-spec install.
         table = build_tag_table(char_width_px=9)
-        text_view = _ArticleTextView()
+        text_view = ArticleTextView()
         buffer = Gtk.TextBuffer.new(table)
         text_view.set_buffer(buffer)
         buffer.set_text("anything\n")
@@ -2136,7 +2211,7 @@ def _tuple_of(rgba: Gdk.RGBA) -> tuple[float, float, float, float]:
 
 @unittest.skipUnless(_display_available(), "no GDK display")
 class ArticleTextViewSheetBottomTests(unittest.TestCase):
-    """Drive :meth:`_ArticleTextView._sheet_bottom_px` on a live view.
+    """Drive :meth:`ArticleTextView._sheet_bottom_px` on a live view.
 
     The pure rect math is covered by :class:`SheetAndSeamRectTests`;
     these cover the part that needs a real :class:`Gtk.TextView` — the
@@ -2206,7 +2281,7 @@ class ArticleTextViewSheetBottomTests(unittest.TestCase):
 
 @unittest.skipUnless(_display_available(), "no GDK display")
 class ArticleTextViewSheetTopTests(unittest.TestCase):
-    """Drive :meth:`_ArticleTextView._sheet_top_px` on a live view.
+    """Drive :meth:`ArticleTextView._sheet_top_px` on a live view.
 
     The mirror of :class:`ArticleTextViewSheetBottomTests`: the pure rect
     math is covered by :class:`SheetAndSeamRectTests`, so these cover the

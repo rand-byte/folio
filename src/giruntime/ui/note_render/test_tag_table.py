@@ -32,7 +32,7 @@ _TEST_CHAR_WIDTH_PX: int = 9
 
 # Tag names that *used* to carry ``paragraph-background-rgba`` directly
 # on the tag. The wash for these blocks is now painted at snapshot time
-# by :class:`_ArticleTextView` (see :func:`build_wash_specs`), so the
+# by :class:`ArticleTextView` (see :func:`build_wash_specs`), so the
 # tags must *not* set ``paragraph-background-rgba`` — the inverted test
 # below (:class:`ParagraphBackgroundIsNotOnTagsTests`) pins that
 # invariant. Listed in one place here so a future "new block kind with
@@ -377,7 +377,7 @@ class ParagraphBackgroundIsNotOnTagsTests(unittest.TestCase):
     ``paragraph-background-set = False``. If a future change adds a
     wash directly to a tag, it will fire here — the message is that
     the wash should be painted via :func:`build_wash_specs` and
-    :class:`_ArticleTextView` instead.
+    :class:`ArticleTextView` instead.
     """
 
     def setUp(self) -> None:

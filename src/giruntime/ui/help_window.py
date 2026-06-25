@@ -8,15 +8,29 @@ Principles & invariants
   keeps typing, so it must never block the main window. It is a
   :class:`Gtk.ApplicationWindow` owned by the :class:`Gtk.Application`,
   which keeps the **single** instance and raises it on re-open (the
-  reuse-and-raise lives in the application, not here).
+  reuse-and-raise lives in the application, not here). For that reuse to
+  hold the window is **hide-on-close**, not destroy-on-close
+  (:meth:`Gtk.Window.set_hide_on_close`): closing hides the one built
+  instance and re-opening re-:meth:`present`-s it, so the cached
+  reference never becomes a disposed window (which would re-present as a
+  chrome-less window with a dead close button).
 * The help **dogfoods the format**: its content is authored in the
   supported subset itself (``system_docs/help.adoc``) and rendered
   through the very same pipeline a note uses —
   :func:`asciidoc.parser.parse` →
   :class:`giruntime.ui.note_render.textbuffer_renderer.TextBufferRenderer`
-  → the shared :mod:`giruntime.ui.note_render.tag_table` styling. There
-  is no second renderer and no second tag table; the help looks exactly
-  like a rendered note because it *is* one.
+  → the shared :mod:`giruntime.ui.note_render.tag_table` styling — into
+  the very same painted view,
+  :class:`giruntime.ui.note_view.ArticleTextView`. That subclass is what
+  paints the opaque "paper" sheet behind the content **and** the block
+  tints (admonition / blockquote / code-block washes) at snapshot time;
+  the tag table only positions the text, so a plain
+  :class:`Gtk.TextView` would render those blocks untinted and on no
+  sheet. There is no second renderer, no second tag table, and no second
+  painter — the help looks exactly like a rendered note because it *is*
+  one. The block tints are wired via
+  :meth:`ArticleTextView.install_wash_specs_from_table`, the same one
+  seam the note view uses, so the two cannot drift.
 * System documents (the help source and its demo image) are read gi-free
   from the ``system_docs`` package via :func:`system_docs.load_text` /
   :func:`system_docs.load_bytes`. The window never touches the database
@@ -57,24 +71,25 @@ Principles & invariants
   renderer, the launcher factory, and the system-document bytes are all
   injectable, and every navigation seam is a plain method tests can drive.
 * GTK 4.18 currency: :class:`Gtk.ApplicationWindow`, :class:`Gtk.Paned`,
-  :class:`Gtk.ListBox`, :meth:`Gtk.TextView.scroll_to_mark`,
+  :class:`Gtk.ListBox`, :meth:`Gtk.Window.set_hide_on_close`,
+  :meth:`Gtk.TextView.scroll_to_mark`,
   :meth:`Gtk.TextBuffer.create_mark` — no methods deprecated in 4.18 or
   earlier.
 """
 
 from __future__ import annotations
 
-from gi.repository import Gtk, Pango
+from gi.repository import Gtk
 
-from config.defaults import TARGET_CHARS_PER_LINE
 from enums import HelpSection, SystemDocument
 from giruntime.ui.link_handler import (
     LinkHandler,
     UriLauncherFactory,
     default_launcher_factory,
 )
-from giruntime.ui.note_render.tag_table import TagName, build_tag_table
+from giruntime.ui.note_render.tag_table import TagName
 from giruntime.ui.note_render.textbuffer_renderer import TextBufferRenderer
+from giruntime.ui.note_view import ArticleTextView, build_article_surface
 from system_docs import load_bytes, load_text
 
 
@@ -85,14 +100,24 @@ from system_docs import load_bytes, load_text
 _WINDOW_TITLE: str = "Folio Help"
 """Title shown in the help window's title bar."""
 
-_DEFAULT_WINDOW_WIDTH_PX: int = 760
+_DEFAULT_WINDOW_MIN_WIDTH_PX: int = 760
 _DEFAULT_WINDOW_HEIGHT_PX: int = 680
-"""Initial size of the help window. Wide enough for the fixed reading
-column plus the contents sidebar; tall enough to read a section without
-immediate scrolling."""
+"""Initial size of the help window. The width is normally derived from
+the article column (see :data:`_CONTENT_DESK_SLACK_PX`); this floor keeps
+the window usable if a very small body font yields a narrow column. Tall
+enough to read a section without immediate scrolling."""
 
 _SIDEBAR_WIDTH_PX: int = 200
 """Initial width of the contents sidebar pane."""
+
+_CONTENT_DESK_SLACK_PX: int = 96
+"""Extra width beyond the article column in the content pane.
+
+The content pane holds the fixed-width article column centred on its
+"desk"; this slack is the desk that shows on either side of the column at
+the initial size (plus a little room for the paned handle), so the help
+opens with the same paper-on-desk framing a note has rather than a column
+flush to the pane edges."""
 
 _HELP_NOTE_ID: str = "help"
 """Synthetic ``note_id`` handed to the renderer.
@@ -100,18 +125,6 @@ _HELP_NOTE_ID: str = "help"
 The renderer's :meth:`TextBufferRenderer.render_into` takes a ``note_id``
 for future caching/diagnostics; the help is not a database note, so a
 stable synthetic id documents the call site.
-"""
-
-_TEXT_VIEW_HMARGIN_PX: int = 24
-_TEXT_VIEW_VMARGIN_PX: int = 18
-"""Breathing-space margins around the rendered help text."""
-
-_MEASUREMENT_GLYPH: str = "M"
-"""Reference glyph for the body-font width measurement.
-
-Matches the rendered note view's measurement glyph so the help's tag
-table (whose block margins encode an ``M``-width inset) is built against
-the same metric the renderer assumes.
 """
 
 
@@ -144,20 +157,19 @@ class HelpWindow(  # pylint: disable=too-many-instance-attributes
     The instance-attribute count exceeds pylint's default ceiling of
     seven because rendering the help end-to-end legitimately needs the
     buffer, the view, the tag table, the renderer, the link handler, the
-    image-bytes map, the fixed column width, and the navigation triple
-    (the ordered sections, their marks, and the contents list). Splitting
-    them into a helper would obscure the plain "the window holds what it
-    needs to render and navigate" relationship — the same trade-off
+    image-bytes map, and the navigation triple (the ordered sections,
+    their marks, and the contents list). Splitting them into a helper
+    would obscure the plain "the window holds what it needs to render and
+    navigate" relationship — the same trade-off
     :class:`giruntime.ui.note_view.NoteView` makes.
     """
 
     _buffer: Gtk.TextBuffer
-    _text_view: Gtk.TextView
+    _text_view: ArticleTextView
     _tag_table: Gtk.TextTagTable
     _renderer: TextBufferRenderer
     _link_handler: LinkHandler
     _image_bytes: dict[str, bytes]
-    _column_width_px: int
     _sections: tuple[HelpSection, ...]
     _section_marks: dict[HelpSection, Gtk.TextMark]
     _contents_list: Gtk.ListBox
@@ -170,13 +182,18 @@ class HelpWindow(  # pylint: disable=too-many-instance-attributes
     ) -> None:
         super().__init__(application=application)
         self.set_title(_WINDOW_TITLE)
-        self.set_default_size(
-            _DEFAULT_WINDOW_WIDTH_PX,
-            _DEFAULT_WINDOW_HEIGHT_PX,
-        )
         # Non-modal is the default for a top-level window; stated
         # explicitly because it is load-bearing (see the module docstring).
         self.set_modal(False)
+        # Hide-on-close, not destroy-on-close. The application keeps a
+        # single cached instance and re-:meth:`present`-s it on every
+        # re-open (reuse-and-raise). GTK's default close behaviour
+        # *destroys* a window, which would leave the application holding a
+        # disposed instance — re-presenting it shows a chrome-less window
+        # whose close button is dead. Hiding instead keeps the one built
+        # window alive and intact across close/re-open, which is what
+        # makes the reuse-and-raise contract actually hold.
+        self.set_hide_on_close(True)
 
         # The image map is built before the renderer so the resolver
         # closure can read it. The help bundles exactly one demo image.
@@ -186,31 +203,40 @@ class HelpWindow(  # pylint: disable=too-many-instance-attributes
             ),
         }
 
-        # ----- Read-only rendered view -----
-        self._text_view = Gtk.TextView.new()
-        self._text_view.set_editable(False)
-        self._text_view.set_cursor_visible(False)
-        self._text_view.set_wrap_mode(Gtk.WrapMode.WORD_CHAR)
-        self._text_view.set_left_margin(_TEXT_VIEW_HMARGIN_PX)
-        self._text_view.set_right_margin(_TEXT_VIEW_HMARGIN_PX)
-        self._text_view.set_top_margin(_TEXT_VIEW_VMARGIN_PX)
-        self._text_view.set_bottom_margin(_TEXT_VIEW_VMARGIN_PX)
-        self._text_view.set_hexpand(True)
-        self._text_view.set_vexpand(True)
+        # ----- Shared article surface (identical to a rendered note) -----
+        # The whole reading surface — the painted text view (paper sheet +
+        # block-tint washes), its buffer and tag table, and the fixed-width
+        # ``ArticleContainer`` that centres the column on a desk with the
+        # font-relative margins applied — is built by the single shared
+        # constructor the note view also uses. Because the column geometry
+        # is identical, the sheet, the desk framing, and the block tints
+        # (which are painted relative to that column) all land exactly as
+        # they do in a note.
+        surface = build_article_surface()
+        self._text_view = surface.text_view
+        self._tag_table = surface.tag_table
+        self._buffer = surface.buffer
 
-        # Measure the body font once; the tag table's block margins and
-        # the fixed reading column both derive from it.
-        char_width_px = self._measure_char_width_px()
-        self._column_width_px = TARGET_CHARS_PER_LINE * char_width_px
-
-        self._tag_table = build_tag_table(char_width_px=char_width_px)
-        self._buffer = Gtk.TextBuffer.new(self._tag_table)
-        self._text_view.set_buffer(self._buffer)
+        # Size the window to the article column: sidebar + the column's
+        # outer width + a desk band on either side, so the help opens with
+        # the column fully visible and framed, not flush to the pane edges.
+        self.set_default_size(
+            max(
+                _DEFAULT_WINDOW_MIN_WIDTH_PX,
+                _SIDEBAR_WIDTH_PX
+                + surface.outer_column_width_px
+                + _CONTENT_DESK_SLACK_PX,
+            ),
+            _DEFAULT_WINDOW_HEIGHT_PX,
+        )
 
         # ----- Renderer (shared pipeline) -----
+        # The renderer is built per window (its image resolver is
+        # help-specific); it draws against the surface's tag table and the
+        # container's text-column width, exactly as the note view's does.
         self._renderer = TextBufferRenderer(
             image_bytes_for=self._resolve_image_bytes,
-            column_width_px=self._text_column_width,
+            column_width_px=surface.container.text_column_width,
             tag_table=self._tag_table,
         )
 
@@ -234,26 +260,11 @@ class HelpWindow(  # pylint: disable=too-many-instance-attributes
 
         # ----- Two-pane layout: contents sidebar | rendered view -----
         self._contents_list = self._build_contents_list()
-        self.set_child(self._build_layout())
+        self.set_child(self._build_layout(surface.container))
 
     # ------------------------------------------------------------------
     # Construction helpers
     # ------------------------------------------------------------------
-
-    def _measure_char_width_px(self) -> int:
-        """Return the body font's reference-glyph width in pixels.
-
-        Lays out :data:`_MEASUREMENT_GLYPH` in the text view's Pango
-        context (available at construction, before realisation) and
-        returns its logical pixel width — the same metric the rendered
-        note view measures, so the shared tag table's ``M``-width insets
-        match what the renderer assumes.
-        """
-        layout: Pango.Layout = self._text_view.create_pango_layout(
-            _MEASUREMENT_GLYPH,
-        )
-        _, log_rect = layout.get_pixel_extents()
-        return int(log_rect.width)
 
     def _build_contents_list(self) -> Gtk.ListBox:
         """Build the contents sidebar listing the top-level buckets.
@@ -281,12 +292,18 @@ class HelpWindow(  # pylint: disable=too-many-instance-attributes
             contents.select_row(first_row)
         return contents
 
-    def _build_layout(self) -> Gtk.Paned:
+    def _build_layout(self, content_child: Gtk.Widget) -> Gtk.Paned:
         """Compose the sidebar and the scrolled rendered view.
 
         A :class:`Gtk.Paned` lets the reader widen either pane; the
         sidebar starts at :data:`_SIDEBAR_WIDTH_PX`. Both panes scroll
-        independently.
+        independently. ``content_child`` is the article surface's
+        :class:`giruntime.ui.note_view.ArticleContainer` — a
+        :class:`Gtk.Scrollable`, so the scrolled window keeps it as its
+        **direct** child and interposes no :class:`Gtk.Viewport` (the
+        container forwards vertical scrolling to the text view and owns
+        the horizontal column centring), exactly as the note view's pane
+        does.
         """
         sidebar_scroller = Gtk.ScrolledWindow.new()
         sidebar_scroller.set_policy(
@@ -300,7 +317,7 @@ class HelpWindow(  # pylint: disable=too-many-instance-attributes
             Gtk.PolicyType.AUTOMATIC,
             Gtk.PolicyType.AUTOMATIC,
         )
-        text_scroller.set_child(self._text_view)
+        text_scroller.set_child(content_child)
         text_scroller.set_hexpand(True)
         text_scroller.set_vexpand(True)
 
@@ -387,17 +404,6 @@ class HelpWindow(  # pylint: disable=too-many-instance-attributes
         propagates rather than masking it as a grey placeholder.
         """
         return self._image_bytes[filename]
-
-    def _text_column_width(self) -> int:
-        """Return the fixed reading-column width in pixels.
-
-        The :data:`ColumnWidthResolver` the renderer consults for image
-        and table sizing. A fixed value (body-font width ×
-        :data:`config.defaults.TARGET_CHARS_PER_LINE`) keeps layout
-        stable regardless of whether the window is realised at render
-        time.
-        """
-        return self._column_width_px
 
     # ------------------------------------------------------------------
     # Navigation

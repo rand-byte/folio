@@ -18,7 +18,7 @@
 /* Rendered article text view.
  *
  * The view paints its own page — an opaque "sheet" drawn in
- * `_ArticleTextView.do_snapshot` from the top down to the end of the
+ * `ArticleTextView.do_snapshot` from the top down to the end of the
  * note's content. So the framework must NOT paint a background of its
  * own underneath: that would fill the whole viewport and hide the
  * scroller's background ("desk") that should show below a short note.

@@ -20,7 +20,7 @@ Principles & invariants
   Block-level tags carry
   only the *text position* (``accumulative-margin = True`` plus
   ``left-margin`` / ``right-margin`` = inset + one M-width); the
-  matching *tinted wash* is painted by ``_ArticleTextView`` in
+  matching *tinted wash* is painted by ``ArticleTextView`` in
   :mod:`ui.note_view` using :func:`build_wash_specs` to look
   up tint + inset per tag. This split exists because GTK's
   ``paragraph-background-rgba`` paints exactly between the paragraph's
@@ -686,7 +686,7 @@ def _make_admonition_paragraph_tag(
     textview's widget-level ``left-margin`` / ``right-margin`` instead
     of replacing them — without this flag a paragraph tag overrides
     the widget's margins and the text escapes the inner column. The
-    matching tinted wash is painted separately by ``_ArticleTextView``
+    matching tinted wash is painted separately by ``ArticleTextView``
     in :mod:`ui.note_view` (see :func:`build_wash_specs`).
 
     ``is_label`` toggles where the block padding sits: the *label*
@@ -724,7 +724,7 @@ def _make_blockquote_body_tag(
     layering the shared :data:`TagName.ITALIC` tag across the body
     range so a future tweak to "what italic looks like" remains a
     one-line edit. The tint is painted separately by
-    ``_ArticleTextView`` in :mod:`ui.note_view`.
+    ``ArticleTextView`` in :mod:`ui.note_view`.
     """
     tag = Gtk.TextTag.new(name.value)
     tag.set_property("accumulative-margin", True)
@@ -772,7 +772,7 @@ def _make_code_block_tag(name: TagName, *, char_width_px: int) -> Gtk.TextTag:
     margins stack on the textview's widget-level margins. The
     monospace family comes from the shared :data:`TagName.MONOSPACE`
     tag, which the renderer applies on top of this one across the
-    same range. The tint is painted separately by ``_ArticleTextView``
+    same range. The tint is painted separately by ``ArticleTextView``
     in :mod:`ui.note_view`.
     """
     tag = Gtk.TextTag.new(name.value)
@@ -794,7 +794,7 @@ def _make_metadata_tag(name: TagName) -> Gtk.TextTag:
     the line. The line sits in the same column as the body, so it sets
     no left/right margins — unlike the block-level paragraph tags it
     is not inset. The rule itself is painted separately by
-    ``_ArticleTextView`` in :mod:`ui.note_view` via the ``hairline``
+    ``ArticleTextView`` in :mod:`ui.note_view` via the ``hairline``
     :class:`WashSpec` returned for :data:`TagName.METADATA` by
     :func:`build_wash_specs`.
     """
