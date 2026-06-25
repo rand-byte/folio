@@ -56,13 +56,18 @@ Principles & invariants
   :meth:`Gtk.TextView.add_child_at_anchor`, exactly as the note view does.
 * **Navigation is single-page + a contents sidebar.** The page is one
   scrolling buffer; the sidebar lists the three top-level buckets, keyed
-  off the :class:`HelpSection` enum. Selecting a row scrolls the buffer
-  to a :class:`Gtk.TextMark` placed at that section's heading. The marks
-  are dropped in a post-render pass that matches each rendered level-2
-  heading line (already tagged by the tag table) against the enum's
-  values, so the sidebar list and the scroll targets are driven by the
-  *same* source of truth and cannot drift. A heading that matches no
-  member, or a member with no heading, fails loudly at build time.
+  off the :class:`HelpSection` enum. The sidebar is a list of navigation
+  *commands*, not a selection: activating a row scrolls the buffer to a
+  :class:`Gtk.TextMark` placed at that section's heading, and **no row
+  stays selected**. A persistent selection would falsely claim to track
+  the reading position once the user scrolls away from the marked
+  heading, so the sidebar deliberately holds no current-section state at
+  all (the rows are activatable, non-selectable). The marks are dropped
+  in a post-render pass that matches each rendered level-2 heading line
+  (already tagged by the tag table) against the enum's values, so the
+  sidebar list and the scroll targets are driven by the *same* source of
+  truth and cannot drift. A heading that matches no member, or a member
+  with no heading, fails loudly at build time.
 * Example links inside the help are live: a :class:`LinkHandler` is
   installed on the read-only text view exactly as it would be on a note's
   read view, so the rendered example URLs open in the system browser.
@@ -71,10 +76,13 @@ Principles & invariants
   renderer, the launcher factory, and the system-document bytes are all
   injectable, and every navigation seam is a plain method tests can drive.
 * GTK 4.18 currency: :class:`Gtk.ApplicationWindow`, :class:`Gtk.Paned`,
-  :class:`Gtk.ListBox`, :meth:`Gtk.Window.set_hide_on_close`,
+  :class:`Gtk.ListBox`, :meth:`Gtk.ListBox.set_selection_mode`, the
+  :class:`Gtk.ListBox` ``row-activated`` signal,
+  :meth:`Gtk.Window.set_hide_on_close`,
   :meth:`Gtk.TextView.scroll_to_mark`,
   :meth:`Gtk.TextBuffer.create_mark` — no methods deprecated in 4.18 or
-  earlier.
+  earlier. The sidebar runs on activation alone, so
+  :meth:`Gtk.ListBox.select_row` is no longer used.
 """
 
 from __future__ import annotations
@@ -270,14 +278,24 @@ class HelpWindow(  # pylint: disable=too-many-instance-attributes
         """Build the contents sidebar listing the top-level buckets.
 
         One row per :class:`HelpSection`, in declaration order (which is
-        document order). Activating a row scrolls the buffer to that
-        section's mark. The first row starts selected so the sidebar
-        always reflects a current position.
+        document order). The rows are pure **navigation commands**:
+        activating one scrolls the buffer to that section's mark, and the
+        list holds **no selection** by design. Each row is therefore made
+        explicitly :meth:`~Gtk.ListBoxRow.set_activatable` (which is what
+        keeps ``row-activated`` firing once selection is off — that signal
+        is independent of selection) and
+        :meth:`~Gtk.ListBoxRow.set_selectable`-``False`` (so no row can
+        ever stick lit). Nothing is selected on build: a persistent
+        highlight would falsely claim to track the reading position once
+        the user scrolls away from the marked heading, a promise the
+        sidebar deliberately does not make.
         """
         contents = Gtk.ListBox.new()
-        contents.set_selection_mode(Gtk.SelectionMode.SINGLE)
+        contents.set_selection_mode(Gtk.SelectionMode.NONE)
         for section in self._sections:
             row = Gtk.ListBoxRow.new()
+            row.set_activatable(True)
+            row.set_selectable(False)
             label = Gtk.Label.new(section.value)
             label.set_xalign(0.0)
             label.set_margin_top(6)
@@ -287,9 +305,6 @@ class HelpWindow(  # pylint: disable=too-many-instance-attributes
             row.set_child(label)
             contents.append(row)
         contents.connect("row-activated", self._on_contents_row_activated)
-        first_row = contents.get_row_at_index(0)
-        if first_row is not None:
-            contents.select_row(first_row)
         return contents
 
     def _build_layout(self, content_child: Gtk.Widget) -> Gtk.Paned:

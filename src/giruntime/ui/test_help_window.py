@@ -253,6 +253,43 @@ class HelpWindowTests(unittest.TestCase):
         for section in HelpSection:
             window.scroll_to_section(section)
 
+    def test_contents_list_holds_no_selection(self) -> None:
+        # Core honesty invariant: the sidebar is navigation commands, not
+        # a selection, so nothing is ever selected — not even on build.
+        # A persistent highlight would falsely claim to track the reading
+        # position once the user scrolls away from the marked heading.
+        window = self._build_window()
+        self.assertEqual(
+            window.contents_list.get_selection_mode(),
+            Gtk.SelectionMode.NONE,
+        )
+        self.assertIsNone(window.contents_list.get_selected_row())
+
+    def test_rows_are_activatable_commands(self) -> None:
+        # Each row is an activatable, non-selectable command: activatable
+        # is what keeps ``row-activated`` firing with selection off, and
+        # non-selectable is what guarantees no row can stick lit.
+        window = self._build_window()
+        index = 0
+        while True:
+            row = window.contents_list.get_row_at_index(index)
+            if row is None:
+                break
+            self.assertTrue(row.get_activatable())
+            self.assertFalse(row.get_selectable())
+            index += 1
+        self.assertEqual(index, len(list(HelpSection)))
+
+    def test_activating_a_row_jumps_without_selecting(self) -> None:
+        # Activation still runs the jump command (the path is unchanged),
+        # and it leaves no sticky highlight behind — emitting
+        # ``row-activated`` must not select the row.
+        window = self._build_window()
+        row = window.contents_list.get_row_at_index(0)
+        self.assertIsNotNone(row)
+        window.contents_list.emit("row-activated", row)
+        self.assertIsNone(window.contents_list.get_selected_row())
+
     def test_demo_image_renders_inline_as_a_paintable(self) -> None:
         # A successful image render inserts a *paintable* into the buffer
         # (distinct from the table's child anchor). Scanning for a
