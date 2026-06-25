@@ -567,6 +567,7 @@ class UrlRecoveryFromLinkTagTests(unittest.TestCase):
         renderer = TextBufferRenderer(
             image_bytes_for=lambda _f: b"",
             column_width_px=lambda: 800,
+            cell_width_px=lambda _t, _b, _m: 0,
             tag_table=table,
         )
         buffer = Gtk.TextBuffer.new(table)
@@ -596,6 +597,7 @@ class UrlRecoveryFromLinkTagTests(unittest.TestCase):
         renderer = TextBufferRenderer(
             image_bytes_for=lambda _f: b"",
             column_width_px=lambda: 800,
+            cell_width_px=lambda _t, _b, _m: 0,
             tag_table=table,
         )
         buffer = Gtk.TextBuffer.new(table)
@@ -628,6 +630,7 @@ class UrlRecoveryFromLinkTagTests(unittest.TestCase):
         renderer = TextBufferRenderer(
             image_bytes_for=lambda _f: b"",
             column_width_px=lambda: 800,
+            cell_width_px=lambda _t, _b, _m: 0,
             tag_table=table,
         )
         buffer = Gtk.TextBuffer.new(table)
@@ -659,6 +662,7 @@ class UrlRecoveryFromLinkTagTests(unittest.TestCase):
         renderer = TextBufferRenderer(
             image_bytes_for=lambda _f: b"",
             column_width_px=lambda: 800,
+            cell_width_px=lambda _t, _b, _m: 0,
             tag_table=table,
         )
         buffer = Gtk.TextBuffer.new(table)

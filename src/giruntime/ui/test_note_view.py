@@ -2145,6 +2145,69 @@ class ArticleTextViewWashRectTests(unittest.TestCase):
             float(line_y_widget + line_h - _HAIRLINE_THICKNESS_PX),
         )
 
+    def test_table_header_line_produces_a_full_fill_rect(self) -> None:
+        # The header row paints a tint band: a full-height fill (not a
+        # hairline). Its rect height spans the whole logical line, and
+        # its colour is the header tint.
+        text_view, buffer, _table = _build_article_text_view_with_buffer()
+        buffer.set_text("Ingredient\tGrams\n")
+        _apply_tag_across_line(buffer, 0, TagName.TABLE_HEADER.value)
+        rects = text_view._compute_wash_rects()
+        self.assertEqual(len(rects), 1)
+        color, rect = rects[0]
+        self.assertEqual(
+            _tuple_of(color),
+            _tuple_of(
+                _rgba_from_tint(build_wash_specs()[TagName.TABLE_HEADER].tint)
+            ),
+        )
+        ok, line_iter = buffer.get_iter_at_line(0)
+        self.assertTrue(ok)
+        _line_y_buffer, line_h = text_view.get_line_yrange(line_iter)
+        self.assertEqual(rect.get_height(), float(line_h))
+
+    def test_table_data_rows_each_produce_a_hairline_rect(self) -> None:
+        # Each data row paints a 1-px rule at its bottom. Two data rows →
+        # two hairline rects, each at its line's bottom edge.
+        text_view, buffer, _table = _build_article_text_view_with_buffer()
+        buffer.set_text("Flour\t400\nSugar\t200\n")
+        _apply_tag_across_line(buffer, 0, TagName.TABLE_ROW.value)
+        _apply_tag_across_line(buffer, 1, TagName.TABLE_ROW.value)
+        rects = text_view._compute_wash_rects()
+        self.assertEqual(len(rects), 2)
+        for line_no, (_color, rect) in enumerate(rects):
+            with self.subTest(line=line_no):
+                self.assertEqual(
+                    rect.get_height(), float(_HAIRLINE_THICKNESS_PX),
+                )
+
+    def test_table_header_and_data_row_paint_one_rect_each(self) -> None:
+        # A rendered table line carries exactly one of the two table tags
+        # (the mutual-exclusion contract), so a header line plus a data
+        # line produce two rects — a fill for the header, a hairline for
+        # the row — without tripping the overlap guard. Heights depend on
+        # live layout, so the robust distinguishers are the tints and the
+        # row's fixed hairline thickness.
+        text_view, buffer, _table = _build_article_text_view_with_buffer()
+        buffer.set_text("Ingredient\tGrams\nFlour\t400\n")
+        _apply_tag_across_line(buffer, 0, TagName.TABLE_HEADER.value)
+        _apply_tag_across_line(buffer, 1, TagName.TABLE_ROW.value)
+        rects = text_view._compute_wash_rects()
+        self.assertEqual(len(rects), 2)
+        specs = build_wash_specs()
+        header_color, _header_rect = rects[0]
+        row_color, row_rect = rects[1]
+        self.assertEqual(
+            _tuple_of(header_color),
+            _tuple_of(_rgba_from_tint(specs[TagName.TABLE_HEADER].tint)),
+        )
+        self.assertEqual(
+            _tuple_of(row_color),
+            _tuple_of(_rgba_from_tint(specs[TagName.TABLE_ROW].tint)),
+        )
+        # The row is the thin hairline regardless of layout.
+        self.assertEqual(row_rect.get_height(), float(_HAIRLINE_THICKNESS_PX))
+
 
 class SheetRectTests(unittest.TestCase):
     """Drive the pure sheet helper.

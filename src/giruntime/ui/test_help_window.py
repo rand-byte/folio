@@ -291,12 +291,12 @@ class HelpWindowTests(unittest.TestCase):
         self.assertIsNone(window.contents_list.get_selected_row())
 
     def test_demo_image_renders_inline_as_a_paintable(self) -> None:
-        # A successful image render inserts a *paintable* into the buffer
-        # (distinct from the table's child anchor). Scanning for a
-        # paintable proves the image path ran and produced a real
-        # paintable — a missing filename would have raised ``KeyError``
-        # during construction, and the decode test above proves those
-        # bytes are a real image rather than the grey placeholder.
+        # A successful image render inserts a *paintable* into the buffer.
+        # Scanning for a paintable proves the image path ran and produced
+        # a real paintable — a missing filename would have raised
+        # ``KeyError`` during construction, and the decode test above
+        # proves those bytes are a real image rather than the grey
+        # placeholder.
         window = self._build_window()
         buffer = window.buffer
         iterator = buffer.get_start_iter()

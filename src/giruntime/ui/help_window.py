@@ -49,11 +49,14 @@ Principles & invariants
     and tables lay out against a stable column without depending on the
     window being realised at render time.
 
-* Only **tables** escape to an anchored widget (the renderer's
-  :data:`~giruntime.ui.note_render.textbuffer_renderer.WidgetAttacher`
-  hook); everything else — including the demo image — renders inline into
-  the buffer. The attacher is wired to
-  :meth:`Gtk.TextView.add_child_at_anchor`, exactly as the note view does.
+* **Every construct — tables included — renders inline into the buffer.**
+  Tables are native buffer text (tab-array rows), the demo image is an
+  inline paintable, and nothing escapes to a child widget. The renderer's
+  table cells are fitted to the column by the
+  :data:`~giruntime.ui.note_render.textbuffer_renderer.CellWidthMeasurer`
+  this window wires from the shared article view's Pango context (via
+  :func:`giruntime.ui.note_view.make_cell_width_measurer`), exactly as the
+  note view does.
 * **Navigation is single-page + a contents sidebar.** The page is one
   scrolling buffer; the sidebar lists the three top-level buckets, keyed
   off the :class:`HelpSection` enum. The sidebar is a list of navigation
@@ -97,7 +100,11 @@ from giruntime.ui.link_handler import (
 )
 from giruntime.ui.note_render.tag_table import TagName
 from giruntime.ui.note_render.textbuffer_renderer import TextBufferRenderer
-from giruntime.ui.note_view import ArticleTextView, build_article_surface
+from giruntime.ui.note_view import (
+    ArticleTextView,
+    build_article_surface,
+    make_cell_width_measurer,
+)
 from system_docs import load_bytes, load_text
 
 
@@ -245,6 +252,7 @@ class HelpWindow(  # pylint: disable=too-many-instance-attributes
         self._renderer = TextBufferRenderer(
             image_bytes_for=self._resolve_image_bytes,
             column_width_px=surface.container.text_column_width,
+            cell_width_px=make_cell_width_measurer(surface.text_view),
             tag_table=self._tag_table,
         )
 
@@ -261,7 +269,6 @@ class HelpWindow(  # pylint: disable=too-many-instance-attributes
             load_text(SystemDocument.HELP),
             self._buffer,
             note_id=_HELP_NOTE_ID,
-            attach_widget=self._attach_child_widget,
         )
         self._sections = tuple(HelpSection)
         self._section_marks = self._place_section_marks()
@@ -394,20 +401,6 @@ class HelpWindow(  # pylint: disable=too-many-instance-attributes
     # ------------------------------------------------------------------
     # Renderer wiring
     # ------------------------------------------------------------------
-
-    def _attach_child_widget(
-        self,
-        anchor: Gtk.TextChildAnchor,
-        widget: Gtk.Widget,
-    ) -> None:
-        """Adapter for the renderer's ``WidgetAttacher`` contract.
-
-        The renderer passes ``(anchor, widget)``; GTK 4's
-        :meth:`Gtk.TextView.add_child_at_anchor` takes ``(widget,
-        anchor)``. Only tables reach this path. Mirrors the note view's
-        adapter so the order swap is hidden from the renderer.
-        """
-        self._text_view.add_child_at_anchor(widget, anchor)
 
     def _resolve_image_bytes(self, filename: str) -> bytes:
         """Serve the help's demo image bytes by filename.

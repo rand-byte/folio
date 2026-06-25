@@ -12,22 +12,24 @@ Principles & invariants
   call. There is no incremental-update path: the source change → AST →
   buffer pipeline is short enough that "rebuild" is the cheapest
   consistent strategy.
-* **Block-level constructs render as styled paragraphs in the buffer
-  wherever the styling primitive set allows; only tables escape to an
-  anchored widget.** Admonitions, blockquotes, and code blocks are
-  inserted directly into the buffer with paragraph tags that carry the
-  background tint, margins, and padding. Images are inserted via
+* **Every block-level construct renders as styled paragraphs / inline
+  paintables in the buffer — no construct escapes to a child widget.**
+  Admonitions, blockquotes, and code blocks are inserted directly into
+  the buffer with paragraph tags that carry the background tint,
+  margins, and padding. Images are inserted via
   :meth:`Gtk.TextBuffer.insert_paintable` so they participate in the
-  buffer's native selection model. Only tables remain as anchored
-  widgets, because :class:`Gtk.TextTag` has no grid primitive — and
-  because anchored children do not honour ``hexpand``, the table
-  widget is forced to fill the column width via an explicit
-  ``set_size_request`` (see :func:`_build_table_widget`).
+  buffer's native selection model. Tables, formerly the one anchored
+  widget, are now native buffer text too: each row is one logical line
+  of tab-separated cells, aligned by a per-table :class:`Pango.TabArray`
+  and tagged with :data:`TagName.TABLE_HEADER` / :data:`TagName.TABLE_ROW`
+  (see :meth:`_emit_table`). :class:`Gtk.TextTag` has no grid primitive,
+  but a tab array plus snapshot-painted row washes expresses a
+  left-aligned grid without one.
 * The selection contract follows from the above: drag-select works
   across all prose, headings, lists, admonitions, blockquotes, code
-  blocks, and images; ``Ctrl+A`` selects everything; ``Ctrl+C`` copies
-  the buffer text unchanged. The only break is the table boundary,
-  matching browser ``<table>`` selection behaviour.
+  blocks, tables, and images; ``Ctrl+A`` selects everything; ``Ctrl+C``
+  copies the buffer text unchanged. There is no selection break — a
+  table is selectable / copyable buffer text like everything else.
 * Images use a private :class:`_ScaledImagePaintable` that wraps a
   :class:`Gdk.Texture` and reports
   ``min(texture_width, column_width_px)`` as its intrinsic width, with
@@ -39,15 +41,20 @@ Principles & invariants
   that signals the missing image without aborting the whole render.
 * The :data:`ColumnWidthResolver` is read once per render (callers can
   call :meth:`render_into` again after a column-width change). It is
-  consulted by both the image and table paths: tables get their width
-  via ``set_size_request``, images via the
-  :class:`_ScaledImagePaintable` constructor.
-* Tables retain a child anchor + widget because no clean paragraph-tag
-  expression of a grid exists. The :class:`WidgetAttacher` callback is
-  still part of :meth:`render_into`'s surface for this reason — tests
-  may pass a no-op collector and admonition / blockquote / code-block /
-  image cases will still render correctly since they no longer require
-  the attacher.
+  consulted by both the image and table paths: tables divide it into
+  per-column tab stops, images cap their intrinsic width against it via
+  the :class:`_ScaledImagePaintable` constructor.
+* Table cells are fitted to their column by measurement, not wrapping.
+  With ``wrap-mode = NONE`` on the row, an over-wide cell would push
+  Pango on to the next tab stop and cascade the row's later cells out of
+  alignment. Pango offers no per-tab-column ellipsization, so the
+  renderer measures cell text through the injected
+  :data:`CellWidthMeasurer` and truncates over-budget cells with an
+  ellipsis (:func:`_truncate_cell`), reserving a small per-column gutter
+  (:data:`config.defaults.TABLE_CELL_GUTTER_PX`) so a fitted cell never
+  reaches its stop. Copying a truncated cell yields the truncated
+  display text — the rendered buffer is a read-only projection of the
+  source, not the source of truth.
 * Inline runs are emitted with a tag stack. A run of plain
   :class:`Text` records its start offset, inserts text, and applies
   every tag currently on the stack to the inserted range. This makes
@@ -99,17 +106,17 @@ Principles & invariants
 # handles end-to-end: heading, paragraph, ordered/unordered lists,
 # code block, image, table, admonition, and blockquote — each with
 # its own emit helper, plus the inline-tag application code, the
-# Pango-markup helper (for table cells), and the column-width
-# arithmetic. Splitting solely to satisfy the line counter would
+# table cell-flatten / measure / truncate / tab-stop helpers, and the
+# image paintables. Splitting solely to satisfy the line counter would
 # scatter helpers that share private constants and conventions.
 # pylint: disable=too-many-lines
 
 from __future__ import annotations
 
-from collections.abc import Callable, Iterable
-from typing import assert_never
+from collections.abc import Callable
+from dataclasses import dataclass, replace
 
-from gi.repository import Gdk, GLib, GObject, Graphene, Gtk
+from gi.repository import Gdk, GLib, GObject, Graphene, Gtk, Pango
 
 from asciidoc.ast import (
     Admonition,
@@ -129,6 +136,7 @@ from asciidoc.ast import (
     Strikethrough,
     Table,
     TableCell,
+    TableRow,
     Text,
     Underline,
     UnorderedList,
@@ -141,7 +149,7 @@ from giruntime.ui.note_render.tag_table import (
     admonition_label_tag_name,
     heading_tag_name,
 )
-from config.defaults import TARGET_CHARS_PER_LINE
+from config.defaults import TABLE_CELL_GUTTER_PX
 from enums import HeadingTrailing
 from storage.protocols import ColumnWidthResolver, ImageBytesResolver
 
@@ -150,15 +158,23 @@ from storage.protocols import ColumnWidthResolver, ImageBytesResolver
 # Public types
 # ---------------------------------------------------------------------------
 
-type WidgetAttacher = Callable[[Gtk.TextChildAnchor, Gtk.Widget], None]
-"""Hook used to bind a widget to its child anchor.
+type CellWidthMeasurer = Callable[[str, bool, bool], int]
+"""Measures the rendered pixel width of a table-cell text run.
 
-Production wires this to :meth:`Gtk.TextView.add_child_at_anchor` of the
-note-view widget. Tests pass a list-collector that records every
-``(anchor, widget)`` pair so assertions can introspect what would have
-been displayed without a live :class:`Gtk.TextView`. After block-level
-constructs other than tables moved into the buffer, this callback is
-only invoked for tables.
+Called ``measure(text, bold, monospace)`` and returns the width, in
+pixels, that ``text`` occupies in the body font with the given width
+class — ``bold`` selects the bold weight, ``monospace`` the monospace
+family. It is the seam the table renderer uses to fit each cell to its
+column: there is no per-tab-stop ellipsization in Pango, so the
+renderer must measure cell text itself and truncate over-wide cells (see
+:meth:`TextBufferRenderer._emit_table` and :func:`_truncate_cell`).
+
+Production wires this to a :class:`Pango.Layout`-backed measurer built
+from the article view's Pango context (see
+:func:`ui.note_view.make_cell_width_measurer`). Tests pass a fake (e.g.
+a fixed pixels-per-character with monospace identical and bold a hair
+wider) so the truncation logic is unit-testable without a real font —
+mirroring the ``build_tag_table(char_width_px=9)`` test convention.
 """
 
 
@@ -200,14 +216,10 @@ _LIST_ITEM_INDENT: str = "    "
 # need explicit separation insert this at the end.
 _BLOCK_SEPARATOR: str = "\n\n"
 
-# Spacing and padding inside a rendered table. Pixel values, applied
-# directly to the :class:`Gtk.Grid`'s row/column spacing and to each
-# cell label's margins. Kept as module constants so a tweak to "how
-# spacious do tables look" is one edit, and tests can introspect the
-# exact values when asserting layout behaviour.
-_TABLE_COLUMN_SPACING: int = 12
-_TABLE_ROW_SPACING: int = 4
-_TABLE_CELL_PADDING: int = 4
+# Suffix appended to a table cell whose content is truncated to fit its
+# column. A single-character ellipsis so the cut reads as "more here"
+# without consuming much of the already-tight column width.
+_ELLIPSIS: str = "…"
 
 # Prefix and separator for the blockquote attribution string. An en-dash
 # matches typographic conventions for citations; using Unicode literals
@@ -231,6 +243,28 @@ _PLACEHOLDER_PAINTABLE_RGBA: tuple[float, float, float, float] = (
 )
 
 
+@dataclass(frozen=True)
+class _CellRun:
+    """One formatted text run flattened out of a table cell.
+
+    A cell's inline tree (``*bold*``, ``_italic_``, ``\\`mono\\```,
+    ``link[…]`` …) is flattened to a sequence of these runs so the
+    truncation algorithm can measure and cut on a flat character stream
+    while still re-emitting the original formatting. ``text`` is the
+    run's literal characters; ``bold`` / ``monospace`` are its *width
+    class* (what :data:`CellWidthMeasurer` needs); ``tags`` are the
+    :class:`Gtk.TextTag`\\ s to apply when the run is inserted — the
+    visual style tags plus, for a link, the per-link anonymous URL tag,
+    so a link that survives truncation keeps its click target on the
+    surviving characters.
+    """
+
+    text: str
+    bold: bool
+    monospace: bool
+    tags: tuple[Gtk.TextTag, ...]
+
+
 class TextBufferRenderer:
     """Render an AsciiDoc source string into a :class:`Gtk.TextBuffer`.
 
@@ -241,23 +275,32 @@ class TextBufferRenderer:
 
     _image_bytes_for: ImageBytesResolver
     _column_width_px: ColumnWidthResolver
+    _cell_width_px: CellWidthMeasurer
     _tag_table: Gtk.TextTagTable
     _link_url_tags: dict[Gtk.TextTag, str]
+    _table_tab_tags: list[Gtk.TextTag]
 
     def __init__(
         self,
         *,
         image_bytes_for: ImageBytesResolver,
         column_width_px: ColumnWidthResolver,
+        cell_width_px: CellWidthMeasurer,
         tag_table: Gtk.TextTagTable,
     ) -> None:
         self._image_bytes_for = image_bytes_for
         self._column_width_px = column_width_px
+        self._cell_width_px = cell_width_px
         self._tag_table = tag_table
         # Anonymous per-link tags currently registered on
         # ``self._tag_table``. Cleared at the start of every render
         # so stale link tags don't accumulate as the user edits.
         self._link_url_tags = {}
+        # Anonymous per-table tab tags (each carries one table's
+        # ``Pango.TabArray``). Swept at the start of every render the
+        # same way the link tags are, so the tag table cannot
+        # accumulate stale tab tags across edits.
+        self._table_tab_tags = []
 
     # ------------------------------------------------------------------
     # Public API
@@ -269,7 +312,6 @@ class TextBufferRenderer:
         buffer: Gtk.TextBuffer,
         *,
         note_id: str,  # pylint: disable=unused-argument
-        attach_widget: WidgetAttacher | None = None,
         post_title_hook: PostTitleHook | None = None,
     ) -> None:
         """Parse ``source`` and rebuild ``buffer`` to reflect the AST.
@@ -277,12 +319,6 @@ class TextBufferRenderer:
         ``note_id`` is part of the protocol surface so future caching
         and diagnostics can key on it; the current step does not yet
         use it.
-
-        ``attach_widget`` is an optional hook called once per child
-        anchor (only used for tables in the current build). When
-        ``None``, anchors are still created but the produced widgets
-        are dropped on the floor — useful for text/tag-only assertions
-        that do not care about the embedded table widgets.
 
         ``post_title_hook`` is an optional callback invoked exactly
         once per render with the ``buffer`` positioned (at its end iter)
@@ -297,7 +333,6 @@ class TextBufferRenderer:
         untouched and the hook is never invoked.
         """
         document = parse(source)  # may raise ParseError
-        attacher = attach_widget if attach_widget is not None else _noop_attacher
         buffer.set_text("")
         if buffer.get_tag_table() is not self._tag_table:
             # The tag table is part of the buffer's identity in GTK 4.
@@ -307,6 +342,7 @@ class TextBufferRenderer:
                 "buffer's tag table is not the renderer's tag table",
             )
         self._clear_link_url_tags()
+        self._clear_table_tab_tags()
         if document.title is not None:
             # Emit the title with only a SINGLE newline so the metadata
             # line, inserted on the next line below, hugs the title. The
@@ -338,7 +374,7 @@ class TextBufferRenderer:
             # body again sits a clear line below it.
             buffer.insert(buffer.get_end_iter(), _BLOCK_SEPARATOR)
         for block in document.blocks:
-            self._emit_block(buffer, block, attacher)
+            self._emit_block(buffer, block)
         self._strip_trailing_blank(buffer)
 
     def url_for_tags(self, tags: list[Gtk.TextTag]) -> str | None:
@@ -393,6 +429,40 @@ class TextBufferRenderer:
         return tag
 
     # ------------------------------------------------------------------
+    # Table tab-tag lifecycle
+    # ------------------------------------------------------------------
+
+    def _clear_table_tab_tags(self) -> None:
+        """Remove every per-table tab tag from the tag table.
+
+        Mirrors :meth:`_clear_link_url_tags`: a table's column geometry
+        varies (column count / proportions / live column width), so its
+        :class:`Pango.TabArray` cannot live on a fixed named tag and is
+        carried on an anonymous tag minted per render. Sweeping them at
+        the start of each render keeps the tag table from accumulating
+        stale tab tags as the user edits.
+        """
+        for tag in self._table_tab_tags:
+            self._tag_table.remove(tag)
+        self._table_tab_tags.clear()
+
+    def _make_table_tab_tag(self, tabs: Pango.TabArray) -> Gtk.TextTag:
+        """Build and register an anonymous tag carrying a table's tab stops.
+
+        The tag carries only the ``tabs`` property (the per-table
+        :class:`Pango.TabArray`); the row's other paragraph properties
+        (``wrap-mode = NONE``, the wash) live on the shared
+        :data:`TagName.TABLE_ROW` / :data:`TagName.TABLE_HEADER` tags the
+        renderer layers alongside it. Registered for the per-render
+        sweep (:meth:`_clear_table_tab_tags`).
+        """
+        tag = Gtk.TextTag.new(None)
+        tag.set_property("tabs", tabs)
+        self._tag_table.add(tag)
+        self._table_tab_tags.append(tag)
+        return tag
+
+    # ------------------------------------------------------------------
     # Block emission
     # ------------------------------------------------------------------
 
@@ -400,10 +470,9 @@ class TextBufferRenderer:
         self,
         buffer: Gtk.TextBuffer,
         block: BlockNode,
-        attacher: WidgetAttacher,
     ) -> None:
         if isinstance(block, Section):
-            self._emit_section(buffer, block, attacher)
+            self._emit_section(buffer, block)
         elif isinstance(block, Paragraph):
             self._emit_paragraph(buffer, block)
         elif isinstance(block, UnorderedList):
@@ -415,7 +484,7 @@ class TextBufferRenderer:
         elif isinstance(block, Image):
             self._emit_image(buffer, block)
         elif isinstance(block, Table):
-            self._emit_table(buffer, block, attacher)
+            self._emit_table(buffer, block)
         elif isinstance(block, Admonition):
             self._emit_admonition(buffer, block)
         elif isinstance(block, Blockquote):
@@ -430,11 +499,10 @@ class TextBufferRenderer:
         self,
         buffer: Gtk.TextBuffer,
         section: Section,
-        attacher: WidgetAttacher,
     ) -> None:
         self._emit_heading(buffer, section.title, level=section.level)
         for block in section.blocks:
-            self._emit_block(buffer, block, attacher)
+            self._emit_block(buffer, block)
 
     def _emit_heading(
         self,
@@ -583,30 +651,261 @@ class TextBufferRenderer:
         self,
         buffer: Gtk.TextBuffer,
         table: Table,
-        attacher: WidgetAttacher,
     ) -> None:
-        """Insert a table widget at a child anchor.
+        """Insert a table as native, selectable buffer text.
 
-        Tables remain anchored widgets because :class:`Gtk.TextTag` has
-        no grid primitive. The table is a :class:`Gtk.Grid` of
-        :class:`Gtk.Label`s with ``wrap = TRUE``; each label's
-        ``max-width-chars`` is derived from the live column width
-        (read once via the injected :data:`ColumnWidthResolver`) and
-        the ``[cols="…"]`` proportions. Because anchored children do
-        not honour ``hexpand``, the table widget is sized to the
-        column width explicitly via ``set_size_request`` inside
-        :func:`_build_table_widget`.
+        Each row becomes one logical buffer line of ``cell \\t cell \\t …
+        cell`` whose columns are aligned by a per-table
+        :class:`Pango.TabArray` (pixel tab stops at the cumulative
+        column edges). Wrapping is disabled on the row (via the
+        :data:`TagName.TABLE_ROW` / :data:`TagName.TABLE_HEADER` tag), so
+        each cell is truncated with an ellipsis to its column width less
+        :data:`config.defaults.TABLE_CELL_GUTTER_PX` — the gutter keeps a
+        fitted cell short of its tab stop so it never cascades the rest
+        of the row out of alignment (see :func:`_truncate_cell`). The
+        first row is the header: its cells render bold and its line
+        carries :data:`TagName.TABLE_HEADER` (a tint band); every other
+        row carries :data:`TagName.TABLE_ROW` (a bottom hairline rule).
 
-        The first row carries bold weight to surface its header role
-        visually. The renderer never produces a per-table horizontal
-        scrollbar: cell content is inline-only, so wrapping is always
-        meaningful, and an internal scrollbar inside an article column
-        would be visually noisy.
+        No child anchor or widget is created — the table is part of the
+        selectable / copyable buffer. Copying a truncated cell yields the
+        truncated display text, consistent with the rendered buffer
+        being a read-only projection of the source.
         """
-        anchor = buffer.create_child_anchor(buffer.get_end_iter())
-        widget = _build_table_widget(table, self._column_width_px())
-        attacher(anchor, widget)
-        buffer.insert(buffer.get_end_iter(), _BLOCK_SEPARATOR)
+        column_px = self._column_width_px()
+        column_count = len(table.rows[0].cells)
+        proportions = (
+            table.column_proportions
+            if table.column_proportions is not None
+            else (1,) * column_count
+        )
+        column_widths = _table_column_pixels(proportions, column_px)
+        tab_tag = self._make_table_tab_tag(_table_tab_stops(column_widths))
+        for row_index, row in enumerate(table.rows):
+            self._emit_table_row(
+                buffer,
+                row,
+                is_header=row_index == 0,
+                column_widths=column_widths,
+                tab_tag=tab_tag,
+            )
+        buffer.insert(buffer.get_end_iter(), "\n")
+
+    def _emit_table_row(
+        self,
+        buffer: Gtk.TextBuffer,
+        row: TableRow,
+        *,
+        is_header: bool,
+        column_widths: tuple[int, ...],
+        tab_tag: Gtk.TextTag,
+    ) -> None:
+        """Emit one table row as a tab-separated, tagged buffer line.
+
+        Each cell is flattened, truncated to its column width (less the
+        gutter), and inserted; a ``\\t`` separates columns (emitted even
+        for an empty cell so the next cell keeps its tab stop). The whole
+        line then carries the row/header paragraph tag plus the per-table
+        ``tab_tag``.
+        """
+        row_start = buffer.get_end_iter().get_offset()
+        last_col = len(row.cells) - 1
+        for col_index, cell in enumerate(row.cells):
+            runs = _truncate_cell(
+                self._flatten_cell(cell, header_bold=is_header),
+                column_widths[col_index],
+                TABLE_CELL_GUTTER_PX,
+                self._cell_width_px,
+            )
+            for run in runs:
+                self._emit_cell_run(buffer, run)
+            if col_index < last_col:
+                buffer.insert(buffer.get_end_iter(), "\t")
+        buffer.insert(buffer.get_end_iter(), "\n")
+        row_tag = self._tag(
+            TagName.TABLE_HEADER if is_header else TagName.TABLE_ROW,
+        )
+        start_iter = buffer.get_iter_at_offset(row_start)
+        end_iter = buffer.get_end_iter()
+        buffer.apply_tag(row_tag, start_iter, end_iter)
+        buffer.apply_tag(tab_tag, start_iter, end_iter)
+
+    def _flatten_cell(
+        self,
+        cell: TableCell,
+        *,
+        header_bold: bool,
+    ) -> list[_CellRun]:
+        """Flatten a cell's inline tree to a list of :class:`_CellRun`.
+
+        Walks the cell's inline nodes, carrying a tag tuple plus the
+        ``bold`` / ``monospace`` width-class flags down the tree, so each
+        leaf :class:`Text` (or :class:`Monospace`) becomes one run that
+        records both the tags to re-apply and the width class to measure.
+        ``header_bold`` seeds the walk with the shared
+        :data:`TagName.BOLD` tag and the bold width class so a header
+        row's cells render and measure as bold.
+        """
+        base_tags: tuple[Gtk.TextTag, ...] = (
+            (self._tag(TagName.BOLD),) if header_bold else ()
+        )
+        runs: list[_CellRun] = []
+        for inline in cell.inlines:
+            self._flatten_inline(
+                inline,
+                tags=base_tags,
+                bold=header_bold,
+                monospace=False,
+                runs=runs,
+            )
+        return runs
+
+    def _flatten_inline(  # pylint: disable=too-many-return-statements
+        self,
+        inline: InlineNode,
+        *,
+        tags: tuple[Gtk.TextTag, ...],
+        bold: bool,
+        monospace: bool,
+        runs: list[_CellRun],
+    ) -> None:
+        """Append the runs for one inline node (recursing into children).
+
+        The dispatch mirrors :meth:`_emit_inline`'s closed union, but
+        produces measurable runs instead of inserting directly, because
+        truncation must measure a cell *before* any text reaches the
+        buffer.
+        """
+        if isinstance(inline, Text):
+            if inline.content:
+                runs.append(
+                    _CellRun(
+                        text=inline.content,
+                        bold=bold,
+                        monospace=monospace,
+                        tags=tags,
+                    )
+                )
+            return
+        if isinstance(inline, Monospace):
+            # Monospace carries a literal str (no nested inlines) — it is
+            # a leaf with the monospace width class and the MONOSPACE tag.
+            if inline.content:
+                runs.append(
+                    _CellRun(
+                        text=inline.content,
+                        bold=bold,
+                        monospace=True,
+                        tags=(*tags, self._tag(TagName.MONOSPACE)),
+                    )
+                )
+            return
+        if isinstance(inline, Bold):
+            self._flatten_children(
+                inline.children,
+                tags=tags,
+                added=TagName.BOLD,
+                bold=True,
+                monospace=monospace,
+                runs=runs,
+            )
+            return
+        if isinstance(inline, Italic):
+            self._flatten_children(
+                inline.children,
+                tags=tags,
+                added=TagName.ITALIC,
+                bold=bold,
+                monospace=monospace,
+                runs=runs,
+            )
+            return
+        if isinstance(inline, Strikethrough):
+            self._flatten_children(
+                inline.children,
+                tags=tags,
+                added=TagName.STRIKETHROUGH,
+                bold=bold,
+                monospace=monospace,
+                runs=runs,
+            )
+            return
+        if isinstance(inline, Underline):
+            self._flatten_children(
+                inline.children,
+                tags=tags,
+                added=TagName.UNDERLINE,
+                bold=bold,
+                monospace=monospace,
+                runs=runs,
+            )
+            return
+        if isinstance(inline, Link):
+            # A link's URL identity rides a fresh anonymous tag (as in
+            # ``_emit_link``); a truncated link keeps its target on the
+            # surviving characters because the tag is on every run.
+            link_tags = (
+                *tags,
+                self._tag(TagName.LINK),
+                self._make_link_url_tag(inline.url),
+            )
+            for child in inline.text:
+                self._flatten_inline(
+                    child,
+                    tags=link_tags,
+                    bold=bold,
+                    monospace=monospace,
+                    runs=runs,
+                )
+            return
+        if isinstance(inline, SoftBreak):
+            # A soft break cannot occur in a single-line cell, but the
+            # union must stay exhaustive — render it as a space, matching
+            # ``_emit_inline``.
+            runs.append(
+                _CellRun(text=" ", bold=bold, monospace=monospace, tags=tags),
+            )
+            return
+        raise TypeError(f"unknown inline node: {type(inline).__name__}")
+
+    def _flatten_children(
+        self,
+        children: tuple[InlineNode, ...],
+        *,
+        tags: tuple[Gtk.TextTag, ...],
+        added: TagName,
+        bold: bool,
+        monospace: bool,
+        runs: list[_CellRun],
+    ) -> None:
+        """Recurse into a styled span's children with the added tag.
+
+        Shared by the bold / italic / strikethrough / underline arms of
+        :meth:`_flatten_inline`: each pushes its style tag onto ``tags``
+        and recurses; ``bold`` is threaded through (the bold arm passes
+        ``True``) so the width class tracks the actual weight.
+        """
+        new_tags = (*tags, self._tag(added))
+        for child in children:
+            self._flatten_inline(
+                child,
+                tags=new_tags,
+                bold=bold,
+                monospace=monospace,
+                runs=runs,
+            )
+
+    def _emit_cell_run(self, buffer: Gtk.TextBuffer, run: _CellRun) -> None:
+        """Insert one :class:`_CellRun`'s text and apply its tags."""
+        if not run.text:
+            return
+        start_offset = buffer.get_end_iter().get_offset()
+        buffer.insert(buffer.get_end_iter(), run.text)
+        end_offset = buffer.get_end_iter().get_offset()
+        start_iter = buffer.get_iter_at_offset(start_offset)
+        end_iter = buffer.get_iter_at_offset(end_offset)
+        for tag in run.tags:
+            buffer.apply_tag(tag, start_iter, end_iter)
 
     def _emit_admonition(
         self,
@@ -985,224 +1284,121 @@ class _PlaceholderImagePaintable(GObject.GObject, Gdk.Paintable):
 
 
 # ---------------------------------------------------------------------------
-# Helper widget builders for tables (the only remaining anchored widget)
+# Table layout helpers (pure — unit-testable without a font or a buffer)
 # ---------------------------------------------------------------------------
 
 
-def _build_table_widget(table: Table, column_width_px: int) -> Gtk.Widget:
-    """Build the read-only table widget displayed in the buffer.
-
-    Layout: ``Gtk.Frame`` → ``Gtk.Grid`` of cell ``Gtk.Label``\\ s. Each
-    label uses Pango markup to render its inline formatting (bold,
-    italic, monospace, etc.) and is configured with ``wrap = TRUE`` so
-    long cell content wraps within the column rather than overflowing.
-
-    ``column_width_px`` is the live pixel width of the article column
-    (resolved at render time by :data:`ColumnWidthResolver`). It feeds
-    two layout decisions:
-
-    * Per-cell ``max-width-chars`` derived from
-      :data:`TARGET_CHARS_PER_LINE` and the ``[cols="…"]`` proportions
-      (see :func:`_max_chars_per_column`).
-    * The whole frame's ``size-request`` is set to ``column_width_px``
-      so the table fills the column. This is the workaround for
-      :class:`Gtk.TextView` ignoring ``hexpand`` on anchored children:
-      reporting a size request is the only way to tell the text view
-      "allocate me this many pixels". Without it, the frame collapses
-      to its children's natural width and the table reads as a tight
-      block in the middle of the column.
-
-    The header row (``rows[0]``) is rendered with a bold label to
-    visually distinguish it from data rows. No per-table horizontal
-    scrollbar — wrapping inside the column is the only fitting
-    strategy because cell content is inline-only, and an internal
-    scrollbar inside an article column would be visually noisy.
-    """
-    grid = Gtk.Grid.new()
-    grid.set_hexpand(True)
-    grid.set_column_spacing(_TABLE_COLUMN_SPACING)
-    grid.set_row_spacing(_TABLE_ROW_SPACING)
-
-    column_count = len(table.rows[0].cells)
-    proportions = (
-        table.column_proportions
-        if table.column_proportions is not None
-        else (1,) * column_count
-    )
-    max_chars_per_column = _max_chars_per_column(proportions, column_width_px)
-
-    for row_index, row in enumerate(table.rows):
-        is_header = row_index == 0
-        for col_index, cell in enumerate(row.cells):
-            label = _build_cell_label(
-                cell,
-                is_header=is_header,
-                max_width_chars=max_chars_per_column[col_index],
-            )
-            grid.attach(label, col_index, row_index, 1, 1)
-
-    frame = Gtk.Frame.new()
-    frame.set_hexpand(True)
-    frame.set_child(grid)
-    # Anchored children inside a Gtk.TextView ignore hexpand and get
-    # allocated their natural width. Forcing a horizontal size request
-    # equal to the article column is the only way to make the table
-    # fill the column. Height stays at -1 so the frame measures itself
-    # against the children's natural heights.
-    frame.set_size_request(column_width_px, -1)
-    return frame
-
-
-def _build_cell_label(
-    cell: TableCell,
-    *,
-    is_header: bool,
-    max_width_chars: int,
-) -> Gtk.Label:
-    """Build a single :class:`Gtk.Label` for a table cell.
-
-    The label renders the cell's inline content via Pango markup.
-    ``wrap = TRUE`` lets long content wrap inside the column;
-    ``max_width_chars`` is the upper-bound character width derived
-    from the column proportion. ``xalign = 0.0`` left-aligns the
-    text — table cells in this app are always left-aligned (the
-    plan does not expose a per-cell alignment attribute).
-    """
-    markup = _inlines_to_pango_markup(cell.inlines, bold=is_header)
-    label = Gtk.Label.new(None)
-    label.set_markup(markup)
-    label.set_wrap(True)
-    label.set_max_width_chars(max_width_chars)
-    label.set_xalign(0.0)
-    label.set_yalign(0.0)
-    label.set_hexpand(True)
-    label.set_margin_start(_TABLE_CELL_PADDING)
-    label.set_margin_end(_TABLE_CELL_PADDING)
-    label.set_margin_top(_TABLE_CELL_PADDING)
-    label.set_margin_bottom(_TABLE_CELL_PADDING)
-    return label
-
-
-def _max_chars_per_column(
+def _table_column_pixels(
     proportions: tuple[int, ...],
-    column_width_px: int,
+    column_px: int,
 ) -> tuple[int, ...]:
-    """Return ``max-width-chars`` for each column from its proportion.
+    """Return each column's pixel width from its proportion.
 
-    The derivation in two steps:
-
-    1. Average glyph width in pixels is
-       ``column_width_px / TARGET_CHARS_PER_LINE``, on the basis that
-       the article column targets that many characters of body text.
-    2. Each table column's pixel slice is
-       ``column_width_px * p_i / sum(proportions)``; dividing by the
-       glyph width gives its character count.
-
-    The two ``column_width_px`` factors cancel algebraically, so the
-    result reduces to ``round(p_i / sum(proportions) * TARGET_CHARS_PER_LINE)``.
-    Threading ``column_width_px`` through anyway keeps the contract
-    honest — a future implementation that measures glyph width
-    differently (e.g. via Pango against a real font) plugs in here.
-
-    Each result is clamped to a minimum of one so a label always has
-    at least some width to wrap into. ``column_width_px`` of zero or
-    less (which only happens before the article container has been
-    allocated) collapses to an all-ones tuple via the clamp.
+    Columns are sized by ``column_px * p_i / sum(proportions)``. Widths
+    are derived from *cumulative* rounded edges (rather than rounding
+    each column independently) so they sum to ``column_px`` and the tab
+    stops computed from them in :func:`_table_tab_stops` land on the
+    same edges. A non-positive ``column_px`` (before the article
+    container has been allocated) yields all-zero widths; the next
+    render after allocation produces real widths.
     """
     total = sum(proportions)
-    if column_width_px <= 0:
-        return tuple(1 for _ in proportions)
-    glyph_width_px = column_width_px / TARGET_CHARS_PER_LINE
-    return tuple(
-        max(
-            1,
-            round((column_width_px * p / total) / glyph_width_px),
-        )
-        for p in proportions
-    )
+    if not proportions or total <= 0 or column_px <= 0:
+        return tuple(0 for _ in proportions)
+    widths: list[int] = []
+    previous_edge = 0
+    cumulative_proportion = 0
+    for proportion in proportions:
+        cumulative_proportion += proportion
+        edge = round(column_px * cumulative_proportion / total)
+        widths.append(max(0, edge - previous_edge))
+        previous_edge = edge
+    return tuple(widths)
 
 
-# ---------------------------------------------------------------------------
-# Pango-markup conversion (used only by table cells)
-# ---------------------------------------------------------------------------
+def _table_tab_stops(column_widths: tuple[int, ...]) -> Pango.TabArray:
+    """Build the pixel-positioned :class:`Pango.TabArray` for one table.
 
-
-def _inlines_to_pango_markup(
-    inlines: tuple[InlineNode, ...],
-    *,
-    bold: bool = False,
-) -> str:
-    """Convert an inline-node tuple to a Pango markup string.
-
-    Pango markup is the format :meth:`Gtk.Label.set_markup` consumes,
-    and it covers everything the inline subset needs: ``<b>``, ``<i>``,
-    ``<s>``, ``<u>``, ``<tt>``, and ``<a href="…">``. Plain text is
-    escaped with :func:`GLib.markup_escape_text` so user content with
-    literal ``<`` or ``&`` never accidentally introduces markup.
-
-    ``bold`` wraps the whole result in a single ``<b>…</b>`` so header
-    cells render with bold weight. This is preferable to setting the
-    label's ``weight`` attribute because nested inline formatting
-    (e.g. an italic span inside a header) still needs to compose with
-    the header's boldness — Pango handles the composition naturally.
+    A tab stop is placed at the cumulative left edge of every column
+    *after* the first — i.e. ``len(column_widths) - 1`` stops, since the
+    last column needs no trailing tab. Positions are in pixels (the
+    array is created with ``positions_in_pixels = True``). A single-column
+    table yields an empty array (no separators are emitted for it).
     """
-    body = _join_inline_markup(inlines)
-    if bold:
-        return f"<b>{body}</b>"
-    return body
+    stop_count = max(0, len(column_widths) - 1)
+    tabs = Pango.TabArray.new(stop_count, True)
+    edge = 0
+    for index in range(stop_count):
+        edge += column_widths[index]
+        tabs.set_tab(index, Pango.TabAlign.LEFT, edge)
+    return tabs
 
 
-def _join_inline_markup(children: Iterable[InlineNode]) -> str:
-    """Concatenate the Pango markup of each child inline node."""
-    return "".join(_inline_to_pango_markup(child) for child in children)
+def _measure_runs(
+    runs: list[_CellRun],
+    measure: CellWidthMeasurer,
+) -> int:
+    """Sum the measured pixel width of every run in ``runs``."""
+    return sum(measure(run.text, run.bold, run.monospace) for run in runs)
 
 
-# Closed-union dispatch over InlineNode via ``match`` ending in
-# ``assert_never`` — the same exhaustiveness convention used by
-# asciidoc/summary.py._flatten (this function's twin) and
-# search/note_filter.py. Adding a new InlineNode kind without a case
-# here is a compile-time type error. The result is bound to a single
-# annotated ``markup`` local and returned once: assigning the Any from
-# GLib.markup_escape_text to a typed target is a checked assertion at
-# the assignment boundary, so warn_return_any is satisfied without a
-# suppression.
-def _inline_to_pango_markup(node: InlineNode) -> str:
-    """Convert a single inline node to its Pango markup form."""
-    markup: str
-    match node:
-        case Text(content=content):
-            markup = GLib.markup_escape_text(content)
-        case Bold(children=children):
-            markup = f"<b>{_join_inline_markup(children)}</b>"
-        case Italic(children=children):
-            markup = f"<i>{_join_inline_markup(children)}</i>"
-        case Strikethrough(children=children):
-            markup = f"<s>{_join_inline_markup(children)}</s>"
-        case Underline(children=children):
-            markup = f"<u>{_join_inline_markup(children)}</u>"
-        case Monospace(content=content):
-            # Monospace's content is a literal :class:`str`, not a list
-            # of nested inlines — match :class:`Monospace`'s "no
-            # re-parsing" rule by escaping the content directly. Pango's
-            # ``<tt>`` tag selects a monospace family.
-            markup = f"<tt>{GLib.markup_escape_text(content)}</tt>"
-        case Link(text=text, url=url):
-            # Pango's ``<a href="…">`` requires the URL itself to be
-            # markup-escaped to handle ``&`` characters in query strings.
-            markup = (
-                f'<a href="{GLib.markup_escape_text(url)}">'
-                f"{_join_inline_markup(text)}</a>"
-            )
-        case SoftBreak():
-            # Soft line break collapses to a single space (see
-            # _emit_inline). A SoftBreak cannot reach this markup path in
-            # practice — the joiner only appears as a direct child of
-            # Paragraph.inlines, never inside a table/header cell — but
-            # the dispatch must stay exhaustive over the InlineNode union.
-            markup = " "
-        case _:
-            assert_never(node)
-    return markup
+def _prefix_runs(runs: list[_CellRun], char_count: int) -> list[_CellRun]:
+    """Return the runs covering the first ``char_count`` characters.
+
+    Whole runs are kept until the budget is exhausted; the run that
+    crosses the boundary is cut (preserving its formatting and tags) so
+    a link or a bold span that is truncated mid-run keeps its style on
+    the surviving characters.
+    """
+    prefix: list[_CellRun] = []
+    remaining = char_count
+    for run in runs:
+        if remaining <= 0:
+            break
+        if len(run.text) <= remaining:
+            prefix.append(run)
+            remaining -= len(run.text)
+        else:
+            prefix.append(replace(run, text=run.text[:remaining]))
+            remaining = 0
+    return prefix
+
+
+def _truncate_cell(
+    runs: list[_CellRun],
+    column_px: int,
+    gutter_px: int,
+    measure: CellWidthMeasurer,
+) -> list[_CellRun]:
+    """Truncate ``runs`` to fit ``column_px - gutter_px``, with an ellipsis.
+
+    Returns ``runs`` unchanged when the cell already fits the budget.
+    Otherwise binary-searches the largest character prefix whose width
+    plus the ellipsis width fits, cuts the runs to that prefix (keeping
+    per-run formatting up to the cut) and appends a plain ellipsis run.
+    The gutter keeps a fitted cell short of its tab stop so it never
+    cascades the rest of the row out of alignment.
+    """
+    budget = column_px - gutter_px
+    if _measure_runs(runs, measure) <= budget:
+        return runs
+    ellipsis_width = measure(_ELLIPSIS, False, False)
+    total_chars = sum(len(run.text) for run in runs)
+    low, high = 0, total_chars
+    best = 0
+    while low <= high:
+        mid = (low + high) // 2
+        prefix = _prefix_runs(runs, mid)
+        if _measure_runs(prefix, measure) + ellipsis_width <= budget:
+            best = mid
+            low = mid + 1
+        else:
+            high = mid - 1
+    truncated = _prefix_runs(runs, best)
+    truncated.append(
+        _CellRun(text=_ELLIPSIS, bold=False, monospace=False, tags=()),
+    )
+    return truncated
 
 
 # ---------------------------------------------------------------------------
@@ -1235,7 +1431,3 @@ def _build_attribution_text(
         _BLOCKQUOTE_ATTRIBUTION_PREFIX
         + _BLOCKQUOTE_ATTRIBUTION_SEPARATOR.join(parts)
     )
-
-
-def _noop_attacher(_anchor: Gtk.TextChildAnchor, _widget: Gtk.Widget) -> None:
-    """Default ``attach_widget`` callback — drops widgets on the floor."""

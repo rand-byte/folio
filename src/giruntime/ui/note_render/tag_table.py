@@ -27,10 +27,12 @@ Principles & invariants
   effective ``left-margin`` and ``right-margin`` — there is no
   property that decouples "where the wash paints" from "where the
   text starts", so a tinted box that is *wider* than the text on each
-  side must be painted at snapshot time. Tables remain the one
-  exception to "block styling lives on a paragraph tag" — they are
-  still drawn by a child widget — because :class:`Gtk.TextTag` has no
-  grid primitive.
+  side must be painted at snapshot time. Tables are no longer an
+  exception: a rendered table is native buffer text whose rows carry the
+  :data:`TagName.TABLE_HEADER` (tint band) / :data:`TagName.TABLE_ROW`
+  (bottom hairline) paragraph tags and whose columns are aligned by a
+  per-table :class:`Pango.TabArray` the renderer mints — no child widget
+  is involved.
 * Admonition paragraph tags come in two roles per kind. The *label*
   paragraph carries the kind name on its own line; the *body* paragraph
   carries the prose. Both paragraphs share the per-kind wash spec so
@@ -56,11 +58,13 @@ Principles & invariants
   records the article TextView paints. Tag names that don't paint a
   wash (e.g. :data:`TagName.BLOCKQUOTE_ATTRIBUTION`) are absent from
   the returned dict on purpose — the painter must paint nothing
-  behind them. The :data:`TagName.METADATA` line is the one *hairline*
-  wash: its :class:`WashSpec` carries ``hairline = True`` so the
-  painter draws a thin 1-px rule at the bottom of the line (the
-  divider between the metadata and the body) rather than a full-height
-  tinted fill.
+  behind them. The :data:`TagName.METADATA` line and every
+  :data:`TagName.TABLE_ROW` are the *hairline* washes: their
+  :class:`WashSpec` carries ``hairline = True`` so the painter draws a
+  thin 1-px rule at the bottom of the line (the divider between the
+  metadata and the body, or between two table rows) rather than a
+  full-height tinted fill. :data:`TagName.TABLE_HEADER` keeps the
+  default full *fill* so the header reads as a tint band.
 * This module imports ``gi`` because the tag table *is* a GTK object —
   there is no useful pure-Python representation of a tag. The renderer
   is the only other place in :mod:`asciidoc` that imports
@@ -117,6 +121,18 @@ class TagName(StrEnum):
     :data:`CODE_BLOCK` is the paragraph tag carrying the code-block's
     left/right paragraph margins; monospace family comes from the
     shared :data:`MONOSPACE` tag, layered on top by the renderer.
+
+    :data:`TABLE_ROW` and :data:`TABLE_HEADER` are the two paragraph tags
+    for the rows of a rendered table. Each table row is one logical
+    buffer line whose cells are aligned by a per-table
+    :class:`Pango.TabArray` (minted anonymously per render by the
+    renderer, not carried here). Both tags set ``wrap-mode = NONE`` so a
+    row stays on one line and its column alignment holds. The header row
+    (``TABLE_HEADER``) paints a tint band behind the line (a *fill*
+    :class:`WashSpec`) and the renderer makes its cell text bold; each
+    data row (``TABLE_ROW``) paints a 1-px rule at the line's bottom (a
+    ``hairline`` :class:`WashSpec`, the same painter shape the metadata
+    divider uses) to separate it from the next row.
 
     :data:`METADATA` is the character/paragraph tag applied to the
     dim-grey metadata line the rendered view inserts directly under the
@@ -176,6 +192,13 @@ class TagName(StrEnum):
     BLOCKQUOTE_ATTRIBUTION = "blockquote_attribution"
     # Code-block paragraph tag.
     CODE_BLOCK = "code_block"
+    # Table row paragraph tags. The header row (rows[0]) carries
+    # ``TABLE_HEADER`` (a tint band + bold cell text); every data row
+    # carries ``TABLE_ROW`` (a hairline bottom rule). Both also carry the
+    # ``wrap-mode = NONE`` that keeps a row on one line so its
+    # tab-array column alignment holds.
+    TABLE_ROW = "table_row"
+    TABLE_HEADER = "table_header"
     # Metadata line under the document title (Created / Modified / tags).
     METADATA = "metadata"
     # Parse-error notice lines, shown in the rendered surface itself when
@@ -409,6 +432,26 @@ _CODE_BLOCK_VPADDING_PX: int = 8
 _BLOCKQUOTE_ATTRIBUTION_SCALE: float = 0.9
 
 
+# Table rows. A rendered table is native buffer text: each row is one
+# logical line whose cells are aligned by a per-table ``Pango.TabArray``
+# minted by the renderer. Two paragraph tags carry the row treatment.
+# The *header* row paints a neutral tint band (a fill wash) behind the
+# line; each *data* row paints a 1-px rule at its bottom (a hairline
+# wash — the same painter shape the metadata divider uses) to separate
+# it from the next row. Both insets are zero so the band / rule span the
+# full body text column (the table itself fills that column). The
+# header's tint shares the neutral-grey family of the code block, a hair
+# stronger so the header reads as a band; the rule reuses the metadata
+# rule's grey so the two hairlines match. ``pixels-below-lines`` opens a
+# little breathing room beneath each data row so its rule sits clear of
+# the text rather than hard against the next row's glyphs.
+_TABLE_HEADER_TINT: tuple[float, float, float, float] = (0.5, 0.5, 0.5, 0.16)
+_TABLE_RULE_TINT: tuple[float, float, float, float] = (0.5, 0.5, 0.5, 0.30)
+_TABLE_BOX_INSET_PX: int = 0
+_TABLE_ROW_VPADDING_PX: int = 4
+_TABLE_HEADER_VPADDING_PX: int = 4
+
+
 # Metadata line (Created / Modified / tags) under the document title.
 # A neutral dim grey for the text, a slightly reduced scale so it reads
 # as secondary to the title and body, and a gap below the text that
@@ -531,6 +574,8 @@ def build_tag_table(*, char_width_px: int) -> Gtk.TextTagTable:
     table.add(
         _make_code_block_tag(TagName.CODE_BLOCK, char_width_px=char_width_px)
     )
+    table.add(_make_table_row_tag(TagName.TABLE_ROW, is_header=False))
+    table.add(_make_table_row_tag(TagName.TABLE_HEADER, is_header=True))
     table.add(_make_metadata_tag(TagName.METADATA))
     table.add(
         _make_error_notice_tag(
@@ -601,6 +646,20 @@ def build_wash_specs() -> dict[TagName, WashSpec]:
         tint=_CODE_BLOCK_TINT,
         box_left_inset_px=_CODE_BLOCK_HMARGIN_PX,
         box_right_inset_px=_CODE_BLOCK_HMARGIN_PX,
+    )
+    # Table header: a tint band (full fill) spanning the body column.
+    specs[TagName.TABLE_HEADER] = WashSpec(
+        tint=_TABLE_HEADER_TINT,
+        box_left_inset_px=_TABLE_BOX_INSET_PX,
+        box_right_inset_px=_TABLE_BOX_INSET_PX,
+    )
+    # Table data row: a 1-px rule at the line's bottom (hairline), the
+    # same painter shape the metadata divider uses.
+    specs[TagName.TABLE_ROW] = WashSpec(
+        tint=_TABLE_RULE_TINT,
+        box_left_inset_px=_TABLE_BOX_INSET_PX,
+        box_right_inset_px=_TABLE_BOX_INSET_PX,
+        hairline=True,
     )
     specs[TagName.METADATA] = WashSpec(
         tint=_METADATA_RULE_TINT,
@@ -781,6 +840,45 @@ def _make_code_block_tag(name: TagName, *, char_width_px: int) -> Gtk.TextTag:
     tag.set_property("right-margin", _CODE_BLOCK_HMARGIN_PX + char_width_px)
     tag.set_property("pixels-above-lines", _CODE_BLOCK_VPADDING_PX)
     tag.set_property("pixels-below-lines", _CODE_BLOCK_VPADDING_PX)
+    return tag
+
+
+def _make_table_row_tag(name: TagName, *, is_header: bool) -> Gtk.TextTag:
+    """Build a table-row paragraph tag (header or data role).
+
+    A rendered table is native buffer text: every row is one logical
+    line whose cells are aligned by a per-table :class:`Pango.TabArray`
+    that the renderer mints anonymously and applies on top of this tag.
+    This tag carries the *row-level* paragraph properties that are the
+    same for every table:
+
+    * ``wrap-mode = NONE`` so the row stays on a single line — wrapping
+      would break the tab-array column alignment, so it is disabled here
+      (overriding the view-level ``WORD_CHAR``). The renderer guarantees
+      a row never exceeds the column by truncating each cell to its
+      column width less :data:`config.defaults.TABLE_CELL_GUTTER_PX`.
+    * ``pixels-below-lines`` opens a little breathing room beneath the
+      row so the hairline rule (data rows) sits clear of the text.
+
+    The tag sets **no** left/right margin: a table fills the body text
+    column, and the tab stops position the columns within it. The tinted
+    band (header) or 1-px rule (data row) is painted separately by
+    ``ArticleTextView`` in :mod:`ui.note_view` via the
+    :class:`WashSpec` :func:`build_wash_specs` returns for this tag — a
+    *fill* for :data:`TagName.TABLE_HEADER`, a ``hairline`` for
+    :data:`TagName.TABLE_ROW`. The header's bold cell text is layered by
+    the renderer with the shared :data:`TagName.BOLD` tag, not set here.
+    """
+    tag = Gtk.TextTag.new(name.value)
+    tag.set_property("wrap-mode", Gtk.WrapMode.NONE)
+    tag.set_property(
+        "pixels-above-lines",
+        _TABLE_HEADER_VPADDING_PX if is_header else 0,
+    )
+    tag.set_property(
+        "pixels-below-lines",
+        _TABLE_HEADER_VPADDING_PX if is_header else _TABLE_ROW_VPADDING_PX,
+    )
     return tag
 
 

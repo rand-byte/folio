@@ -38,6 +38,12 @@ Principles & invariants
   decisions — measured once per font in the UI layer, cached for the
   container's lifetime, and intentionally not exposed in any settings
   panel.
+* ``TABLE_CELL_GUTTER_PX`` is the per-column safety gutter the renderer
+  subtracts from each table column's pixel width before fitting a cell,
+  so a truncated cell never reaches its tab stop and cascades the rest of
+  the row out of alignment. Like the other rendered-view constants it is
+  a typography decision, measured against the live column width in the UI
+  layer, not exposed in settings.
 * :data:`SEED_WELCOME_NOTE_ID` is the stable id of the welcome note the
   v1 migration seeds into a fresh database. The note's *source* is no
   longer kept here: it moved to the ``system_docs`` package
@@ -115,6 +121,21 @@ text, expressed as a multiple of the body font's ``"M"`` glyph width.
 Applied as ``left-margin`` / ``right-margin`` on the rendered-view
 ``Gtk.TextView``. Doubled in the column's outer width calculation so the
 text area stays at :data:`TARGET_CHARS_PER_LINE` characters wide.
+"""
+
+TABLE_CELL_GUTTER_PX: int = 8
+"""Per-column safety gutter for tab-array tables, in pixels.
+
+The rendered view lays each table row out as native buffer text whose
+columns are aligned by a :class:`Pango.TabArray` (one tab stop per
+column boundary). With wrapping disabled on the row, a cell whose
+rendered width *reached* its column's tab stop would push Pango on to
+the next stop and cascade every later cell in the row out of alignment.
+The renderer therefore truncates each cell to its column width *minus*
+this gutter, so a fitted cell always stops short of its tab stop even
+under small per-run measurement error. Consumed by
+:mod:`giruntime.ui.note_render.textbuffer_renderer`; a typography
+decision, not a runtime knob.
 """
 
 SNIPPET_MAX_CHARS: int = 200

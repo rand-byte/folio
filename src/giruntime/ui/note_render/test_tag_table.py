@@ -51,6 +51,7 @@ _PARAGRAPH_BACKGROUND_TAGS: tuple[TagName, ...] = (
     TagName.ADMONITION_CAUTION_BODY,
     TagName.BLOCKQUOTE_BODY,
     TagName.CODE_BLOCK,
+    TagName.TABLE_HEADER,
 )
 
 
@@ -80,6 +81,8 @@ class TagNameTests(unittest.TestCase):
             TagName.BLOCKQUOTE_ATTRIBUTION.value, "blockquote_attribution"
         )
         self.assertEqual(TagName.CODE_BLOCK.value, "code_block")
+        self.assertEqual(TagName.TABLE_ROW.value, "table_row")
+        self.assertEqual(TagName.TABLE_HEADER.value, "table_header")
         self.assertEqual(TagName.METADATA.value, "metadata")
         self.assertEqual(TagName.ERROR_NOTICE_ICON.value, "error_notice_icon")
         self.assertEqual(TagName.ERROR_NOTICE_TITLE.value, "error_notice_title")
@@ -128,6 +131,8 @@ class TagNameTests(unittest.TestCase):
             "BLOCKQUOTE_BODY",
             "BLOCKQUOTE_ATTRIBUTION",
             "CODE_BLOCK",
+            "TABLE_ROW",
+            "TABLE_HEADER",
             "METADATA",
             "ERROR_NOTICE_ICON",
             "ERROR_NOTICE_TITLE",
@@ -727,13 +732,36 @@ class WashSpecTests(unittest.TestCase):
         self.assertIn(TagName.METADATA, self.specs)
         self.assertTrue(self.specs[TagName.METADATA].hairline)
 
-    def test_only_metadata_is_a_hairline_spec(self) -> None:
-        # Every other wash-bearing tag paints a full-height tinted
-        # block, not a hairline. Guards against a future block kind
-        # accidentally inheriting the hairline flag.
+    def test_table_header_wash_spec_is_a_fill_band(self) -> None:
+        # The header row paints a full tint band (not a hairline) so it
+        # reads as a header.
+        self.assertIn(TagName.TABLE_HEADER, self.specs)
+        self.assertFalse(self.specs[TagName.TABLE_HEADER].hairline)
+
+    def test_table_row_wash_spec_is_a_hairline(self) -> None:
+        # Each data row paints a 1-px bottom rule to separate it from the
+        # next row, the same painter shape as the metadata divider.
+        self.assertIn(TagName.TABLE_ROW, self.specs)
+        self.assertTrue(self.specs[TagName.TABLE_ROW].hairline)
+
+    def test_table_specs_span_the_full_text_column(self) -> None:
+        # A table fills the body column, so its band / rule sit at zero
+        # inset on both sides.
+        for name in (TagName.TABLE_HEADER, TagName.TABLE_ROW):
+            with self.subTest(name=name):
+                spec = self.specs[name]
+                self.assertEqual(spec.box_left_inset_px, 0)
+                self.assertEqual(spec.box_right_inset_px, 0)
+
+    def test_only_metadata_and_table_rows_are_hairline_specs(self) -> None:
+        # The hairline shape is shared by the metadata divider and table
+        # data rows; every other wash-bearing tag paints a full-height
+        # fill. Guards against a future block kind accidentally
+        # inheriting the hairline flag.
+        hairline_names = {TagName.METADATA, TagName.TABLE_ROW}
         for name, spec in self.specs.items():
             with self.subTest(name=name):
-                self.assertEqual(spec.hairline, name is TagName.METADATA)
+                self.assertEqual(spec.hairline, name in hairline_names)
 
 
 class BuildSheetWashTests(unittest.TestCase):

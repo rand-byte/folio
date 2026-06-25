@@ -213,7 +213,7 @@ from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from datetime import datetime
 
-from gi.repository import Gdk, GObject, Graphene, Gsk, Gtk
+from gi.repository import Gdk, GObject, Graphene, Gsk, Gtk, Pango
 
 from config.defaults import (
     ARTICLE_BOTTOM_MARGIN_LINES,
@@ -234,7 +234,10 @@ from giruntime.ui.note_render.tag_table import (
     build_tag_table,
     build_wash_specs,
 )
-from giruntime.ui.note_render.textbuffer_renderer import TextBufferRenderer
+from giruntime.ui.note_render.textbuffer_renderer import (
+    CellWidthMeasurer,
+    TextBufferRenderer,
+)
 from models.note import Note
 from models.parse_error import ParseError
 from storage.protocols import (
@@ -1695,6 +1698,7 @@ class NoteView(Gtk.Box):
         self._renderer = TextBufferRenderer(
             image_bytes_for=self._resolve_image_bytes,
             column_width_px=surface.container.text_column_width,
+            cell_width_px=make_cell_width_measurer(surface.text_view),
             tag_table=surface.tag_table,
         )
 
@@ -1797,7 +1801,6 @@ class NoteView(Gtk.Box):
                 note.source,
                 self._buffer,
                 note_id=note.id,
-                attach_widget=self._attach_child_widget,
                 post_title_hook=self._insert_metadata_after_title,
             )
         except ParseError as exc:
@@ -1922,24 +1925,6 @@ class NoteView(Gtk.Box):
     # ------------------------------------------------------------------
     # Renderer wiring
     # ------------------------------------------------------------------
-
-    def _attach_child_widget(
-        self,
-        anchor: Gtk.TextChildAnchor,
-        widget: Gtk.Widget,
-    ) -> None:
-        """Adapter for the renderer's ``WidgetAttacher`` contract.
-
-        :data:`WidgetAttacher` (defined in
-        :mod:`ui.note_render.textbuffer_renderer`) is
-        ``Callable[[Gtk.TextChildAnchor, Gtk.Widget], None]`` —
-        anchor first, widget second — because anchor *creation* is
-        the renderer's first step. :meth:`Gtk.TextView.add_child_at_anchor`
-        in GTK 4 takes the *child first, anchor second*. This adapter
-        bridges the two without leaking the GTK 4 parameter order
-        into the renderer's pure-AST interface.
-        """
-        self._text_view.add_child_at_anchor(widget, anchor)
 
     def _resolve_image_bytes(self, filename: str) -> bytes:
         """The :data:`ImageBytesResolver` plugged into the renderer.
@@ -2067,6 +2052,51 @@ def _make_pango_line_height_measurer(widget: Gtk.Widget) -> LineHeightMeasurer:
         layout = widget.create_pango_layout(_MEASUREMENT_GLYPH)
         _, log_rect = layout.get_pixel_extents()
         return int(log_rect.height)
+
+    return measure
+
+
+_CELL_MEASURE_MONOSPACE_FAMILY: str = "monospace"
+"""Font family the cell-width measurer applies for monospace runs.
+
+It must match the family the :data:`TagName.MONOSPACE` tag sets (also
+``"monospace"``) so a measured monospace cell width tracks how the tag
+actually renders it. Kept local to the production measurer; the small
+per-column gutter absorbs any residual difference.
+"""
+
+
+def make_cell_width_measurer(widget: Gtk.Widget) -> CellWidthMeasurer:
+    """Build the production :data:`CellWidthMeasurer` for a widget's font.
+
+    The returned closure lays the run's text out in the widget's Pango
+    context, applying a bold-weight and/or monospace-family attribute to
+    match the run's width class, and returns the logical pixel width.
+    Shared by :class:`NoteView` and
+    :class:`giruntime.ui.help_window.HelpWindow` — both build their own
+    renderer and wire its ``cell_width_px`` from the article view via
+    this one factory, so a table fits its column identically in a note
+    and in the help reference.
+    """
+
+    def measure(text: str, bold: bool, monospace: bool) -> int:
+        layout = widget.create_pango_layout(text)
+        if bold or monospace:
+            end_index = len(text.encode("utf-8"))
+            attrs = Pango.AttrList.new()
+            if bold:
+                weight = Pango.attr_weight_new(Pango.Weight.BOLD)
+                weight.start_index = 0
+                weight.end_index = end_index
+                attrs.insert(weight)
+            if monospace:
+                family = Pango.attr_family_new(_CELL_MEASURE_MONOSPACE_FAMILY)
+                family.start_index = 0
+                family.end_index = end_index
+                attrs.insert(family)
+            layout.set_attributes(attrs)
+        _, log_rect = layout.get_pixel_extents()
+        return int(log_rect.width)
 
     return measure
 
