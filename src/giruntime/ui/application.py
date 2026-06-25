@@ -64,6 +64,15 @@ Principles & invariants
   the window being **hide-on-close** (set in :class:`HelpWindow` itself):
   closing it hides rather than destroys it, so the cached reference stays
   a live window across close/re-open.
+* The application's lifetime is bound to its **main window**, not to the
+  set of all registered windows. Because the help window is hide-on-close
+  it stays registered (just hidden) after a close, and a registered window
+  keeps :class:`Gtk.Application` running — so "quit when no windows remain"
+  would leave the process alive once help had been opened. The main
+  window's ``close-request`` therefore calls :meth:`Gtk.Application.quit`
+  (see :meth:`_on_main_window_close_request`), which also tears down the
+  hidden help window. This is sound precisely because of the single-window
+  assumption above: there is only ever one primary window to key off.
 """
 
 from __future__ import annotations
@@ -259,8 +268,41 @@ class NotesApplication(Gtk.Application):
             app_state=self._app_state,
             attachment_store=self._attachment_store,
         )
+        # The main window is the application's primary window: closing it
+        # must end the program even when the hide-on-close help window is
+        # still registered (and merely hidden). See
+        # :meth:`_on_main_window_close_request`.
+        window.connect("close-request", self._on_main_window_close_request)
         self._select_initial_note(self._note_store, self._app_state)
         return window
+
+    def _on_main_window_close_request(self, _window: MainWindow) -> bool:
+        """Quit the application when its primary window is closed.
+
+        ``Gtk.Application`` keeps its main loop alive while *any* window
+        is registered with it, and registration tracks windows by
+        existence, not visibility. The :class:`HelpWindow` is
+        **hide-on-close**, so closing it only hides it; the cached
+        instance stays a registered (hidden) window. A plain
+        "quit when the last window closes" rule therefore never fires
+        once help has been opened — the hidden help window keeps the
+        application running after the main window is gone, and the
+        process hangs.
+
+        Binding the lifetime to the main window removes that hang:
+        :meth:`Gtk.Application.quit` stops the loop and tears down the
+        lingering hidden help window. This relies on the design's
+        single-window assumption (exactly one :class:`MainWindow` plus an
+        optional :class:`HelpWindow`); if multiple primary windows were
+        ever introduced, this would need to quit on the *last* one
+        instead.
+
+        Returns ``False`` so GTK's default handler still runs and
+        destroys the window — the veto path (returning ``True``) is never
+        wanted here.
+        """
+        self.quit()
+        return False
 
     def _on_help_activated(
         self,
