@@ -442,14 +442,17 @@ _BLOCKQUOTE_ATTRIBUTION_SCALE: float = 0.9
 # full body text column (the table itself fills that column). The
 # header's tint shares the neutral-grey family of the code block, a hair
 # stronger so the header reads as a band; the rule reuses the metadata
-# rule's grey so the two hairlines match. ``pixels-below-lines`` opens a
-# little breathing room beneath each data row so its rule sits clear of
-# the text rather than hard against the next row's glyphs.
+# rule's grey so the two hairlines match. The vertical padding is applied
+# *symmetrically* (``pixels-above-lines`` == ``pixels-below-lines``) on
+# both row kinds, so a data row's hairline rule sits clear of the text on
+# both sides — the gap below row N and above row N+1 each contribute, and
+# the rule lands centred between them — and the header's text is centred
+# within its tint band rather than hugging the top edge.
 _TABLE_HEADER_TINT: tuple[float, float, float, float] = (0.5, 0.5, 0.5, 0.16)
 _TABLE_RULE_TINT: tuple[float, float, float, float] = (0.5, 0.5, 0.5, 0.30)
 _TABLE_BOX_INSET_PX: int = 0
-_TABLE_ROW_VPADDING_PX: int = 4
-_TABLE_HEADER_VPADDING_PX: int = 4
+_TABLE_ROW_VPADDING_PX: int = 7
+_TABLE_HEADER_VPADDING_PX: int = 8
 
 
 # Metadata line (Created / Modified / tags) under the document title.
@@ -857,8 +860,11 @@ def _make_table_row_tag(name: TagName, *, is_header: bool) -> Gtk.TextTag:
       (overriding the view-level ``WORD_CHAR``). The renderer guarantees
       a row never exceeds the column by truncating each cell to its
       column width less :data:`config.defaults.TABLE_CELL_GUTTER_PX`.
-    * ``pixels-below-lines`` opens a little breathing room beneath the
-      row so the hairline rule (data rows) sits clear of the text.
+    * ``pixels-above-lines`` / ``pixels-below-lines`` open *symmetric*
+      breathing room above and below the row, so a data row's hairline
+      rule sits clear of the text on both sides (the rule lands centred
+      in the gap between two rows) and the header text is centred within
+      its tint band.
 
     The tag sets **no** left/right margin: a table fills the body text
     column, and the tab stops position the columns within it. The tinted
@@ -871,14 +877,9 @@ def _make_table_row_tag(name: TagName, *, is_header: bool) -> Gtk.TextTag:
     """
     tag = Gtk.TextTag.new(name.value)
     tag.set_property("wrap-mode", Gtk.WrapMode.NONE)
-    tag.set_property(
-        "pixels-above-lines",
-        _TABLE_HEADER_VPADDING_PX if is_header else 0,
-    )
-    tag.set_property(
-        "pixels-below-lines",
-        _TABLE_HEADER_VPADDING_PX if is_header else _TABLE_ROW_VPADDING_PX,
-    )
+    vpadding = _TABLE_HEADER_VPADDING_PX if is_header else _TABLE_ROW_VPADDING_PX
+    tag.set_property("pixels-above-lines", vpadding)
+    tag.set_property("pixels-below-lines", vpadding)
     return tag
 
 

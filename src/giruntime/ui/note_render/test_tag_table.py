@@ -487,6 +487,44 @@ class AdmonitionTagPropertyTests(unittest.TestCase):
                     self.assertTrue(tag.get_property("accumulative-margin"))
 
 
+class TableRowTagPropertyTests(unittest.TestCase):
+    """The table row / header paragraph tags carry the row treatment."""
+
+    def setUp(self) -> None:
+        self.table = build_tag_table(char_width_px=_TEST_CHAR_WIDTH_PX)
+
+    def test_both_row_tags_set_wrap_mode_none(self) -> None:
+        # A row is one logical line aligned by a per-table tab array;
+        # wrapping would break that alignment, so it is disabled here.
+        for name in (TagName.TABLE_ROW, TagName.TABLE_HEADER):
+            with self.subTest(name=name):
+                tag = self.table.lookup(name.value)
+                self.assertEqual(
+                    tag.get_property("wrap-mode"), Gtk.WrapMode.NONE,
+                )
+
+    def test_both_row_tags_have_symmetric_vertical_padding(self) -> None:
+        # Vertical breathing room is symmetric (above == below) on both
+        # row kinds, so a data row's hairline rule sits clear of the
+        # text on both sides and the header text is centred in its band.
+        for name in (TagName.TABLE_ROW, TagName.TABLE_HEADER):
+            with self.subTest(name=name):
+                tag = self.table.lookup(name.value)
+                above = tag.get_property("pixels-above-lines")
+                below = tag.get_property("pixels-below-lines")
+                self.assertGreater(above, 0)
+                self.assertEqual(above, below)
+
+    def test_row_tags_set_no_block_margins(self) -> None:
+        # A table fills the body text column; the tab stops position the
+        # columns within it, so the row tags stamp no left/right margin.
+        for name in (TagName.TABLE_ROW, TagName.TABLE_HEADER):
+            with self.subTest(name=name):
+                tag = self.table.lookup(name.value)
+                self.assertFalse(tag.get_property("left-margin-set"))
+                self.assertFalse(tag.get_property("right-margin-set"))
+
+
 class BlockquoteTagPropertyTests(unittest.TestCase):
     """Blockquote body and attribution tags."""
 
