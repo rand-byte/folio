@@ -28,11 +28,11 @@ Principles & invariants
   property that decouples "where the wash paints" from "where the
   text starts", so a tinted box that is *wider* than the text on each
   side must be painted at snapshot time. Tables are no longer an
-  exception: a rendered table is native buffer text whose rows carry the
-  :data:`TagName.TABLE_HEADER` (tint band) / :data:`TagName.TABLE_ROW`
-  (bottom hairline) paragraph tags and whose columns are aligned by a
-  per-table :class:`Pango.TabArray` the renderer mints — no child widget
-  is involved.
+  is involved. Those table-row tags additionally carry a
+  ``left-margin`` of :data:`config.defaults.TABLE_CELL_HPADDING_PX`
+  (``accumulative-margin = True``) that insets each column's cell *text*
+  while the wash band / rule still span the full column — see
+  :func:`_make_table_row_tag`.
 * Admonition paragraph tags come in two roles per kind. The *label*
   paragraph carries the kind name on its own line; the *body* paragraph
   carries the prose. Both paragraphs share the per-kind wash spec so
@@ -78,6 +78,7 @@ from enum import StrEnum
 
 from gi.repository import Gtk, Pango
 
+from config.defaults import TABLE_CELL_HPADDING_PX
 from enums import AdmonitionKind
 
 
@@ -438,16 +439,21 @@ _BLOCKQUOTE_ATTRIBUTION_SCALE: float = 0.9
 # The *header* row paints a neutral tint band (a fill wash) behind the
 # line; each *data* row paints a 1-px rule at its bottom (a hairline
 # wash — the same painter shape the metadata divider uses) to separate
-# it from the next row. Both insets are zero so the band / rule span the
-# full body text column (the table itself fills that column). The
-# header's tint shares the neutral-grey family of the code block, a hair
-# stronger so the header reads as a band; the rule reuses the metadata
-# rule's grey so the two hairlines match. The vertical padding is applied
-# *symmetrically* (``pixels-above-lines`` == ``pixels-below-lines``) on
-# both row kinds, so a data row's hairline rule sits clear of the text on
-# both sides — the gap below row N and above row N+1 each contribute, and
-# the rule lands centred between them — and the header's text is centred
-# within its tint band rather than hugging the top edge.
+# it from the next row. Two distinct insets apply here and must not be
+# confused. The **wash** inset (these box-inset constants) is zero so the
+# band / rule span the *full* body text column (the table itself fills
+# that column). The **text** inset is separate: the row tags carry
+# ``TABLE_CELL_HPADDING_PX`` as a ``left-margin`` so each column's cell
+# *text* sits that far inside its column boundary, while the band / rule
+# behind it still reach both column edges. The header's tint shares the
+# neutral-grey family of the code block, a hair stronger so the header
+# reads as a band; the rule reuses the metadata rule's grey so the two
+# hairlines match. The vertical padding is applied *symmetrically*
+# (``pixels-above-lines`` == ``pixels-below-lines``) on both row kinds,
+# so a data row's hairline rule sits clear of the text on both sides —
+# the gap below row N and above row N+1 each contribute, and the rule
+# lands centred between them — and the header's text is centred within
+# its tint band rather than hugging the top edge.
 _TABLE_HEADER_TINT: tuple[float, float, float, float] = (0.5, 0.5, 0.5, 0.16)
 _TABLE_RULE_TINT: tuple[float, float, float, float] = (0.5, 0.5, 0.5, 0.30)
 _TABLE_BOX_INSET_PX: int = 0
@@ -859,24 +865,48 @@ def _make_table_row_tag(name: TagName, *, is_header: bool) -> Gtk.TextTag:
       would break the tab-array column alignment, so it is disabled here
       (overriding the view-level ``WORD_CHAR``). The renderer guarantees
       a row never exceeds the column by truncating each cell to its
-      column width less :data:`config.defaults.TABLE_CELL_GUTTER_PX`.
+      column width less ``2 × TABLE_CELL_HPADDING_PX`` (see below).
     * ``pixels-above-lines`` / ``pixels-below-lines`` open *symmetric*
       breathing room above and below the row, so a data row's hairline
       rule sits clear of the text on both sides (the rule lands centred
       in the gap between two rows) and the header text is centred within
       its tint band.
 
-    The tag sets **no** left/right margin: a table fills the body text
-    column, and the tab stops position the columns within it. The tinted
-    band (header) or 1-px rule (data row) is painted separately by
-    ``ArticleTextView`` in :mod:`ui.note_view` via the
-    :class:`WashSpec` :func:`build_wash_specs` returns for this tag — a
-    *fill* for :data:`TagName.TABLE_HEADER`, a ``hairline`` for
-    :data:`TagName.TABLE_ROW`. The header's bold cell text is layered by
-    the renderer with the shared :data:`TagName.BOLD` tag, not set here.
+    The tag insets the cell *text* by
+    :data:`config.defaults.TABLE_CELL_HPADDING_PX` on the left via
+    ``left-margin``, with ``accumulative-margin = True`` so that inset
+    *stacks* on the textview's widget-level ``left-margin`` rather than
+    replacing it — without the flag a non-accumulative paragraph margin
+    overrides the widget margin and the text escapes the body column to
+    the left (the same reason the admonition / blockquote / code tags
+    stack; verified empirically against this GTK build). Because the
+    per-table :class:`Pango.TabArray` stops are measured from the start
+    of the line's text — i.e. *after* this ``left-margin`` — the single
+    ``left-margin`` shifts every column's text right by the padding
+    relative to its boundary in one stroke (the first column, with no
+    preceding tab, and every later column, which starts at a tab stop,
+    inset equally). ``right-margin`` is left unset: the matching right
+    padding is realised by the renderer reserving
+    ``2 × TABLE_CELL_HPADDING_PX`` as each cell's truncation budget (see
+    :func:`giruntime.ui.note_render.textbuffer_renderer._truncate_cell`),
+    so left and right cell padding stay equal and a fitted cell still
+    stops short of its tab stop.
+
+    The tab stops themselves are **not** moved, so a table still fills
+    the body text column and the wash band (header) or 1-px rule (data
+    row) still spans the *full* column — only the cell *text* moves
+    inward. The band / rule is painted separately by ``ArticleTextView``
+    in :mod:`ui.note_view` via the :class:`WashSpec`
+    :func:`build_wash_specs` returns for this tag (a *fill* for
+    :data:`TagName.TABLE_HEADER`, a ``hairline`` for
+    :data:`TagName.TABLE_ROW`), whose box insets stay zero. The header's
+    bold cell text is layered by the renderer with the shared
+    :data:`TagName.BOLD` tag, not set here.
     """
     tag = Gtk.TextTag.new(name.value)
     tag.set_property("wrap-mode", Gtk.WrapMode.NONE)
+    tag.set_property("accumulative-margin", True)
+    tag.set_property("left-margin", TABLE_CELL_HPADDING_PX)
     vpadding = _TABLE_HEADER_VPADDING_PX if is_header else _TABLE_ROW_VPADDING_PX
     tag.set_property("pixels-above-lines", vpadding)
     tag.set_property("pixels-below-lines", vpadding)

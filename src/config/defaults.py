@@ -38,11 +38,20 @@ Principles & invariants
   decisions — measured once per font in the UI layer, cached for the
   container's lifetime, and intentionally not exposed in any settings
   panel.
-* ``TABLE_CELL_GUTTER_PX`` is the per-column safety gutter the renderer
-  subtracts from each table column's pixel width before fitting a cell,
-  so a truncated cell never reaches its tab stop and cascades the rest of
-  the row out of alignment. Like the other rendered-view constants it is
-  a typography decision, measured against the live column width in the UI
+* ``TABLE_CELL_HPADDING_PX`` is the symmetric horizontal padding inside
+  every rendered-table cell. It is realised two ways that together read
+  as one inset: the table-row paragraph tags carry it as their
+  ``left-margin`` (so each column's *text* sits this far inside its
+  column's left boundary), and the renderer reserves *twice* it as each
+  cell's right-truncation budget (so a fitted cell ends the same
+  distance short of the next column's boundary). The result is equal
+  left and right padding inside the cell, while the column boundaries,
+  the proportional ``[cols=…]`` geometry, and the header tint band / row
+  hairline (which still span the full column) are all unchanged. The
+  reserved right half also keeps a fitted cell short of its tab stop —
+  the job the former per-column safety gutter did — so no separate
+  gutter is subtracted. Like the other rendered-view constants it is a
+  typography decision, tuned against the live column width in the UI
   layer, not exposed in settings.
 * :data:`SEED_WELCOME_NOTE_ID` is the stable id of the welcome note the
   v1 migration seeds into a fresh database. The note's *source* is no
@@ -123,18 +132,36 @@ Applied as ``left-margin`` / ``right-margin`` on the rendered-view
 text area stays at :data:`TARGET_CHARS_PER_LINE` characters wide.
 """
 
-TABLE_CELL_GUTTER_PX: int = 8
-"""Per-column safety gutter for tab-array tables, in pixels.
+TABLE_CELL_HPADDING_PX: int = 16
+"""Symmetric horizontal padding inside a rendered table cell, in pixels.
 
 The rendered view lays each table row out as native buffer text whose
 columns are aligned by a :class:`Pango.TabArray` (one tab stop per
-column boundary). With wrapping disabled on the row, a cell whose
-rendered width *reached* its column's tab stop would push Pango on to
-the next stop and cascade every later cell in the row out of alignment.
-The renderer therefore truncates each cell to its column width *minus*
-this gutter, so a fitted cell always stops short of its tab stop even
-under small per-run measurement error. Consumed by
-:mod:`giruntime.ui.note_render.textbuffer_renderer`; a typography
+column boundary). Cell *text* is inset from its column boundary by this
+amount on **both** sides, so it reads as a padded cell rather than
+butting against the column edge.
+
+The padding is applied in two halves that together stay symmetric
+without moving any tab stop:
+
+* the **left** inset is the row paragraph tag's ``left-margin`` — because
+  the tab stops are measured from the start of the line's text (after the
+  paragraph left-margin), one ``left-margin`` shifts every column's text
+  right by this amount relative to its boundary in a single stroke (the
+  first column, which has no preceding tab, and every later column, which
+  starts at a tab stop, inset equally);
+* the **right** inset is realised by the renderer reserving ``2 ×`` this
+  value as each cell's truncation budget, so a fitted cell ends this far
+  short of the next column's boundary. That same reservation keeps the
+  cell short of its tab stop (the old per-column gutter's role), so the
+  row's column alignment still holds with no separate gutter subtracted.
+
+The cell boundaries, the proportional ``[cols=…]`` math, and the header
+tint band / row hairline (all painted full-column) are unchanged — only
+the cell *content* moves inward. Consumed by
+:mod:`giruntime.ui.note_render.tag_table` (the ``left-margin``) and
+:mod:`giruntime.ui.note_render.textbuffer_renderer` (the ``2 ×`` right
+reservation). Like the other rendered-view constants it is a typography
 decision, not a runtime knob.
 """
 

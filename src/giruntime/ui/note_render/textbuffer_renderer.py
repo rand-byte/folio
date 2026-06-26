@@ -50,11 +50,14 @@ Principles & invariants
   alignment. Pango offers no per-tab-column ellipsization, so the
   renderer measures cell text through the injected
   :data:`CellWidthMeasurer` and truncates over-budget cells with an
-  ellipsis (:func:`_truncate_cell`), reserving a small per-column gutter
-  (:data:`config.defaults.TABLE_CELL_GUTTER_PX`) so a fitted cell never
-  reaches its stop. Copying a truncated cell yields the truncated
-  display text — the rendered buffer is a read-only projection of the
-  source, not the source of truth.
+  ellipsis (:func:`_truncate_cell`). Cells are padded symmetrically: the
+  row tag's ``left-margin`` insets the text by
+  :data:`config.defaults.TABLE_CELL_HPADDING_PX` on the left, and this
+  path reserves ``2 ×`` that value as the right truncation budget, so a
+  fitted cell ends the same distance short of the next column's boundary
+  and never reaches its tab stop. Copying a truncated cell yields the
+  truncated display text — the rendered buffer is a read-only projection
+  of the source, not the source of truth.
 * Inline runs are emitted with a tag stack. A run of plain
   :class:`Text` records its start offset, inserts text, and applies
   every tag currently on the stack to the inserted range. This makes
@@ -149,7 +152,7 @@ from giruntime.ui.note_render.tag_table import (
     admonition_label_tag_name,
     heading_tag_name,
 )
-from config.defaults import TABLE_CELL_GUTTER_PX
+from config.defaults import TABLE_CELL_HPADDING_PX
 from enums import HeadingTrailing
 from storage.protocols import ColumnWidthResolver, ImageBytesResolver
 
@@ -659,13 +662,16 @@ class TextBufferRenderer:
         :class:`Pango.TabArray` (pixel tab stops at the cumulative
         column edges). Wrapping is disabled on the row (via the
         :data:`TagName.TABLE_ROW` / :data:`TagName.TABLE_HEADER` tag), so
-        each cell is truncated with an ellipsis to its column width less
-        :data:`config.defaults.TABLE_CELL_GUTTER_PX` — the gutter keeps a
-        fitted cell short of its tab stop so it never cascades the rest
-        of the row out of alignment (see :func:`_truncate_cell`). The
-        first row is the header: its cells render bold and its line
-        carries :data:`TagName.TABLE_HEADER` (a tint band); every other
-        row carries :data:`TagName.TABLE_ROW` (a bottom hairline rule).
+        each cell is padded symmetrically: the row tag's ``left-margin``
+        insets the text by :data:`config.defaults.TABLE_CELL_HPADDING_PX`
+        on the left, and each cell is truncated with an ellipsis to its
+        column width less ``2 × TABLE_CELL_HPADDING_PX`` — reserving the
+        same padding on the right and keeping a fitted cell short of its
+        tab stop so it never cascades the rest of the row out of
+        alignment (see :func:`_truncate_cell`). The first row is the
+        header: its cells render bold and its line carries
+        :data:`TagName.TABLE_HEADER` (a tint band); every other row
+        carries :data:`TagName.TABLE_ROW` (a bottom hairline rule).
 
         No child anchor or widget is created — the table is part of the
         selectable / copyable buffer. Copying a truncated cell yields the
@@ -702,11 +708,12 @@ class TextBufferRenderer:
     ) -> None:
         """Emit one table row as a tab-separated, tagged buffer line.
 
-        Each cell is flattened, truncated to its column width (less the
-        gutter), and inserted; a ``\\t`` separates columns (emitted even
-        for an empty cell so the next cell keeps its tab stop). The whole
-        line then carries the row/header paragraph tag plus the per-table
-        ``tab_tag``.
+        Each cell is flattened, truncated to its column width (less
+        ``2 × TABLE_CELL_HPADDING_PX``, the reserved right padding), and
+        inserted; a ``\\t`` separates columns (emitted even for an empty
+        cell so the next cell keeps its tab stop). The whole line then
+        carries the row/header paragraph tag (which adds the matching
+        left ``left-margin`` text inset) plus the per-table ``tab_tag``.
         """
         row_start = buffer.get_end_iter().get_offset()
         last_col = len(row.cells) - 1
@@ -714,7 +721,7 @@ class TextBufferRenderer:
             runs = _truncate_cell(
                 self._flatten_cell(cell, header_bold=is_header),
                 column_widths[col_index],
-                TABLE_CELL_GUTTER_PX,
+                2 * TABLE_CELL_HPADDING_PX,
                 self._cell_width_px,
             )
             for run in runs:

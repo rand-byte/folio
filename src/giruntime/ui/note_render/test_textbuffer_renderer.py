@@ -27,6 +27,7 @@ from giruntime.ui.note_render.textbuffer_renderer import (
 )
 from enums import AdmonitionKind
 from models.parse_error import ParseError
+from config.defaults import TABLE_CELL_HPADDING_PX
 
 
 # ---------------------------------------------------------------------------
@@ -1229,8 +1230,8 @@ class TabArrayTableRenderingTests(unittest.TestCase):
         self.assertEqual(_line_text(buffer, 0).rstrip("\n"), "short")
 
     def test_over_budget_cell_is_truncated_with_ellipsis(self) -> None:
-        # A narrow column (90 px per column, 8 px gutter) forces the long
-        # cell to truncate; the fake measurer makes the cut deterministic.
+        # A narrow column (90 px per column) forces the long cell to
+        # truncate; the fake measurer makes the cut deterministic.
         renderer, buffer, _ = _build_renderer(column_width_px=lambda: 90)
         renderer.render_into(
             "|===\n|abcdefghijklmnopqrstuvwxyz\n|===\n", buffer, note_id="n1",
@@ -1238,6 +1239,34 @@ class TabArrayTableRenderingTests(unittest.TestCase):
         text = _line_text(buffer, 0).rstrip("\n")
         self.assertTrue(text.endswith("\u2026"))
         self.assertLess(len(text), len("abcdefghijklmnopqrstuvwxyz"))
+
+    def test_cell_truncation_reserves_two_hpadding(self) -> None:
+        # The renderer reserves ``2 × TABLE_CELL_HPADDING_PX`` as each
+        # cell's right padding (the symmetric partner of the row tag's
+        # left-margin text inset). A cell sized to leave only a token
+        # 8 px of slack beyond it therefore truncates, because the
+        # reserved ``2 × hpadding`` (≥ 8) exceeds that slack — pinning
+        # that the renderer passes the larger reservation, not a small
+        # gutter. The counterfactual (the same runs under an 8 px
+        # reservation) is asserted directly so the straddle is explicit.
+        chars = 12
+        cell_px = chars * _FAKE_CHAR_PX
+        column = cell_px + 8  # only 8 px of slack beyond the cell
+        runs = [_CellRun(text="x" * chars, bold=False, monospace=False, tags=())]
+        # Under a token 8 px reservation the cell fits unchanged …
+        self.assertEqual(
+            _truncate_cell(runs, column, 8, _fake_cell_width), runs,
+        )
+        # … but the renderer reserves 2 × hpadding, which is larger, so
+        # the rendered cell is truncated.
+        self.assertGreater(2 * TABLE_CELL_HPADDING_PX, 8)
+        renderer, buffer, _ = _build_renderer(column_width_px=lambda: column)
+        renderer.render_into(
+            f"|===\n|{'x' * chars}\n|===\n", buffer, note_id="n1",
+        )
+        text = _line_text(buffer, 0).rstrip("\n")
+        self.assertTrue(text.endswith("\u2026"))
+        self.assertLess(len(text), chars)
 
     def test_empty_cell_still_emits_its_tab(self) -> None:
         # A row whose first cell is empty keeps its separator so the

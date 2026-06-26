@@ -19,6 +19,7 @@ from giruntime.ui.note_render.tag_table import (
     heading_tag_name,
 )
 from enums import AdmonitionKind
+from config.defaults import TABLE_CELL_HPADDING_PX
 
 
 # Default M-width used by tests that don't care about the actual
@@ -515,13 +516,23 @@ class TableRowTagPropertyTests(unittest.TestCase):
                 self.assertGreater(above, 0)
                 self.assertEqual(above, below)
 
-    def test_row_tags_set_no_block_margins(self) -> None:
-        # A table fills the body text column; the tab stops position the
-        # columns within it, so the row tags stamp no left/right margin.
+    def test_row_tags_inset_text_by_hpadding(self) -> None:
+        # A table fills the body text column and the tab stops position
+        # the columns within it; the cell *text* is inset from each
+        # column's left boundary by ``TABLE_CELL_HPADDING_PX`` via the
+        # row tag's ``left-margin``. ``accumulative-margin`` must be True
+        # so the inset stacks on the view's widget left-margin rather
+        # than overriding it (which would push the text out of the
+        # column). The right margin stays unset — the matching right
+        # padding is the renderer's truncation reservation.
         for name in (TagName.TABLE_ROW, TagName.TABLE_HEADER):
             with self.subTest(name=name):
                 tag = self.table.lookup(name.value)
-                self.assertFalse(tag.get_property("left-margin-set"))
+                self.assertTrue(tag.get_property("left-margin-set"))
+                self.assertEqual(
+                    tag.get_property("left-margin"), TABLE_CELL_HPADDING_PX,
+                )
+                self.assertTrue(tag.get_property("accumulative-margin"))
                 self.assertFalse(tag.get_property("right-margin-set"))
 
 
