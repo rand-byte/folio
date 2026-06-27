@@ -1835,6 +1835,37 @@ class SoftBreakRenderingTests(unittest.TestCase):
         self.assertNotIn("first part\nsecond part", text)
 
 
+@unittest.skipUnless(_display_available(), "no GDK display")
+class HardBreakRenderingTests(unittest.TestCase):
+    """A `` +`` hard break renders a forced newline (not a reflow space),
+    and the literal ``+`` marker never reaches the buffer.
+    """
+
+    def test_hard_break_renders_as_newline(self) -> None:
+        renderer, buffer, _ = _build_renderer()
+        renderer.render_into("= D\n\nalpha +\nbeta\n", buffer, note_id="n1")
+        text = _full_text(buffer)
+        self.assertIn("alpha\nbeta", text)
+        self.assertNotIn("alpha beta", text)
+
+    def test_hard_break_marker_plus_is_absent(self) -> None:
+        renderer, buffer, _ = _build_renderer()
+        renderer.render_into("= D\n\nalpha +\nbeta\n", buffer, note_id="n1")
+        text = _full_text(buffer)
+        # The body line previously rendered a literal " +"; after the
+        # change the marker is consumed into the break.
+        self.assertNotIn("+", text)
+
+    def test_soft_break_still_renders_as_space(self) -> None:
+        # Regression guard alongside the hard-break behaviour: an unmarked
+        # boundary continues to reflow to a single space.
+        renderer, buffer, _ = _build_renderer()
+        renderer.render_into("= D\n\nalpha\nbeta\n", buffer, note_id="n1")
+        text = _full_text(buffer)
+        self.assertIn("alpha beta", text)
+        self.assertNotIn("alpha\nbeta", text)
+
+
 # ---------------------------------------------------------------------------
 # post_title_hook
 # ---------------------------------------------------------------------------

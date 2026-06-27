@@ -51,6 +51,7 @@ from asciidoc.ast import (
     Bold,
     CodeBlock,
     Document,
+    HardBreak,
     Image,
     InlineNode,
     Italic,
@@ -123,14 +124,16 @@ def _flatten(inlines: Iterable[InlineNode]) -> str:
     Exhaustive over :data:`InlineNode`: emphasis wrappers recurse into
     their children, a :class:`Monospace` span yields its literal
     content, a :class:`Link` yields its visible text (never the URL),
-    and a :class:`SoftBreak` becomes a single space.
+    and both a :class:`SoftBreak` and a :class:`HardBreak` become a
+    single space (snippets are one-line previews, so even a hard break
+    collapses rather than wrapping the snippet).
     """
     parts: list[str] = []
     for node in inlines:
         match node:
             case Text(content=content):
                 parts.append(content)
-            case SoftBreak():
+            case SoftBreak() | HardBreak():
                 parts.append(" ")
             case (
                 Bold(children=children)

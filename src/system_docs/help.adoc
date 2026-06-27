@@ -112,6 +112,15 @@ bold), though different markers may nest, such as bold inside italic. An
 unpaired marker on a line is reported as an error rather than rendered
 literally.
 
+=== Hard line breaks
+
+A paragraph normally reflows — a plain source newline becomes a space,
+so short lines join into one. To force a visible break instead, end a
+line with a space and a single plus sign. Roses are red, +
+topazes are blue, +
+and this line break was made with a trailing plus. A plus sign anywhere
+else — as in `a+b` — has no special meaning and stays literal.
+
 == Blocks
 
 Blocks are the larger structures stacked down the page: links, lists,

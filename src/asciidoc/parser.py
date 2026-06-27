@@ -77,6 +77,7 @@ Principles & invariants
 from __future__ import annotations
 
 import re
+from collections.abc import Iterable
 from dataclasses import dataclass
 
 from asciidoc.ast import (
@@ -85,6 +86,7 @@ from asciidoc.ast import (
     Blockquote,
     CodeBlock,
     Document,
+    HardBreak,
     Image,
     InlineNode,
     ListItem,
@@ -569,9 +571,11 @@ class _Parser:
         """Consume consecutive :class:`LineToken`s into one paragraph.
 
         Inline content is parsed per-line so that error line numbers in
-        :class:`ParseError`\\ s are exact. Lines are joined in the AST
-        with :class:`SoftBreak` connectors so the renderer can decide
-        whether to honour soft line breaks.
+        :class:`ParseError`\\ s are exact. Lines are joined in the AST by
+        :func:`_join_source_lines`, which emits a :class:`SoftBreak`
+        between adjacent lines — or a :class:`HardBreak` when the earlier
+        line ended with the `` +`` marker — so the renderer can decide how
+        to honour each kind of line break.
         """
         first_line_token = self.tokens[self.pos]
         assert isinstance(first_line_token, LineToken), (
@@ -579,21 +583,20 @@ class _Parser:
         )
         start_line = first_line_token.line
 
-        inlines: list[InlineNode] = []
-        is_first = True
+        line_tokens: list[LineToken] = []
         while (
             self.pos < len(self.tokens)
             and isinstance(self.tokens[self.pos], LineToken)
         ):
             line_token = self.tokens[self.pos]
             assert isinstance(line_token, LineToken)
-            if not is_first:
-                inlines.append(SoftBreak(source_line=line_token.line))
-            inlines.extend(parse_inline(line_token.text, line_token.line))
-            is_first = False
+            line_tokens.append(line_token)
             self.pos += 1
 
-        return Paragraph(inlines=tuple(inlines), source_line=start_line)
+        return Paragraph(
+            inlines=_join_source_lines(line_tokens),
+            source_line=start_line,
+        )
 
     # -- lists --------------------------------------------------------------
 
@@ -1190,9 +1193,16 @@ class _Parser:
         Because users routinely wrap admonition prose across multiple
         source lines without a blank between, the parser absorbs any
         immediately-following :class:`LineToken`\\ s into the same
-        paragraph — joined with :class:`SoftBreak` connectors,
-        exactly as :meth:`_parse_paragraph` does. The run ends at the
-        first :class:`BlankToken` or non-paragraph block-start token.
+        paragraph. The opener and its continuation lines are joined by
+        the shared :func:`_join_source_lines` helper — the same helper
+        :meth:`_parse_paragraph` uses — so a `` +`` hard-break marker on
+        the opener or any continuation line yields a :class:`HardBreak`
+        joiner, and an unmarked boundary a :class:`SoftBreak`. The opener
+        (a :class:`SingleAdmonitionToken`, not a :class:`LineToken`) is
+        wrapped in a synthetic :class:`LineToken` carrying its text and
+        line so the join logic — including marker detection — applies to
+        it uniformly. The run ends at the first :class:`BlankToken` or
+        non-paragraph block-start token.
 
         The result is exactly one :class:`Paragraph` in the
         :class:`Admonition`'s ``blocks`` field, so the renderer's
@@ -1203,21 +1213,25 @@ class _Parser:
         the error would point at the admonition's opener line.
         """
         self.pos += 1
-        inlines: list[InlineNode] = list(parse_inline(token.text, token.line))
-        # Walk forward absorbing consecutive LineTokens. Stop at the
-        # first BlankToken or non-LineToken — that token is the next
-        # block (or paragraph terminator) and is left for the outer
-        # block dispatch to handle.
+        # Treat the opener's text as the first source line of the run, then
+        # gather the consecutive continuation LineTokens. Stop at the first
+        # BlankToken or non-LineToken — that token is the next block (or
+        # paragraph terminator) and is left for the outer block dispatch.
+        line_tokens: list[LineToken] = [
+            LineToken(line=token.line, text=token.text),
+        ]
         while (
             self.pos < len(self.tokens)
             and isinstance(self.tokens[self.pos], LineToken)
         ):
-            line_token = self.tokens[self.pos]
-            assert isinstance(line_token, LineToken)
-            inlines.append(SoftBreak(source_line=line_token.line))
-            inlines.extend(parse_inline(line_token.text, line_token.line))
+            continuation = self.tokens[self.pos]
+            assert isinstance(continuation, LineToken)
+            line_tokens.append(continuation)
             self.pos += 1
-        paragraph = Paragraph(inlines=tuple(inlines), source_line=token.line)
+        paragraph = Paragraph(
+            inlines=_join_source_lines(line_tokens),
+            source_line=token.line,
+        )
         return Admonition(
             kind=token.admonition_kind,
             blocks=(paragraph,),
@@ -1491,6 +1505,70 @@ def parse_tags_value(
         seen.add(entry)
         normalised.append(entry)
     return tuple(sorted(normalised))
+
+
+# ---------------------------------------------------------------------------
+# Multi-line paragraph joining (soft / hard line breaks)
+# ---------------------------------------------------------------------------
+
+
+_HARD_BREAK_MARKER: str = " +"
+"""The AsciiDoc inline hard-break marker: a space followed by a plus.
+
+The lexer rstrips trailing whitespace off :attr:`LineToken.text`, so a
+line carries a hard break *iff* its (already-rstripped) text ends with
+this exact two-character sequence. See :func:`_split_hard_break_marker`.
+"""
+
+
+def _split_hard_break_marker(text: str) -> tuple[str, bool]:
+    """Return ``(content_without_marker, had_marker)``.
+
+    ``text`` is already rstripped by the lexer, so the marker is exactly
+    a trailing :data:`_HARD_BREAK_MARKER` (`` +``). When present, drop the
+    ``+`` and rstrip the residual whitespace; the leftover is the line's
+    content. A bare ``+`` with no preceding space (e.g. ``a+b``) is *not*
+    a marker and is returned unchanged — ``+`` has no other inline
+    meaning, so nothing else is affected.
+    """
+    if text.endswith(_HARD_BREAK_MARKER):
+        return text[:-1].rstrip(), True
+    return text, False
+
+
+def _join_source_lines(line_tokens: Iterable[LineToken]) -> tuple[InlineNode, ...]:
+    """Parse a run of paragraph source lines into joined inline nodes.
+
+    Each line's inlines are parsed individually (so :attr:`ParseError.line`
+    stays exact). Between two adjacent lines the joiner is a
+    :class:`HardBreak` when the *earlier* line ended with the `` +``
+    hard-break marker, else a :class:`SoftBreak`. The marker is stripped
+    from a line's text before its inlines are parsed (via
+    :func:`_split_hard_break_marker`); a marker on the final line is
+    stripped but emits no trailing break.
+
+    This is the single shared join helper for both block contexts that
+    fold multiple source lines together — paragraphs
+    (:meth:`_Parser._parse_paragraph`) and admonition continuation lines
+    (:meth:`_Parser._parse_single_admonition`) — so the marker logic
+    lives in exactly one place.
+    """
+    inlines: list[InlineNode] = []
+    is_first = True
+    previous_had_marker = False
+    for line_token in line_tokens:
+        content, had_marker = _split_hard_break_marker(line_token.text)
+        if not is_first:
+            joiner: InlineNode = (
+                HardBreak(source_line=line_token.line)
+                if previous_had_marker
+                else SoftBreak(source_line=line_token.line)
+            )
+            inlines.append(joiner)
+        inlines.extend(parse_inline(content, line_token.line))
+        previous_had_marker = had_marker
+        is_first = False
+    return tuple(inlines)
 
 
 # ---------------------------------------------------------------------------

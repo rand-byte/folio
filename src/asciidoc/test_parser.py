@@ -21,6 +21,7 @@ from asciidoc.ast import (
     Blockquote,
     Bold,
     CodeBlock,
+    HardBreak,
     Image,
     InlineNode,
     ListItem,
@@ -245,6 +246,110 @@ class ParagraphTests(unittest.TestCase):
             parse("first\n*unclosed\n")
         self.assertEqual(ctx.exception.kind, ParseErrorKind.BAD_INLINE_SPAN)
         self.assertEqual(ctx.exception.line, 2)
+
+
+# ---------------------------------------------------------------------------
+# Hard line breaks (the ` +` marker)
+# ---------------------------------------------------------------------------
+
+
+class HardBreakTests(unittest.TestCase):
+    """A paragraph source line ending in `` +`` joins to the next line
+    with a :class:`HardBreak` instead of a :class:`SoftBreak`; the marker
+    itself is stripped before the line's inlines are parsed.
+    """
+
+    def test_marker_produces_hard_break_joiner(self) -> None:
+        doc = parse("Rubies are red, +\nTopazes are blue.\n")
+        para = doc.blocks[0]
+        assert isinstance(para, Paragraph)
+        self.assertEqual(
+            para.inlines,
+            (
+                _t("Rubies are red,", 1),
+                HardBreak(source_line=2),
+                _t("Topazes are blue.", 2),
+            ),
+        )
+
+    def test_marker_is_stripped_no_literal_plus(self) -> None:
+        doc = parse("line +\nnext\n")
+        para = doc.blocks[0]
+        assert isinstance(para, Paragraph)
+        text_pieces = [
+            n.content for n in para.inlines if isinstance(n, Text)
+        ]
+        self.assertEqual(text_pieces, ["line", "next"])
+        self.assertNotIn("+", "".join(text_pieces))
+
+    def test_no_marker_still_produces_soft_break(self) -> None:
+        # Regression guard: an unmarked boundary stays a SoftBreak.
+        doc = parse("one\ntwo\n")
+        para = doc.blocks[0]
+        assert isinstance(para, Paragraph)
+        self.assertEqual(
+            para.inlines,
+            (_t("one", 1), SoftBreak(source_line=2), _t("two", 2)),
+        )
+
+    def test_marker_on_its_own_line_yields_two_hard_breaks(self) -> None:
+        # ``alpha +`` / `` +`` / ``beta``: the bare-marker middle line
+        # contributes no inlines, and the joins before and after it are
+        # both HardBreaks, producing one empty rendered line.
+        doc = parse("alpha +\n +\nbeta\n")
+        para = doc.blocks[0]
+        assert isinstance(para, Paragraph)
+        self.assertEqual(
+            para.inlines,
+            (
+                _t("alpha", 1),
+                HardBreak(source_line=2),
+                HardBreak(source_line=3),
+                _t("beta", 3),
+            ),
+        )
+
+    def test_trailing_marker_on_last_line_has_no_dangling_break(self) -> None:
+        # A marker on the block's final line is stripped, but with no
+        # following line there is no joiner to emit.
+        doc = parse("alpha\nbeta +\n")
+        para = doc.blocks[0]
+        assert isinstance(para, Paragraph)
+        self.assertEqual(
+            para.inlines,
+            (_t("alpha", 1), SoftBreak(source_line=2), _t("beta", 2)),
+        )
+
+    def test_bare_plus_without_leading_space_stays_literal(self) -> None:
+        # ``a+b`` is not a marker (no preceding space); the ``+`` is
+        # ordinary text and the line is a single Text run.
+        doc = parse("a+b\n")
+        para = doc.blocks[0]
+        assert isinstance(para, Paragraph)
+        self.assertEqual(para.inlines, (_t("a+b", 1),))
+
+    def test_marker_on_admonition_continuation_line(self) -> None:
+        # The second join site: a continuation line of a single-line
+        # admonition ending in `` +`` joins to the next with a HardBreak.
+        doc = parse("NOTE: first\nsecond +\nthird\n")
+        admonition = doc.blocks[0]
+        assert isinstance(admonition, Admonition)
+        self.assertEqual(admonition.kind, AdmonitionKind.NOTE)
+        paragraph = admonition.blocks[0]
+        kinds = [type(n).__name__ for n in paragraph.inlines]
+        self.assertEqual(
+            kinds, ["Text", "SoftBreak", "Text", "HardBreak", "Text"]
+        )
+
+    def test_marker_on_admonition_opener_line(self) -> None:
+        # The opener itself is a source line for joining purposes, so a
+        # ``KIND: text +`` opener hard-breaks into its first continuation.
+        doc = parse("NOTE: first +\nsecond\n")
+        admonition = doc.blocks[0]
+        assert isinstance(admonition, Admonition)
+        paragraph = admonition.blocks[0]
+        kinds = [type(n).__name__ for n in paragraph.inlines]
+        self.assertEqual(kinds, ["Text", "HardBreak", "Text"])
 
 
 # ---------------------------------------------------------------------------

@@ -9,6 +9,7 @@ rather than later in the parser.
 
 from __future__ import annotations
 
+import typing
 import unittest
 from dataclasses import FrozenInstanceError, fields, is_dataclass
 
@@ -18,7 +19,9 @@ from asciidoc.ast import (
     Bold,
     CodeBlock,
     Document,
+    HardBreak,
     Image,
+    InlineNode,
     Italic,
     ListItem,
     OrderedList,
@@ -61,6 +64,7 @@ class AstNodeShapeTests(unittest.TestCase):
             Strikethrough,
             Underline,
             SoftBreak,
+            HardBreak,
             Paragraph,
             Section,
             ListItem,
@@ -90,6 +94,7 @@ class AstNodeShapeTests(unittest.TestCase):
             (Strikethrough, {"children", "source_line"}),
             (Underline, {"children", "source_line"}),
             (SoftBreak, {"source_line"}),
+            (HardBreak, {"source_line"}),
             (Paragraph, {"inlines", "source_line"}),
             (Section, {"level", "title", "blocks", "source_line"}),
             (ListItem, {"inlines", "children", "source_line"}),
@@ -123,6 +128,11 @@ class AstFrozenTests(unittest.TestCase):
 
     def test_soft_break_is_frozen(self) -> None:
         node = SoftBreak(source_line=2)
+        with self.assertRaises(FrozenInstanceError):
+            node.source_line = 3  # type: ignore[misc]
+
+    def test_hard_break_is_frozen(self) -> None:
+        node = HardBreak(source_line=2)
         with self.assertRaises(FrozenInstanceError):
             node.source_line = 3  # type: ignore[misc]
 
@@ -178,6 +188,10 @@ class AstConstructionTests(unittest.TestCase):
 
     def test_soft_break(self) -> None:
         node = SoftBreak(source_line=2)
+        self.assertEqual(node.source_line, 2)
+
+    def test_hard_break(self) -> None:
+        node = HardBreak(source_line=2)
         self.assertEqual(node.source_line, 2)
 
     def test_bold_holds_children_as_tuple(self) -> None:
@@ -351,6 +365,15 @@ class AstConstructionTests(unittest.TestCase):
         self.assertEqual(quote.blocks, (para,))
 
 
+class InlineUnionMembershipTests(unittest.TestCase):
+    """The structural line-break joiners are members of the inline union."""
+
+    def test_break_joiners_are_inline_union_members(self) -> None:
+        members = set(typing.get_args(getattr(InlineNode, "__value__")))
+        self.assertIn(SoftBreak, members)
+        self.assertIn(HardBreak, members)
+
+
 class AstEqualityTests(unittest.TestCase):
     """Frozen tuples make AST equality structural and useful in tests."""
 
@@ -363,6 +386,11 @@ class AstEqualityTests(unittest.TestCase):
         a = Paragraph(inlines=(_make_text("x"),), source_line=1)
         b = Paragraph(inlines=(_make_text("x"),), source_line=2)
         self.assertNotEqual(a, b)
+
+    def test_hard_break_and_soft_break_are_unequal(self) -> None:
+        # Same field value, different type: the renderer must be able to
+        # tell a reflow joiner from a forced break.
+        self.assertNotEqual(HardBreak(source_line=1), SoftBreak(source_line=1))
 
 
 if __name__ == "__main__":

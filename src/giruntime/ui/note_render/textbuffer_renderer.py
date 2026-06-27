@@ -127,6 +127,7 @@ from asciidoc.ast import (
     Blockquote,
     Bold,
     CodeBlock,
+    HardBreak,
     Image,
     InlineNode,
     Italic,
@@ -921,6 +922,15 @@ class TextBufferRenderer:
                 _CellRun(text=" ", bold=bold, monospace=monospace, tags=tags),
             )
             return
+        if isinstance(inline, HardBreak):
+            # Like SoftBreak, a hard break cannot occur in a single-line
+            # cell (cells never join source lines), but the union must stay
+            # exhaustive. Collapse it to a space so a stray marker can never
+            # smuggle a newline into a table cell.
+            runs.append(
+                _CellRun(text=" ", bold=bold, monospace=monospace, tags=tags),
+            )
+            return
         raise TypeError(f"unknown inline node: {type(inline).__name__}")
 
     def _flatten_children(
@@ -1114,12 +1124,18 @@ class TextBufferRenderer:
             self._emit_link(buffer, inline, tag_stack)
             return
         if isinstance(inline, SoftBreak):
-            # A source-line boundary inside a paragraph: the AsciiDoc
-            # subset has no hard-break construct, so a soft break is a
+            # A source-line boundary inside a paragraph: a soft break is a
             # reflow point — render it as a single space. The joiner is
             # always a top-level child of Paragraph.inlines, so tag_stack
             # is empty here and a space carries no visible style anyway.
             buffer.insert(buffer.get_end_iter(), " ")
+            return
+        if isinstance(inline, HardBreak):
+            # The ` +` hard-break sibling of SoftBreak: force a visible
+            # line break instead of reflowing. Like SoftBreak it is always
+            # a top-level child of Paragraph.inlines, so tag_stack is empty
+            # and the newline carries no inherited style.
+            buffer.insert(buffer.get_end_iter(), "\n")
             return
         # Closed union; new inline kinds must extend this dispatch.
         raise TypeError(f"unknown inline node: {type(inline).__name__}")

@@ -47,6 +47,13 @@ class DeriveSummarySnippetTests(unittest.TestCase):
         summary = derive_summary("First line.\nSecond line.\n")
         self.assertEqual(summary.snippet, "First line. Second line.")
 
+    def test_hard_break_collapses_to_a_space_in_snippet(self) -> None:
+        # Snippets are one-line previews, so a `` +`` hard break collapses
+        # to a single space exactly like a soft break — and the literal
+        # ``+`` marker never appears.
+        summary = derive_summary("First line. +\nSecond line.\n")
+        self.assertEqual(summary.snippet, "First line. Second line.")
+
     def test_document_attribute_entries_excluded(self) -> None:
         # The regression that motivated the change: attribute entries
         # under the title must not leak into the preview.

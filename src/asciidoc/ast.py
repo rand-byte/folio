@@ -64,12 +64,34 @@ class SoftBreak:
 
     The block parser inserts one of these between each source line's
     parsed inlines when a paragraph spans multiple lines without a
-    blank line between them. Per the AsciiDoc subset (which has no
-    explicit hard-break construct) a soft break is presentation-only:
-    the renderer collapses it to a single space so the lines reflow as
-    one logical paragraph. The node carries ``source_line`` (the line
-    the break precedes) purely for provenance, consistent with every
-    other node.
+    blank line between them, *unless* the earlier line ended with the
+    ` +` hard-break marker (in which case a :class:`HardBreak` is
+    emitted instead). A soft break is presentation-only: the renderer
+    collapses it to a single space so the lines reflow as one logical
+    paragraph. The node carries ``source_line`` (the line the break
+    precedes) purely for provenance, consistent with every other node.
+    """
+
+    source_line: int
+
+
+@dataclass(frozen=True)
+class HardBreak:
+    """An AsciiDoc *hard* line break (a source line ending in `` +``).
+
+    Like :class:`SoftBreak`, this is a purely structural joiner the block
+    parser inserts between two source lines of a multi-line paragraph (or
+    admonition continuation). It differs only in how the renderer treats
+    it: where a :class:`SoftBreak` collapses to a single space so the
+    lines reflow, a :class:`HardBreak` forces a visible line break
+    (``"\\n"``) so the two lines render one above the other.
+
+    The parser emits a :class:`HardBreak` rather than a :class:`SoftBreak`
+    for the join *after* a line whose text ended with the ` +` hard-break
+    marker; the marker itself is stripped before that line's inlines are
+    parsed, so it never reaches the AST as literal text. The node carries
+    ``source_line`` (the line the break precedes) for provenance,
+    consistent with every other node.
     """
 
     source_line: int
@@ -163,7 +185,7 @@ class Link:
 
 type InlineNode = (
     Text | Bold | Italic | Strikethrough | Underline | Monospace | Link
-    | SoftBreak
+    | SoftBreak | HardBreak
 )
 """The closed union of inline node kinds the parser produces.
 
@@ -172,8 +194,11 @@ Step 4 produced :class:`Text`, :class:`Bold`, :class:`Italic`,
 union with :class:`Monospace` and :class:`Link`. The soft-line-break
 fix extends it with :class:`SoftBreak` — the typed joiner the block
 parser emits between a multi-line paragraph's source lines (replacing
-the former ``Text("\\n", …)`` connector). Future build steps extend
-this further if new inline constructs are added.
+the former ``Text("\\n", …)`` connector). The hard-line-break feature
+extends it with :class:`HardBreak`, the sibling joiner emitted for the
+``+`` marker (soft → reflow to a space, hard → a forced newline).
+Future build steps extend this further if new inline constructs are
+added.
 """
 
 
