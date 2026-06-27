@@ -120,28 +120,46 @@ rendered result first, then its source.
 
 === Links
 
-A link can be written three ways: a bare URL such as
-https://example.com, a URL with display text in the `URL[label]` form, or
-the explicit `link:URL[label]` macro (the macro always needs a label; for
-the other two forms a label is optional). Only the schemes `http`,
-`https`, and `mailto` are recognised, and the three forms treat an
-unrecognised scheme differently: in the bare and `URL[label]` forms, text
-that does not begin with an allowed scheme is simply left as ordinary
-text — it is not turned into a link — whereas the explicit `link:` macro
-is stricter and reports a disallowed scheme as an error. Rendered, a
-labelled link looks like this: https://example.com[the Folio website].
+A link can be written four ways. Three are for everyday addresses:
+
+* a *bare URL* such as https://example.com — Folio links it automatically;
+* a *labelled URL*, `URL[label]`, showing the label in place of the address;
+* the *`link:` macro*, `link:URL[label]`, which spells the link out explicitly.
+
+The fourth is a *passthrough* macro, `link:++URL++[label]`, for an address
+that is awkward to link — the `++ ... ++` around the URL keeps every
+character literal. Reach for it when the address itself contains a markup
+character (most often an underscore), which the three forms above would
+otherwise read as formatting and cut the link short.
+
+A label is optional for the bare and labelled forms but *required* by both
+macro forms. Rendered, a labelled link and a passthrough link both look
+like ordinary links: https://example.com[the Folio website] and
+link:++https://en.wikipedia.org/wiki/Naive_set_theory++[naive set theory].
+
+Here are all four forms, end to end:
 
 ----
-Bare: https://example.com
-Labelled: https://example.com[the Folio website]
-Macro: link:https://example.com[the Folio website]
+Bare:        https://example.com
+Labelled:    https://example.com[the Folio website]
+Macro:       link:https://example.com[the Folio website]
+Passthrough: link:++https://en.wikipedia.org/wiki/Naive_set_theory++[naive set theory]
 ----
 
-For a URL that itself contains markup characters, wrap it in a
-`link:++URL++[label]` passthrough so the `++ ... ++` keeps every
-character literal.
+Only the schemes `http`, `https`, and `mailto` become links. The bare and
+labelled forms are lenient about anything else — text that does not begin
+with one of those schemes is simply left as ordinary words rather than
+linked. The `link:` macro is stricter: a disallowed scheme is reported as
+an error instead of passed through.
 
-Limit: links never nest inside other links.
+The passthrough earns its place on real URLs: an address such as
+`https://en.wikipedia.org/wiki/Naive_set_theory` breaks at its first
+underscore in every other form — the link stops at `...Naive` and `_set_`
+is read as italics. Wrapping it as `link:++...++[label]` makes Folio take
+the address verbatim, underscores and all.
+
+Limit: links never nest inside other links, and a label is mandatory for
+either macro form.
 
 === Lists
 
