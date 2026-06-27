@@ -358,6 +358,18 @@ class ListRenderingTests(unittest.TestCase):
         text.index("2. second")
         text.index("3. third")
 
+    def test_blank_separated_ordered_list_numbers_continuously(self) -> None:
+        # Blank lines between ordered items are absorbed by the parser into
+        # one list, so the positional numbering continues 1., 2., 3. rather
+        # than restarting at 1. on each blank-separated item.
+        src = "= D\n\n. first\n\n. second\n\n. third\n"
+        renderer, buffer, _ = _build_renderer()
+        renderer.render_into(src, buffer, note_id="n1")
+        text = _full_text(buffer)
+        text.index("1. first")
+        text.index("2. second")
+        text.index("3. third")
+
     def test_list_items_carry_inline_formatting(self) -> None:
         src = "= D\n\n* an *emphatic* point\n"
         renderer, buffer, _ = _build_renderer()

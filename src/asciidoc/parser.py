@@ -54,10 +54,14 @@ Principles & invariants
   A single stack-based builder (:meth:`_Parser._parse_list`) turns the
   flat run of depth-tagged list tokens into a recursive tree, where each
   :class:`ListItem` carries its own inline text plus its child sub-lists.
-  A run is terminated by anything else (blank, heading, fence, EOF) or by
-  a *top-level* marker whose kind differs from the list it opened (which
-  starts a sibling list block, preserving the original flat-list
-  bullet→number split). Three depth conditions are hard errors, checked
+  A blank line internal to a list is a separator, not a terminator: the
+  run continues across it when the next non-blank line is another list
+  item (so ordered numbering stays continuous rather than restarting). A
+  run is terminated by the first non-blank, non-list token (heading,
+  fence, paragraph, EOF) or by a *top-level* marker whose kind differs
+  from the list it opened (which starts a sibling list block, preserving
+  the original flat-list bullet→number split). Three depth conditions are
+  hard errors, checked
   in this precedence: starts-below-top-level, skips-a-level, too-deep.
   Multi-line items and ``+`` continuations remain deferred.
 """
@@ -612,15 +616,29 @@ class _Parser:
         * **shallower** — pop frames until the depths match, then re-apply
           the same-depth rule.
 
-        The run ends at the first non-list token (blank, heading, fence,
-        EOF) or at a top-level type switch; in either case ``self.pos`` is
-        left on the terminating token. The three depth errors are raised
-        with the precedence pinned in the module docstring.
+        A blank line internal to the run is a separator, not a terminator:
+        when the next non-blank token is another list marker the blank run
+        is absorbed (via :meth:`_run_continues_after_blanks`) and the list
+        continues across it. The run ends at the first non-blank, non-list
+        token (heading, fence, paragraph, EOF) or at a top-level type
+        switch; in either case ``self.pos`` is left on the terminating
+        token — a blank that ends the run is left in place so
+        :meth:`_parse_blocks` skips it exactly as before. The three depth
+        errors are raised with the precedence pinned in the module
+        docstring.
         """
         stack: list[_OpenList] = []
         while self.pos < len(self.tokens):
             token = self.tokens[self.pos]
             if not isinstance(token, (ListBulletToken, ListNumberToken)):
+                if (
+                    isinstance(token, BlankToken)
+                    and self._run_continues_after_blanks()
+                ):
+                    # Internal separator: absorb the blank run and resume
+                    # the loop on the next list marker.
+                    self._skip_blanks()
+                    continue
                 break
 
             if not stack:
@@ -664,6 +682,27 @@ class _Parser:
             self.pos += 1
 
         return self._close_all(stack)
+
+    def _run_continues_after_blanks(self) -> bool:
+        """Report whether a list run continues past the blanks at ``pos``.
+
+        Called from :meth:`_parse_list` with ``self.pos`` on a
+        :class:`BlankToken` inside an open run. Scans forward over the
+        contiguous blank run **without moving** ``self.pos`` and returns
+        ``True`` when the first following non-blank token is a list marker
+        — meaning the blanks are an internal separator and the run should
+        continue across them — and ``False`` when the run is followed by a
+        non-list block (or end of input), so the blank terminates the list.
+        """
+        look = self.pos
+        while (
+            look < len(self.tokens)
+            and isinstance(self.tokens[look], BlankToken)
+        ):
+            look += 1
+        return look < len(self.tokens) and isinstance(
+            self.tokens[look], (ListBulletToken, ListNumberToken)
+        )
 
     @staticmethod
     def _open_list(token: ListBulletToken | ListNumberToken) -> _OpenList:

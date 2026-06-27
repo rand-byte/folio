@@ -276,16 +276,44 @@ class ListTests(unittest.TestCase):
         assert isinstance(ol, OrderedList)
         self.assertEqual(len(ol.items), 2)
 
-    def test_blank_line_breaks_list(self) -> None:
+    def test_blank_line_does_not_break_same_marker_list(self) -> None:
+        # Blank lines between same-marker items are internal separators:
+        # the items join into one list rather than splitting into two.
         doc = parse("* a\n* b\n\n* c\n")
+        self.assertEqual(len(doc.blocks), 1)
+        ul = doc.blocks[0]
+        assert isinstance(ul, UnorderedList)
+        self.assertEqual(len(ul.items), 3)
+        self.assertEqual([_item_text(i) for i in ul.items], ["a", "b", "c"])
+
+    def test_blank_separated_ordered_list_is_one_continuous_list(
+        self,
+    ) -> None:
+        # Ordered items separated by blanks stay in one list, so the
+        # renderer's positional numbering yields 1, 2, 3 (no restart).
+        doc = parse(". a\n\n. b\n\n. c\n")
+        self.assertEqual(len(doc.blocks), 1)
+        ol = doc.blocks[0]
+        assert isinstance(ol, OrderedList)
+        self.assertEqual(len(ol.items), 3)
+        self.assertEqual([_item_text(i) for i in ol.items], ["a", "b", "c"])
+
+    def test_blank_before_non_list_block_terminates_list(self) -> None:
+        # A blank followed by a non-list block still ends the list.
+        doc = parse("* a\n* b\n\nEnd.\n")
         self.assertEqual(len(doc.blocks), 2)
-        for block in doc.blocks:
-            self.assertIsInstance(block, UnorderedList)
-        first, second = doc.blocks
-        assert isinstance(first, UnorderedList)
-        assert isinstance(second, UnorderedList)
-        self.assertEqual(len(first.items), 2)
-        self.assertEqual(len(second.items), 1)
+        ul, para = doc.blocks
+        assert isinstance(ul, UnorderedList)
+        self.assertIsInstance(para, Paragraph)
+        self.assertEqual(len(ul.items), 2)
+
+    def test_double_blank_between_items_still_joins(self) -> None:
+        # Joining spans a run of consecutive blanks, not just a single one.
+        doc = parse("* a\n\n\n* b\n")
+        self.assertEqual(len(doc.blocks), 1)
+        ul = doc.blocks[0]
+        assert isinstance(ul, UnorderedList)
+        self.assertEqual([_item_text(i) for i in ul.items], ["a", "b"])
 
     def test_list_items_carry_inline_markup(self) -> None:
         doc = parse("* this is *bold*\n")
@@ -371,6 +399,30 @@ class NestedListTests(unittest.TestCase):
         self.assertEqual(len(children), 2)
         self.assertIsInstance(children[0], OrderedList)
         self.assertIsInstance(children[1], UnorderedList)
+
+    def test_blank_separated_type_switch_still_splits_siblings(self) -> None:
+        # The blank is absorbed, then the top-level bullet→number switch
+        # runs exactly as in the no-blank case: two sibling list blocks.
+        doc = parse("* a\n\n. b\n")
+        self.assertEqual(len(doc.blocks), 2)
+        first, second = doc.blocks
+        self.assertIsInstance(first, UnorderedList)
+        self.assertIsInstance(second, OrderedList)
+
+    def test_blank_inside_nested_list_keeps_one_tree(self) -> None:
+        # A blank between two nested items is absorbed; the whole run is
+        # one list with a, d at the top level and b, c nested under a.
+        doc = parse("* a\n** b\n\n** c\n* d\n")
+        self.assertEqual(len(doc.blocks), 1)
+        top = doc.blocks[0]
+        assert isinstance(top, UnorderedList)
+        self.assertEqual([_item_text(i) for i in top.items], ["a", "d"])
+        self.assertEqual(top.items[1].children, ())
+        children = top.items[0].children
+        self.assertEqual(len(children), 1)
+        sub = children[0]
+        assert isinstance(sub, UnorderedList)
+        self.assertEqual([_item_text(i) for i in sub.items], ["b", "c"])
 
     def test_starts_below_top_level_raises(self) -> None:
         with self.assertRaises(ParseError) as ctx:
