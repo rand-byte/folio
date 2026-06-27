@@ -19,16 +19,23 @@ Principles & invariants
   (:data:`TagName.ERROR_NOTICE_ICON` … :data:`TagName.ERROR_NOTICE_HINT`).
   Block-level tags carry
   only the *text position* (``accumulative-margin = True`` plus
-  ``left-margin`` / ``right-margin`` = inset + one M-width); the
-  matching *tinted wash* is painted by ``ArticleTextView`` in
+  ``left-margin`` / ``right-margin`` = one M-width). That M-width is
+  the card's *internal padding*: the admonition / blockquote / code
+  card spans the full prose column (its wash inset is ``0``, the same
+  as a table), and the block's text sits one M-width inside that card
+  edge — there is no extra outer indent, so the card lines up with the
+  surrounding prose rather than reading as a nested, indented island.
+  The matching *tinted wash* is painted by ``ArticleTextView`` in
   :mod:`ui.note_view` using :func:`build_wash_specs` to look
   up tint + inset per tag. This split exists because GTK's
   ``paragraph-background-rgba`` paints exactly between the paragraph's
   effective ``left-margin`` and ``right-margin`` — there is no
   property that decouples "where the wash paints" from "where the
-  text starts", so a tinted box that is *wider* than the text on each
-  side must be painted at snapshot time. Tables are no longer an
-  is involved. Those table-row tags additionally carry a
+  text starts", so a tinted card that is *wider* than the text (here
+  by one M-width on each side) must be painted at snapshot time.
+  Tables align the same way: a table fills the prose column and its
+  per-cell text inset is an intra-table concern, not an outer indent.
+  Those table-row tags additionally carry a
   ``left-margin`` of :data:`config.defaults.TABLE_CELL_HPADDING_PX`
   (``accumulative-margin = True``) that insets each column's cell *text*
   while the wash band / rule still span the full column — see
@@ -406,26 +413,31 @@ _CODE_BLOCK_TINT: tuple[float, float, float, float] = (0.5, 0.5, 0.5, 0.08)
 
 # Paragraph metrics applied to admonition paragraph tags. ``HMARGIN``
 # is the *box inset* from the textview's widget left/right margin to
-# the tinted box's edge. The text inside the box sits one M-width
-# inside the box on each side; that offset is added by the paragraph
-# tag builder, not stored here.
-_ADMONITION_HMARGIN_PX: int = 12
+# the tinted box's edge. It is ``0`` so the card spans the full prose
+# column (the same as a table) rather than sitting indented from it.
+# The text inside the box still sits one M-width inside the box on each
+# side; that offset is added by the paragraph tag builder, not stored
+# here. To re-introduce an outer indent, raise this above ``0`` — the
+# paragraph margin and the wash inset both read it, so card and text
+# move together.
+_ADMONITION_HMARGIN_PX: int = 0
 _ADMONITION_VPADDING_PX: int = 8
 _ADMONITION_LINE_GAP_PX: int = 2
 
-# Paragraph metrics for blockquotes. The left-margin is the visual
-# indent that distinguishes a quote from running prose; the same
-# split as admonitions applies — text sits one M-width inside the box
-# edge on each side.
-_BLOCKQUOTE_HMARGIN_PX: int = 30
-_BLOCKQUOTE_RIGHT_MARGIN_PX: int = 12
+# Paragraph metrics for blockquotes. The box insets are ``0`` so the
+# quote card spans the full prose column like a table; the same split
+# as admonitions applies — text sits one M-width inside the box edge on
+# each side. (Historically the left inset gave a quote a visible indent;
+# the aligned-card design drops that outer indent.)
+_BLOCKQUOTE_HMARGIN_PX: int = 0
+_BLOCKQUOTE_RIGHT_MARGIN_PX: int = 0
 _BLOCKQUOTE_VPADDING_PX: int = 6
 _BLOCKQUOTE_LINE_GAP_PX: int = 2
 
-# Paragraph metrics for code blocks. Slightly narrower margins than a
-# blockquote since the monospace font already sits inside whitespace
-# from its own glyphs.
-_CODE_BLOCK_HMARGIN_PX: int = 16
+# Paragraph metrics for code blocks. The box insets are ``0`` so the
+# code card spans the full prose column; the monospace text still sits
+# one M-width inside the card edge on each side.
+_CODE_BLOCK_HMARGIN_PX: int = 0
 _CODE_BLOCK_VPADDING_PX: int = 8
 
 # Scale multiplier for the blockquote attribution line. Slightly
@@ -749,7 +761,10 @@ def _make_admonition_paragraph_tag(
 
     The tag carries the *text position* only. Its ``left-margin`` and
     ``right-margin`` are set to ``_ADMONITION_HMARGIN_PX + char_width_px``
-    so the text sits one M-width inside the tinted box's edge.
+    — with the box inset now ``0`` that is just one M-width, so the
+    tinted card spans the full prose column and the text sits one
+    M-width inside the card's edge (the card's internal padding) rather
+    than the whole block reading as indented from the prose.
     ``accumulative-margin = True`` makes those values *stack* on the
     textview's widget-level ``left-margin`` / ``right-margin`` instead
     of replacing them — without this flag a paragraph tag overrides
@@ -783,10 +798,12 @@ def _make_blockquote_body_tag(
 ) -> Gtk.TextTag:
     """Build the blockquote-body paragraph tag.
 
-    Carries the text position only: the left/right margins are the
-    box inset plus one M-width so the text sits one M-width inside
-    the tinted box. ``accumulative-margin = True`` makes those margins
-    stack on the textview's widget-level margins (see
+    Carries the text position only: with the box inset now ``0`` the
+    left/right margins are just one M-width, so the tinted card spans
+    the full prose column and the text sits one M-width inside the card
+    edge (the card's internal padding) — the quote no longer carries an
+    outer indent from the prose. ``accumulative-margin = True`` makes
+    those margins stack on the textview's widget-level margins (see
     :func:`_make_admonition_paragraph_tag` for why this matters). The
     italic style is *not* set here — the renderer composes it by
     layering the shared :data:`TagName.ITALIC` tag across the body
@@ -812,13 +829,13 @@ def _make_blockquote_attribution_tag(
     """Build the blockquote-attribution paragraph tag.
 
     Shares the body's left-margin so the attribution sits flush with
-    the quote body's *text* (one M-width inside the tinted box's
-    edge), applies a smaller scale, and right-aligns the text so a
-    typical ``— Author, Source`` line reads as a citation under the
-    quote. There is no tint to remove (the attribution never carried
-    one). ``accumulative-margin = True`` is set for the same reason
-    as the body tag — without it, the attribution paragraph would
-    escape the inner column.
+    the quote body's *text* (one M-width inside the tinted card's
+    edge, which now spans the prose column), applies a smaller scale,
+    and right-aligns the text so a typical ``— Author, Source`` line
+    reads as a citation under the quote. There is no tint to remove
+    (the attribution never carried one). ``accumulative-margin = True``
+    is set for the same reason as the body tag — without it, the
+    attribution paragraph would escape the inner column.
     """
     tag = Gtk.TextTag.new(name.value)
     tag.set_property("accumulative-margin", True)
@@ -834,14 +851,15 @@ def _make_blockquote_attribution_tag(
 def _make_code_block_tag(name: TagName, *, char_width_px: int) -> Gtk.TextTag:
     """Build the code-block paragraph tag.
 
-    Carries the text position only: the left/right margins are the
-    box inset plus one M-width so the monospace text sits one M-width
-    inside the tinted box. ``accumulative-margin = True`` makes those
-    margins stack on the textview's widget-level margins. The
-    monospace family comes from the shared :data:`TagName.MONOSPACE`
-    tag, which the renderer applies on top of this one across the
-    same range. The tint is painted separately by ``ArticleTextView``
-    in :mod:`ui.note_view`.
+    Carries the text position only: with the box inset now ``0`` the
+    left/right margins are just one M-width, so the tinted card spans
+    the full prose column and the monospace text sits one M-width
+    inside the card edge (the card's internal padding).
+    ``accumulative-margin = True`` makes those margins stack on the
+    textview's widget-level margins. The monospace family comes from
+    the shared :data:`TagName.MONOSPACE` tag, which the renderer
+    applies on top of this one across the same range. The tint is
+    painted separately by ``ArticleTextView`` in :mod:`ui.note_view`.
     """
     tag = Gtk.TextTag.new(name.value)
     tag.set_property("accumulative-margin", True)

@@ -414,18 +414,32 @@ class AdmonitionTagPropertyTests(unittest.TestCase):
         self.table = build_tag_table(char_width_px=_TEST_CHAR_WIDTH_PX)
 
     def test_every_label_paragraph_tag_has_left_and_right_margins(self) -> None:
+        # The card spans the prose column (wash inset 0); the paragraph
+        # tag's margins are the *internal* padding that holds the text one
+        # M-width inside the card edge, so they equal exactly one M-width
+        # (no outer indent is added on top).
         for kind in AdmonitionKind:
             with self.subTest(kind=kind):
                 tag = self.table.lookup(admonition_label_tag_name(kind).value)
-                self.assertGreater(tag.get_property("left-margin"), 0)
-                self.assertGreater(tag.get_property("right-margin"), 0)
+                self.assertEqual(
+                    tag.get_property("left-margin"), _TEST_CHAR_WIDTH_PX,
+                )
+                self.assertEqual(
+                    tag.get_property("right-margin"), _TEST_CHAR_WIDTH_PX,
+                )
 
     def test_every_body_paragraph_tag_has_left_and_right_margins(self) -> None:
+        # As above: the body text is padded one M-width inside the
+        # column-aligned card, with no extra outer indent.
         for kind in AdmonitionKind:
             with self.subTest(kind=kind):
                 tag = self.table.lookup(admonition_body_tag_name(kind).value)
-                self.assertGreater(tag.get_property("left-margin"), 0)
-                self.assertGreater(tag.get_property("right-margin"), 0)
+                self.assertEqual(
+                    tag.get_property("left-margin"), _TEST_CHAR_WIDTH_PX,
+                )
+                self.assertEqual(
+                    tag.get_property("right-margin"), _TEST_CHAR_WIDTH_PX,
+                )
 
     def test_label_paragraph_has_top_padding(self) -> None:
         # The block's top margin lives on the label paragraph so the
@@ -542,10 +556,14 @@ class BlockquoteTagPropertyTests(unittest.TestCase):
     def setUp(self) -> None:
         self.table = build_tag_table(char_width_px=_TEST_CHAR_WIDTH_PX)
 
-    def test_body_has_left_margin_indent(self) -> None:
-        # The indent is what distinguishes a quote from running prose.
+    def test_body_left_margin_is_one_m_width_internal_padding(self) -> None:
+        # The blockquote card aligns with the prose column (wash inset 0);
+        # the body text is padded one M-width inside that card edge, with
+        # no extra outer indent — so the left-margin equals one M-width.
         tag = self.table.lookup(TagName.BLOCKQUOTE_BODY.value)
-        self.assertGreater(tag.get_property("left-margin"), 0)
+        self.assertEqual(
+            tag.get_property("left-margin"), _TEST_CHAR_WIDTH_PX,
+        )
 
     def test_body_does_not_set_italic_style(self) -> None:
         # Italic composes via the shared ITALIC tag — the body tag must
@@ -554,8 +572,9 @@ class BlockquoteTagPropertyTests(unittest.TestCase):
         self.assertFalse(tag.get_property("style-set"))
 
     def test_attribution_has_left_margin_matching_body(self) -> None:
-        # The attribution sits flush with the body indent so the
-        # citation reads as part of the quote block.
+        # The attribution sits flush with the body's text (one M-width
+        # inside the column-aligned card) so the citation reads as part
+        # of the quote block.
         body = self.table.lookup(TagName.BLOCKQUOTE_BODY.value)
         attr = self.table.lookup(TagName.BLOCKQUOTE_ATTRIBUTION.value)
         self.assertEqual(
@@ -599,9 +618,16 @@ class CodeBlockTagPropertyTests(unittest.TestCase):
         self.table = build_tag_table(char_width_px=_TEST_CHAR_WIDTH_PX)
 
     def test_has_left_and_right_margins(self) -> None:
+        # The code card aligns with the prose column (wash inset 0); the
+        # monospace text is padded one M-width inside the card edge, with
+        # no extra outer indent — so each margin equals one M-width.
         tag = self.table.lookup(TagName.CODE_BLOCK.value)
-        self.assertGreater(tag.get_property("left-margin"), 0)
-        self.assertGreater(tag.get_property("right-margin"), 0)
+        self.assertEqual(
+            tag.get_property("left-margin"), _TEST_CHAR_WIDTH_PX,
+        )
+        self.assertEqual(
+            tag.get_property("right-margin"), _TEST_CHAR_WIDTH_PX,
+        )
 
     def test_does_not_set_monospace_family(self) -> None:
         # Monospace family comes from the shared MONOSPACE tag, layered
@@ -797,6 +823,23 @@ class WashSpecTests(unittest.TestCase):
         # A table fills the body column, so its band / rule sit at zero
         # inset on both sides.
         for name in (TagName.TABLE_HEADER, TagName.TABLE_ROW):
+            with self.subTest(name=name):
+                spec = self.specs[name]
+                self.assertEqual(spec.box_left_inset_px, 0)
+                self.assertEqual(spec.box_right_inset_px, 0)
+
+    def test_block_specs_span_the_full_text_column(self) -> None:
+        # Admonition / blockquote / code-block cards align with the prose
+        # column the same way tables do: their wash sits at zero inset on
+        # both sides, so the tinted card edge lands on the prose column
+        # rather than indented from it. (The text inside the card is still
+        # padded one M-width in by the paragraph tag's margins — that is a
+        # separate concern, asserted on the paragraph tags themselves.)
+        block_names = [TagName.BLOCKQUOTE_BODY, TagName.CODE_BLOCK]
+        for kind in AdmonitionKind:
+            block_names.append(admonition_label_tag_name(kind))
+            block_names.append(admonition_body_tag_name(kind))
+        for name in block_names:
             with self.subTest(name=name):
                 spec = self.specs[name]
                 self.assertEqual(spec.box_left_inset_px, 0)
