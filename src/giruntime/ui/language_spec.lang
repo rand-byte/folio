@@ -11,7 +11,8 @@
   (_x_), strikethrough ([.line-through]#x#), and underline
   ([.underline]#x#), inline monospace (`x`), links in three forms:
   bare URL (https://x), URL-with-text (https://x[label]), and the
-  link:URL[label] macro, tables (|=== fences, with optional
+  link:URL[label] macro (incl. its link:++URL++[label] passthrough
+  variant for URLs carrying '_' / '#'), tables (|=== fences, with optional
   [cols="N,N,..."] directive), admonitions in both forms — single-line
   (NOTE: text and friends, restricted to the five known kinds) and
   block ([NOTE]/[TIP]/[IMPORTANT]/[WARNING]/[CAUTION] followed by a
@@ -296,15 +297,27 @@
     </context>
 
     <!--
-      link: macro: link:URL[label]. The macro form accepts any
-      syntactically-valid URL scheme; the parser rejects schemes
-      outside the allow-list, but the editor cannot reproduce that
-      check without a lexer pass, so we colour the macro shape
-      regardless and let the rendered view's error panel catch
-      forbidden schemes.
+      link: macro, in two forms:
+        * plain        link:URL[label]
+        * passthrough  link:++URL++[label]
+      The macro form accepts any syntactically-valid URL scheme; the
+      parser rejects schemes outside the allow-list, but the editor
+      cannot reproduce that check without a lexer pass, so we colour
+      the macro shape regardless and let the rendered view's error
+      panel catch forbidden schemes.
+
+      The passthrough alternative (++…++) mirrors the parser: inside
+      the ++ delimiters every character is literal, so the body may
+      contain the inline markers '*', '_', '#', '`' that terminate a
+      plain URL — which is exactly why a URL carrying '_' or '#' (an
+      anchored wiki link, say) must be wrapped to colour as one unit.
+      The body excludes only whitespace and '[' (so the label's '['
+      still terminates it), and the close is the first '++' followed
+      by '['. The passthrough is recognised ONLY inside link:; a bare
+      ++URL++[label] is not part of the subset and stays unhighlighted.
     -->
     <context id="link-macro" style-ref="link">
-      <start>(?&lt;![A-Za-z0-9])link:[A-Za-z][A-Za-z0-9+.\-]*:[^\s\[*_`#]*\[</start>
+      <start>(?&lt;![A-Za-z0-9])link:(?:[A-Za-z][A-Za-z0-9+.\-]*:[^\s\[*_`#]*|\+\+[^\s\[]+?\+\+)\[</start>
       <end>\]</end>
       <include>
         <context sub-pattern="0" where="start" style-ref="link-destination"/>
