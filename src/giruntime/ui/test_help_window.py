@@ -68,6 +68,7 @@ def _walk_blocks(
         elif isinstance(block, (A.OrderedList, A.UnorderedList)):
             for item in block.items:
                 _walk_inlines(item.inlines, inline_seen)
+                _walk_blocks(item.children, block_seen, inline_seen)
         elif isinstance(block, (A.Blockquote, A.Admonition)):
             _walk_blocks(block.blocks, block_seen, inline_seen)
         elif isinstance(block, A.Table):

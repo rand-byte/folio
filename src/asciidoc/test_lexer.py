@@ -143,6 +143,47 @@ class ListTokenizationTests(unittest.TestCase):
                 self.assertEqual(len(tokens), 1)
                 self.assertIsInstance(tokens[0], LineToken)
 
+    def test_marker_run_length_is_the_depth(self) -> None:
+        # The count of repeated marker characters is the nesting depth;
+        # the run plus its single separating space is stripped from
+        # ``text``.
+        cases: tuple[tuple[str, type[Token], int, str], ...] = (
+            ("* a", ListBulletToken, 1, "a"),
+            ("** b", ListBulletToken, 2, "b"),
+            ("*** c", ListBulletToken, 3, "c"),
+            (". x", ListNumberToken, 1, "x"),
+            (".. y", ListNumberToken, 2, "y"),
+            ("... z", ListNumberToken, 3, "z"),
+        )
+        for source, token_class, depth, text in cases:
+            with self.subTest(source=source):
+                tokens = tokenize(source)
+                self.assertEqual(len(tokens), 1)
+                token = tokens[0]
+                self.assertIsInstance(token, token_class)
+                self.assertEqual(token.depth, depth)  # type: ignore[union-attr]
+                self.assertEqual(token.text, text)  # type: ignore[union-attr]
+
+    def test_deeper_run_than_the_cap_still_lexes(self) -> None:
+        # The lexer is depth-policy-free: a depth-4 run is a perfectly
+        # good token here; rejecting it against the cap is the parser's
+        # job.
+        for source, token_class, depth in (
+            ("**** d", ListBulletToken, 4),
+            (".... d", ListNumberToken, 4),
+        ):
+            with self.subTest(source=source):
+                token = tokenize(source)[0]
+                self.assertIsInstance(token, token_class)
+                self.assertEqual(token.depth, depth)  # type: ignore[union-attr]
+
+    def test_run_with_no_following_space_is_not_a_bullet(self) -> None:
+        # A bare marker run with no separating whitespace (``**``,
+        # ``..``) is not a list line — it falls through to a plain line.
+        for source in ("**", "..", "***bold***", "..text"):
+            with self.subTest(source=source):
+                self.assertIsInstance(tokenize(source)[0], LineToken)
+
 
 class CodeFenceTokenizationTests(unittest.TestCase):
     """A line that is exactly ``----`` is a code fence."""

@@ -92,7 +92,7 @@ class AstNodeShapeTests(unittest.TestCase):
             (SoftBreak, {"source_line"}),
             (Paragraph, {"inlines", "source_line"}),
             (Section, {"level", "title", "blocks", "source_line"}),
-            (ListItem, {"inlines", "source_line"}),
+            (ListItem, {"inlines", "children", "source_line"}),
             (OrderedList, {"items", "source_line"}),
             (UnorderedList, {"items", "source_line"}),
             (CodeBlock, {"language", "content", "source_line"}),
@@ -241,11 +241,24 @@ class AstConstructionTests(unittest.TestCase):
         self.assertEqual(doc.tags, ("baking", "bread"))
 
     def test_lists_hold_list_items(self) -> None:
-        item = ListItem(inlines=(_make_text("x"),), source_line=2)
+        item = ListItem(inlines=(_make_text("x"),), children=(), source_line=2)
         ordered = OrderedList(items=(item,), source_line=2)
         unordered = UnorderedList(items=(item,), source_line=2)
         self.assertEqual(ordered.items, (item,))
         self.assertEqual(unordered.items, (item,))
+
+    def test_list_item_holds_child_lists_and_stays_frozen(self) -> None:
+        leaf = ListItem(inlines=(_make_text("Produce"),), children=(), source_line=3)
+        sublist = UnorderedList(items=(leaf,), source_line=3)
+        parent = ListItem(
+            inlines=(_make_text("Shopping"),),
+            children=(sublist,),
+            source_line=2,
+        )
+        self.assertEqual(parent.children, (sublist,))
+        self.assertEqual(leaf.children, ())
+        with self.assertRaises(FrozenInstanceError):
+            parent.children = ()  # type: ignore[misc]
 
     def test_table_cell_holds_inline_tuple(self) -> None:
         cell = TableCell(inlines=(_make_text("x"),), source_line=3)

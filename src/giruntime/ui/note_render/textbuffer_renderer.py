@@ -131,6 +131,7 @@ from asciidoc.ast import (
     InlineNode,
     Italic,
     Link,
+    ListItem,
     Monospace,
     OrderedList,
     Paragraph,
@@ -153,7 +154,7 @@ from giruntime.ui.note_render.tag_table import (
     heading_tag_name,
 )
 from config.defaults import TABLE_CELL_HPADDING_PX
-from enums import HeadingTrailing
+from enums import HeadingTrailing, ListNumberStyle
 from storage.protocols import ColumnWidthResolver, ImageBytesResolver
 
 
@@ -205,15 +206,39 @@ anchors remain only for tables.
 # Layout-level constants
 # ---------------------------------------------------------------------------
 
-# Bullet glyph used for unordered list items. Unicode bullet so it
-# renders predictably regardless of the user's font.
-_UNORDERED_BULLET: str = "•  "
+# Unordered-list bullet glyphs by nesting depth (1-based: index
+# ``depth - 1``). Unicode glyphs so they render predictably regardless
+# of the user's font. The table is sized to :data:`MAX_LIST_DEPTH` so the
+# depth cap and the presentation table cannot drift — a renderer test
+# asserts ``len(_UNORDERED_GLYPHS) == MAX_LIST_DEPTH``.
+_UNORDERED_GLYPHS: tuple[str, ...] = ("•", "◦", "▪")
+
+# Trailing spacing after a list marker (bullet glyph or ordinal),
+# separating it from the item text. Two spaces, matching the original
+# flat-list rendering.
+_LIST_MARKER_GAP: str = "  "
+
+# Ordered-list numbering style by nesting depth (1-based: index
+# ``depth - 1``). Arabic at the top, then lower-alpha, then lower-roman.
+# Sized to :data:`MAX_LIST_DEPTH` for the same no-drift reason as
+# :data:`_UNORDERED_GLYPHS`.
+_ORDERED_STYLES: tuple[ListNumberStyle, ...] = (
+    ListNumberStyle.ARABIC,
+    ListNumberStyle.LOWER_ALPHA,
+    ListNumberStyle.LOWER_ROMAN,
+)
 
 # Spaces of indentation that prefix every list item. Plain ASCII space
 # rather than the ``left_margin`` tag property, because tag-driven
 # margins do not affect the buffer's character offsets and tests check
-# the exact buffer text.
+# the exact buffer text. A list item at depth ``d`` is indented by this
+# unit repeated ``d`` times.
 _LIST_ITEM_INDENT: str = "    "
+
+# Depth of an outermost list. Only the top-level list appends the
+# trailing blank line that separates it from the next block; nested
+# sub-lists stay flush under their parent item.
+_TOP_LIST_DEPTH: int = 1
 
 # Two newlines = one blank line between blocks. Block emitters that
 # need explicit separation insert this at the end.
@@ -550,31 +575,54 @@ class TextBufferRenderer:
         self,
         buffer: Gtk.TextBuffer,
         ulist: UnorderedList,
+        depth: int = 1,
     ) -> None:
+        glyph = _UNORDERED_GLYPHS[depth - 1]
+        marker = f"{_LIST_ITEM_INDENT * depth}{glyph}{_LIST_MARKER_GAP}"
         for item in ulist.items:
-            buffer.insert(
-                buffer.get_end_iter(),
-                f"{_LIST_ITEM_INDENT}{_UNORDERED_BULLET}",
-            )
-            for inline in item.inlines:
-                self._emit_inline(buffer, inline, [])
+            self._emit_list_item(buffer, item, marker, depth)
+        if depth == _TOP_LIST_DEPTH:
             buffer.insert(buffer.get_end_iter(), "\n")
-        buffer.insert(buffer.get_end_iter(), "\n")
 
     def _emit_ordered_list(
         self,
         buffer: Gtk.TextBuffer,
         olist: OrderedList,
+        depth: int = 1,
     ) -> None:
+        style = _ORDERED_STYLES[depth - 1]
         for index, item in enumerate(olist.items, start=1):
-            buffer.insert(
-                buffer.get_end_iter(),
-                f"{_LIST_ITEM_INDENT}{index}. ",
-            )
-            for inline in item.inlines:
-                self._emit_inline(buffer, inline, [])
+            ordinal = _format_ordinal(style, index)
+            marker = f"{_LIST_ITEM_INDENT * depth}{ordinal} "
+            self._emit_list_item(buffer, item, marker, depth)
+        if depth == _TOP_LIST_DEPTH:
             buffer.insert(buffer.get_end_iter(), "\n")
+
+    def _emit_list_item(
+        self,
+        buffer: Gtk.TextBuffer,
+        item: ListItem,
+        marker: str,
+        depth: int,
+    ) -> None:
+        """Emit one item line then recurse into its child sub-lists.
+
+        The marker (indent + bullet/ordinal) is literal buffer text so
+        offsets stay exact for the renderer tests; numbering and glyph
+        restart per nested list because each sub-list is emitted from its
+        own :meth:`_emit_ordered_list` / :meth:`_emit_unordered_list`
+        call. Only the top-level list appends the trailing blank line, so
+        nested sub-lists stay flush under their parent item.
+        """
+        buffer.insert(buffer.get_end_iter(), marker)
+        for inline in item.inlines:
+            self._emit_inline(buffer, inline, [])
         buffer.insert(buffer.get_end_iter(), "\n")
+        for child in item.children:
+            if isinstance(child, UnorderedList):
+                self._emit_unordered_list(buffer, child, depth + 1)
+            else:
+                self._emit_ordered_list(buffer, child, depth + 1)
 
     def _emit_code_block(
         self,
@@ -1438,3 +1486,59 @@ def _build_attribution_text(
         _BLOCKQUOTE_ATTRIBUTION_PREFIX
         + _BLOCKQUOTE_ATTRIBUTION_SEPARATOR.join(parts)
     )
+
+
+# ---------------------------------------------------------------------------
+# Ordered-list ordinal formatting
+# ---------------------------------------------------------------------------
+
+# Largest-to-smallest (value, lowercase-numeral) pairs for the standard
+# additive/subtractive roman conversion used by lower-roman ordinals.
+_ROMAN_NUMERALS: tuple[tuple[int, str], ...] = (
+    (1000, "m"), (900, "cm"), (500, "d"), (400, "cd"),
+    (100, "c"), (90, "xc"), (50, "l"), (40, "xl"),
+    (10, "x"), (9, "ix"), (5, "v"), (4, "iv"), (1, "i"),
+)
+
+# Size of the alphabet used by the bijective base-26 lower-alpha scheme.
+_ALPHABET_SIZE: int = 26
+
+
+def _format_ordinal(style: ListNumberStyle, index: int) -> str:
+    """Render a 1-based ordered-list item ``index`` as ``"<ordinal>."``.
+
+    ``match``-es exhaustively on ``style`` so a new
+    :class:`ListNumberStyle` member is a compile-time obligation here:
+    arabic yields ``"1."``, lower-alpha ``"a."`` (bijective base-26 past
+    ``z``: ``…z, aa, ab…``), lower-roman ``"i."`` (standard roman). The
+    alpha/roman schemes never run out of representations, so an
+    out-of-range index degrades gracefully rather than crashing — though
+    at the capped depth ≤ 3 such indices are vanishingly unlikely.
+    """
+    match style:
+        case ListNumberStyle.ARABIC:
+            return f"{index}."
+        case ListNumberStyle.LOWER_ALPHA:
+            return f"{_to_lower_alpha(index)}."
+        case ListNumberStyle.LOWER_ROMAN:
+            return f"{_to_lower_roman(index)}."
+
+
+def _to_lower_alpha(index: int) -> str:
+    """Bijective base-26: ``1 -> a``, ``26 -> z``, ``27 -> aa``, …."""
+    letters: list[str] = []
+    remaining = index
+    while remaining > 0:
+        remaining, offset = divmod(remaining - 1, _ALPHABET_SIZE)
+        letters.append(chr(ord("a") + offset))
+    return "".join(reversed(letters))
+
+
+def _to_lower_roman(index: int) -> str:
+    """Standard lowercase roman numeral: ``1 -> i``, ``4 -> iv``, …."""
+    numeral: list[str] = []
+    remaining = index
+    for value, symbol in _ROMAN_NUMERALS:
+        count, remaining = divmod(remaining, value)
+        numeral.append(symbol * count)
+    return "".join(numeral)

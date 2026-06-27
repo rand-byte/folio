@@ -137,6 +137,9 @@ class ParseErrorKind(StrEnum):
     BLOCK_INSIDE_INLINE_ONLY_CONTAINER = auto()
     BAD_TAG_VALUE = auto()
     DUPLICATE_TAG_ATTRIBUTE = auto()
+    LIST_STARTS_BELOW_TOP_LEVEL = auto()
+    LIST_NESTING_SKIPS_LEVEL = auto()
+    LIST_NESTING_TOO_DEEP = auto()
 
 
 class HeadingTrailing(StrEnum):
@@ -156,6 +159,27 @@ class HeadingTrailing(StrEnum):
 
     BLOCK_SEPARATOR = "\n\n"
     SINGLE_NEWLINE = "\n"
+
+
+class ListNumberStyle(Enum):
+    """The marker style an ordered list uses at a given nesting depth.
+
+    The GTK ``TextBuffer`` renderer keeps a depth-indexed table mapping
+    each ordered-list nesting level to one of these styles — arabic at
+    level 1, lower-alpha at level 2, lower-roman at level 3 — and a
+    ``_format_ordinal`` helper turns a 1-based item index into the visible
+    ordinal (``1.`` / ``a.`` / ``i.``) by ``match``-ing on the style. It is
+    an enum rather than a bare table so the renderer's ``match`` is
+    exhaustive: adding a style forces every consumer to handle it.
+
+    Plain :class:`enum.Enum` with :func:`auto` values because the style is
+    a purely in-memory presentation choice — it is never persisted, so its
+    on-disk representation is undefined and no migration is implied.
+    """
+
+    ARABIC = auto()
+    LOWER_ALPHA = auto()
+    LOWER_ROMAN = auto()
 
 
 class AdmonitionKind(StrEnum):

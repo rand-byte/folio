@@ -70,6 +70,15 @@ class DeriveSummarySnippetTests(unittest.TestCase):
         source = "= T\n\n. Mix\n. Bake\n"
         self.assertEqual(derive_summary(source).snippet, "Mix Bake")
 
+    def test_nested_list_item_text_reaches_the_snippet(self) -> None:
+        # Text in a nested sub-list must still flow into the note-list
+        # snippet, in document order with the parent items.
+        source = "= T\n\n* Produce\n** Apples\n** Pears\n* Dairy\n"
+        self.assertEqual(
+            derive_summary(source).snippet,
+            "Produce Apples Pears Dairy",
+        )
+
     def test_admonition_body_is_prose_label_dropped(self) -> None:
         source = "= T\n\nNOTE: Watch the oven.\n"
         self.assertEqual(derive_summary(source).snippet, "Watch the oven.")

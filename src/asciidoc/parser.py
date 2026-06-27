@@ -48,10 +48,18 @@ Principles & invariants
   :class:`ParseError.line` for an unmatched inline marker points at
   the exact source line, never at the first line of the paragraph.
   Lines are joined in the AST with :class:`SoftBreak` connectors.
-* Lists are flat in step 4: a single run of adjacent ``*`` or ``.``
-  bullets terminated by anything else (blank, heading, fence, EOF).
-  Multi-line items, nesting, and ``+`` continuations are deferred —
-  the welcome note exercises only the supported shape.
+* Lists may nest up to :data:`config.defaults.MAX_LIST_DEPTH` levels,
+  ordered and unordered, mixed freely: the repeated-marker run length
+  is the depth (``*``/``.`` = 1, ``**``/``..`` = 2, ``***``/``...`` = 3).
+  A single stack-based builder (:meth:`_Parser._parse_list`) turns the
+  flat run of depth-tagged list tokens into a recursive tree, where each
+  :class:`ListItem` carries its own inline text plus its child sub-lists.
+  A run is terminated by anything else (blank, heading, fence, EOF) or by
+  a *top-level* marker whose kind differs from the list it opened (which
+  starts a sibling list block, preserving the original flat-list
+  bullet→number split). Three depth conditions are hard errors, checked
+  in this precedence: starts-below-top-level, skips-a-level, too-deep.
+  Multi-line items and ``+`` continuations remain deferred.
 """
 
 # The module's size reflects the asciidoc subset's full surface area —
@@ -107,7 +115,8 @@ from asciidoc.lexer import (
     source_lines,
     tokenize,
 )
-from enums import AdmonitionKind, ParseErrorKind
+from config.defaults import MAX_LIST_DEPTH
+from enums import AdmonitionKind, ParseErrorKind, TokenKind
 from models.parse_error import ParseError
 
 
@@ -119,6 +128,11 @@ _DOCUMENT_TITLE_LEVEL: int = 1
 _MIN_SECTION_LEVEL: int = 2
 _MAX_SECTION_LEVEL: int = 6
 _DOCUMENT_SOURCE_LINE: int = 1
+
+# The depth of an outermost list item. The lexer counts marker runs
+# starting at 1, so a list whose first item is not at this depth opens
+# below the top level (``LIST_STARTS_BELOW_TOP_LEVEL``).
+_TOP_LIST_DEPTH: int = 1
 
 _COMMENT_PREFIX: str = "//"
 
@@ -175,6 +189,34 @@ def parse(source: str) -> Document:
 # ---------------------------------------------------------------------------
 # Parser implementation
 # ---------------------------------------------------------------------------
+
+
+@dataclass
+class _OpenList:
+    """One list under construction at a single nesting depth.
+
+    The stack-based list builder (:meth:`_Parser._parse_list`) keeps one
+    of these per currently-open list, ordered from the depth-1 root to
+    the deepest open sub-list. ``items`` accumulates the already-finalised
+    :class:`ListItem`\\ s; the ``cur_*`` fields hold the item currently
+    being extended — the most recent at this level, which may still gain
+    child sub-lists before it is finalised. Mutable on purpose: it is a
+    transient accumulator local to one ``_parse_list`` call, never part of
+    the immutable AST it produces.
+
+    ``kind`` is the marker kind (:data:`TokenKind.LIST_BULLET` or
+    :data:`TokenKind.LIST_NUMBER`); it decides whether the finished list
+    is an :class:`UnorderedList` or an :class:`OrderedList` and whether a
+    same-depth marker is a sibling item or a type switch.
+    """
+
+    kind: TokenKind
+    depth: int
+    source_line: int
+    items: list[ListItem]
+    cur_inlines: tuple[InlineNode, ...]
+    cur_children: list[OrderedList | UnorderedList]
+    cur_source_line: int
 
 
 @dataclass
@@ -387,10 +429,8 @@ class _Parser:
     # pylint: disable-next=too-many-return-statements,too-many-branches
     def _parse_non_heading_block(self, token: Token) -> BlockNode:
         """Dispatch every non-heading block-start token to its parser."""
-        if isinstance(token, ListBulletToken):
-            return self._parse_unordered_list()
-        if isinstance(token, ListNumberToken):
-            return self._parse_ordered_list()
+        if isinstance(token, (ListBulletToken, ListNumberToken)):
+            return self._parse_list()
         if isinstance(token, CodeDirectiveToken):
             return self._parse_code_block_with_directive(token)
         if isinstance(token, CodeFenceToken):
@@ -553,39 +593,176 @@ class _Parser:
 
     # -- lists --------------------------------------------------------------
 
-    def _parse_unordered_list(self) -> UnorderedList:
-        """Consume a run of adjacent ``* …`` lines."""
-        items: list[ListItem] = []
-        start_line = self.tokens[self.pos].line  # type: ignore[union-attr]
-        while (
-            self.pos < len(self.tokens)
-            and isinstance(self.tokens[self.pos], ListBulletToken)
-        ):
-            bullet = self.tokens[self.pos]
-            assert isinstance(bullet, ListBulletToken)
-            inlines = parse_inline(bullet.text, bullet.line)
-            items.append(
-                ListItem(inlines=inlines, source_line=bullet.line)
-            )
-            self.pos += 1
-        return UnorderedList(items=tuple(items), source_line=start_line)
+    def _parse_list(self) -> OrderedList | UnorderedList:
+        """Consume one adjacent list run and build its nested tree.
 
-    def _parse_ordered_list(self) -> OrderedList:
-        """Consume a run of adjacent ``. …`` lines."""
-        items: list[ListItem] = []
-        start_line = self.tokens[self.pos].line  # type: ignore[union-attr]
-        while (
-            self.pos < len(self.tokens)
-            and isinstance(self.tokens[self.pos], ListNumberToken)
-        ):
-            number = self.tokens[self.pos]
-            assert isinstance(number, ListNumberToken)
-            inlines = parse_inline(number.text, number.line)
-            items.append(
-                ListItem(inlines=inlines, source_line=number.line)
-            )
+        Walks the flat run of depth-tagged :class:`ListBulletToken` /
+        :class:`ListNumberToken` tokens with an explicit stack of
+        :class:`_OpenList` frames (depth-1 root … deepest open sub-list).
+        For each list token, relative to the deepest open frame:
+
+        * **deeper** — open a new sub-list on the current item, after the
+          skip-level and depth-cap checks;
+        * **same depth, same kind** — finalise the current item and start
+          a sibling item;
+        * **same depth, different kind** — at the top level, stop so the
+          block loop starts a sibling list block (the original
+          bullet→number split); nested, end the sub-list and start a
+          sibling sub-list under the same parent item;
+        * **shallower** — pop frames until the depths match, then re-apply
+          the same-depth rule.
+
+        The run ends at the first non-list token (blank, heading, fence,
+        EOF) or at a top-level type switch; in either case ``self.pos`` is
+        left on the terminating token. The three depth errors are raised
+        with the precedence pinned in the module docstring.
+        """
+        stack: list[_OpenList] = []
+        while self.pos < len(self.tokens):
+            token = self.tokens[self.pos]
+            if not isinstance(token, (ListBulletToken, ListNumberToken)):
+                break
+
+            if not stack:
+                # First item of the whole run: it must open at the top.
+                if token.depth != _TOP_LIST_DEPTH:
+                    raise ParseError(
+                        line=token.line,
+                        column=0,
+                        message=(
+                            f"list item opens at depth {token.depth}; the "
+                            "first item of a list must be at the top level"
+                        ),
+                        kind=ParseErrorKind.LIST_STARTS_BELOW_TOP_LEVEL,
+                    )
+                stack.append(self._open_list(token))
+                self.pos += 1
+                continue
+
+            if token.depth > stack[-1].depth:
+                self._open_deeper(stack, token)
+                self.pos += 1
+                continue
+
+            # Same depth or shallower: dedent to the matching frame first.
+            while stack[-1].depth > token.depth:
+                self._close_top(stack)
+            top = stack[-1]
+            if top.kind == token.kind:
+                self._start_sibling_item(top, token)
+                self.pos += 1
+                continue
+            # Same depth, different kind.
+            if top.depth == _TOP_LIST_DEPTH:
+                # A top-level type switch ends this list; the block loop
+                # picks the next token up as a sibling list block.
+                break
+            # Nested type switch: end the sub-list, start a sibling
+            # sub-list under the same parent item.
+            self._close_top(stack)
+            stack.append(self._open_list(token))
             self.pos += 1
-        return OrderedList(items=tuple(items), source_line=start_line)
+
+        return self._close_all(stack)
+
+    @staticmethod
+    def _open_list(token: ListBulletToken | ListNumberToken) -> _OpenList:
+        """Open a fresh frame whose first (current) item is ``token``."""
+        return _OpenList(
+            kind=token.kind,
+            depth=token.depth,
+            source_line=token.line,
+            items=[],
+            cur_inlines=parse_inline(token.text, token.line),
+            cur_children=[],
+            cur_source_line=token.line,
+        )
+
+    def _open_deeper(
+        self,
+        stack: list[_OpenList],
+        token: ListBulletToken | ListNumberToken,
+    ) -> None:
+        """Push a deeper sub-list, enforcing skip-level then depth-cap.
+
+        The precedence here is half of the module-level ordering: a jump
+        of more than +1 is a skip (caught first), and a clean +1 step that
+        crosses the cap is too-deep. ``LIST_STARTS_BELOW_TOP_LEVEL`` is
+        handled by the first-item check in :meth:`_parse_list`, so it
+        never competes with these two.
+        """
+        parent_depth = stack[-1].depth
+        if token.depth != parent_depth + 1:
+            raise ParseError(
+                line=token.line,
+                column=0,
+                message=(
+                    f"list item jumps from depth {parent_depth} to "
+                    f"{token.depth}; nesting may deepen by only one level "
+                    "at a time"
+                ),
+                kind=ParseErrorKind.LIST_NESTING_SKIPS_LEVEL,
+            )
+        if token.depth > MAX_LIST_DEPTH:
+            raise ParseError(
+                line=token.line,
+                column=0,
+                message=(
+                    f"list nests {token.depth} levels deep; the maximum is "
+                    f"{MAX_LIST_DEPTH}"
+                ),
+                kind=ParseErrorKind.LIST_NESTING_TOO_DEEP,
+            )
+        stack.append(self._open_list(token))
+
+    @staticmethod
+    def _start_sibling_item(
+        frame: _OpenList,
+        token: ListBulletToken | ListNumberToken,
+    ) -> None:
+        """Finalise ``frame``'s current item and begin a sibling item."""
+        _Parser._finalize_current_item(frame)
+        frame.cur_inlines = parse_inline(token.text, token.line)
+        frame.cur_children = []
+        frame.cur_source_line = token.line
+
+    @staticmethod
+    def _finalize_current_item(frame: _OpenList) -> None:
+        """Append the in-progress item (with its children) to ``frame``."""
+        frame.items.append(
+            ListItem(
+                inlines=frame.cur_inlines,
+                children=tuple(frame.cur_children),
+                source_line=frame.cur_source_line,
+            )
+        )
+
+    @staticmethod
+    def _build_list(frame: _OpenList) -> OrderedList | UnorderedList:
+        """Finalise ``frame`` and turn it into its AST list node."""
+        _Parser._finalize_current_item(frame)
+        items = tuple(frame.items)
+        if frame.kind is TokenKind.LIST_NUMBER:
+            return OrderedList(items=items, source_line=frame.source_line)
+        return UnorderedList(items=items, source_line=frame.source_line)
+
+    @staticmethod
+    def _close_top(stack: list[_OpenList]) -> None:
+        """Pop the deepest frame and hang it under its parent's item.
+
+        Only called while a parent frame exists (during dedent and nested
+        type switches, and by :meth:`_close_all` down to the root), so the
+        built sub-list always has a current item to attach to.
+        """
+        child = _Parser._build_list(stack.pop())
+        stack[-1].cur_children.append(child)
+
+    @staticmethod
+    def _close_all(stack: list[_OpenList]) -> OrderedList | UnorderedList:
+        """Collapse the whole stack and return the depth-1 root list."""
+        while len(stack) > 1:
+            _Parser._close_top(stack)
+        return _Parser._build_list(stack[0])
 
     # -- code blocks --------------------------------------------------------
 

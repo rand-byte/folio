@@ -302,6 +302,114 @@ class ListTests(unittest.TestCase):
         self.assertEqual(ctx.exception.line, 1)
 
 
+def _item_text(item: ListItem) -> str:
+    """Concatenate the plain-text content of a leaf item's inlines."""
+    return "".join(
+        node.content for node in item.inlines if isinstance(node, Text)
+    )
+
+
+class NestedListTests(unittest.TestCase):
+    """Multi-level lists build a recursive tree; depth rules are strict."""
+
+    def test_same_type_nesting_builds_expected_tree(self) -> None:
+        doc = parse("* L1\n** L2\n*** L3\n* L1b\n")
+        self.assertEqual(len(doc.blocks), 1)
+        top = doc.blocks[0]
+        assert isinstance(top, UnorderedList)
+        self.assertEqual(len(top.items), 2)
+        l1, l1b = top.items
+        self.assertEqual(_item_text(l1), "L1")
+        self.assertEqual(_item_text(l1b), "L1b")
+        self.assertEqual(l1b.children, ())
+        # L1 -> [UL[L2 -> [UL[L3]]]]
+        self.assertEqual(len(l1.children), 1)
+        sub2 = l1.children[0]
+        assert isinstance(sub2, UnorderedList)
+        l2 = sub2.items[0]
+        self.assertEqual(_item_text(l2), "L2")
+        self.assertEqual(l2.source_line, 2)
+        sub3 = l2.children[0]
+        assert isinstance(sub3, UnorderedList)
+        self.assertEqual(_item_text(sub3.items[0]), "L3")
+        self.assertEqual(sub3.items[0].source_line, 3)
+
+    def test_mixed_nesting_puts_ordered_sublist_under_unordered_item(
+        self,
+    ) -> None:
+        doc = parse("* a\n.. b\n")
+        top = doc.blocks[0]
+        assert isinstance(top, UnorderedList)
+        item = top.items[0]
+        self.assertEqual(len(item.children), 1)
+        sub = item.children[0]
+        assert isinstance(sub, OrderedList)
+        self.assertEqual(_item_text(sub.items[0]), "b")
+
+    def test_dedent_pops_back_to_outer_level(self) -> None:
+        doc = parse("* a\n** b\n* c\n")
+        top = doc.blocks[0]
+        assert isinstance(top, UnorderedList)
+        # Two top-level items: a (with one child sublist) and c (a leaf).
+        self.assertEqual([_item_text(i) for i in top.items], ["a", "c"])
+        self.assertEqual(len(top.items[0].children), 1)
+        self.assertEqual(top.items[1].children, ())
+
+    def test_same_depth_type_switch_yields_two_sibling_lists(self) -> None:
+        doc = parse("* a\n. b\n")
+        self.assertEqual(len(doc.blocks), 2)
+        first, second = doc.blocks
+        self.assertIsInstance(first, UnorderedList)
+        self.assertIsInstance(second, OrderedList)
+
+    def test_nested_type_switch_makes_sibling_sublists(self) -> None:
+        # Two sub-lists of different kinds hang under the same item.
+        doc = parse("* a\n.. b\n** c\n")
+        top = doc.blocks[0]
+        assert isinstance(top, UnorderedList)
+        children = top.items[0].children
+        self.assertEqual(len(children), 2)
+        self.assertIsInstance(children[0], OrderedList)
+        self.assertIsInstance(children[1], UnorderedList)
+
+    def test_starts_below_top_level_raises(self) -> None:
+        with self.assertRaises(ParseError) as ctx:
+            parse("** x\n")
+        self.assertEqual(
+            ctx.exception.kind,
+            ParseErrorKind.LIST_STARTS_BELOW_TOP_LEVEL,
+        )
+        self.assertEqual(ctx.exception.line, 1)
+
+    def test_skips_level_raises_at_the_jumping_line(self) -> None:
+        with self.assertRaises(ParseError) as ctx:
+            parse("* a\n*** b\n")
+        self.assertEqual(
+            ctx.exception.kind,
+            ParseErrorKind.LIST_NESTING_SKIPS_LEVEL,
+        )
+        self.assertEqual(ctx.exception.line, 2)
+
+    def test_too_deep_raises_at_the_fourth_level(self) -> None:
+        with self.assertRaises(ParseError) as ctx:
+            parse("* a\n** b\n*** c\n**** d\n")
+        self.assertEqual(
+            ctx.exception.kind,
+            ParseErrorKind.LIST_NESTING_TOO_DEEP,
+        )
+        self.assertEqual(ctx.exception.line, 4)
+
+    def test_precedence_starts_below_wins_over_too_deep(self) -> None:
+        # ``**** x`` as a list's first line is *both* below-top-level and
+        # too-deep; the more fundamental condition reports first.
+        with self.assertRaises(ParseError) as ctx:
+            parse("**** x\n")
+        self.assertEqual(
+            ctx.exception.kind,
+            ParseErrorKind.LIST_STARTS_BELOW_TOP_LEVEL,
+        )
+
+
 # ---------------------------------------------------------------------------
 # Code blocks
 # ---------------------------------------------------------------------------

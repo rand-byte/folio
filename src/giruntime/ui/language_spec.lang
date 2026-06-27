@@ -93,21 +93,23 @@
     </context>
 
     <!--
-      Unordered list bullet: '*' followed by a space, at the start of a
-      line. Only the marker is styled — the rest of the line is plain
-      text so inline emphasis inside list items still picks up the
-      bold/italic contexts below.
+      Unordered list bullet: a run of one-or-more '*' followed by a
+      space or tab, at the start of a line. Only the marker is styled —
+      the rest of the line is plain text so inline emphasis inside list
+      items still picks up the bold/italic contexts below. The run is
+      depth-agnostic here (highlighting does not enforce the ≤3 cap; the
+      parser owns that).
     -->
     <context id="unordered-list-bullet" style-ref="list-marker">
-      <match>^\*[ \t]+</match>
+      <match>^\*+[ \t]+</match>
     </context>
 
     <!--
-      Ordered list bullet: '.' followed by a space, at the start of a
-      line. Same scoping as unordered.
+      Ordered list bullet: a run of one-or-more '.' followed by a space
+      or tab, at the start of a line. Same scoping as unordered.
     -->
     <context id="ordered-list-bullet" style-ref="list-marker">
-      <match>^\.[ \t]+</match>
+      <match>^\.+[ \t]+</match>
     </context>
 
     <!--

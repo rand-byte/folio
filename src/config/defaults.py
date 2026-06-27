@@ -73,6 +73,20 @@ from __future__ import annotations
 MAX_ATTACHMENT_BYTES: int = 10 * 1024 * 1024
 """Hard upper bound on the size of a single image attachment, in bytes."""
 
+MAX_LIST_DEPTH: int = 3
+"""Maximum nesting depth for ordered and unordered lists.
+
+AsciiDoc encodes list nesting as a repeated-marker run (``*``/``.`` =
+level 1, ``**``/``..`` = level 2, ``***``/``...`` = level 3); this
+constant is the deepest run the parser accepts. Going deeper is a hard
+parse error (:data:`ParseErrorKind.LIST_NESTING_TOO_DEEP`) rather than a
+silent reinterpretation. The two depth-indexed renderer tables (the
+unordered-bullet glyphs and the ordered :class:`ListNumberStyle`
+sequence) are sized to this value, and a renderer test asserts each
+table's length equals it — so the cap and the presentation tables cannot
+drift.
+"""
+
 TARGET_CHARS_PER_LINE: int = 66
 """Target text-column width in characters for the rendered view.
 

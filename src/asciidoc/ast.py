@@ -216,13 +216,28 @@ class Section:
 
 @dataclass(frozen=True)
 class ListItem:
-    """A single ``* …`` or ``. …`` list item.
+    """A single ``* …`` or ``. …`` list item, with optional sub-lists.
 
-    A list item is purely inline content in this subset — no nested
-    blocks, no continuation. Multi-line items are not supported.
+    ``inlines`` and ``children`` are orthogonal axes of one item.
+    ``inlines`` is the item's *own* inline-parsed text — the same closed
+    inline union (:class:`Text` / :class:`Bold` / … / :class:`Link`) every
+    other inline container holds, and the inline-only rule for the item's
+    own text is unchanged by nesting. ``children`` holds the sub-lists
+    that hang beneath this item: a possibly-empty sequence of
+    :class:`OrderedList` / :class:`UnorderedList` (``()`` when the item is
+    a leaf). Nesting therefore lives entirely on the item — an item may
+    hold nested lists, but still **no other block kinds** and no
+    continuation.
+
+    A recursive tree (rather than a flat ``level: int`` on the item) is
+    what lets a deeper level change list kind — ``* a`` then ``.. b`` is
+    an ordered sublist hanging under an unordered item — while each
+    :class:`OrderedList` / :class:`UnorderedList` stays internally
+    homogeneous.
     """
 
     inlines: tuple[InlineNode, ...]
+    children: tuple[OrderedList | UnorderedList, ...]
     source_line: int
 
 

@@ -185,7 +185,12 @@ def _prose_pieces(block: BlockNode) -> list[str]:
         case Paragraph(inlines=inlines):
             return [_flatten(inlines)]
         case OrderedList(items=items) | UnorderedList(items=items):
-            return [_flatten(item.inlines) for item in items]
+            list_pieces: list[str] = []
+            for item in items:
+                list_pieces.append(_flatten(item.inlines))
+                for child in item.children:
+                    list_pieces.extend(_prose_pieces(child))
+            return list_pieces
         case Admonition(blocks=blocks) | Blockquote(blocks=blocks):
             pieces: list[str] = []
             for paragraph in blocks:

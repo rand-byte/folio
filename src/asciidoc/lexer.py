@@ -85,27 +85,43 @@ class HeadingToken:
 
 @dataclass(frozen=True)
 class ListBulletToken:
-    """An unordered-list line: ``* item-text``.
+    """An unordered-list line: ``*…* item-text``.
 
-    ``text`` is everything after the first ``"* "`` — leading spaces in
-    ``text`` are preserved, trailing whitespace on the line is stripped
-    by the lexer.
+    The leading marker is a *run* of one-or-more ``*`` characters
+    followed by at least one space or tab; ``depth`` is the run length
+    (``*`` = 1, ``**`` = 2, ``***`` = 3, …). The lexer counts the run but
+    knows nothing of the depth cap or the legal-transition rules — all
+    depth *policy* lives in the parser, so a ``****`` run still lexes as a
+    depth-4 bullet and is rejected there.
+
+    ``text`` is everything after the marker run and its single separating
+    space/tab — further leading spaces in ``text`` are preserved, trailing
+    whitespace on the line is stripped by the lexer.
     """
 
     kind: ClassVar[TokenKind] = TokenKind.LIST_BULLET
 
     line: int
     text: str
+    depth: int
 
 
 @dataclass(frozen=True)
 class ListNumberToken:
-    """An ordered-list line: ``. item-text``."""
+    """An ordered-list line: ``.…. item-text``.
+
+    The leading marker is a *run* of one-or-more ``.`` characters
+    followed by at least one space or tab; ``depth`` is the run length
+    (``.`` = 1, ``..`` = 2, ``...`` = 3, …), with the same depth-agnostic
+    treatment as :class:`ListBulletToken`. ``text`` is everything after
+    the marker run and its single separating space/tab.
+    """
 
     kind: ClassVar[TokenKind] = TokenKind.LIST_NUMBER
 
     line: int
     text: str
+    depth: int
 
 
 @dataclass(frozen=True)
@@ -401,8 +417,14 @@ step 15 extends it further with :class:`AdmonitionDirectiveToken`,
 # Module-level pattern constants
 # ---------------------------------------------------------------------------
 
-_LIST_BULLET_PREFIX: str = "* "
-_LIST_NUMBER_PREFIX: str = ". "
+# A list marker is a *run* of one-or-more ``*`` (unordered) or ``.``
+# (ordered) characters immediately followed by at least one space or
+# tab. The run length is the nesting depth; the separator requirement is
+# what keeps ``*bold*`` / ``.Title`` at line start out of list-land (no
+# whitespace after the marker run). The lexer only records the run
+# length — the depth cap and legal-transition rules are the parser's job.
+_LIST_BULLET_RE: re.Pattern[str] = re.compile(r"^(\*+)[ \t]")
+_LIST_NUMBER_RE: re.Pattern[str] = re.compile(r"^(\.+)[ \t]")
 _CODE_FENCE_LITERAL: str = "----"
 _IMAGE_MACRO_PREFIX: str = "image::"
 _TABLE_FENCE_LITERAL: str = "|==="
@@ -527,15 +549,19 @@ def _classify_line(raw_line: str, line_number: int) -> Token:
     if heading is not None:
         return heading
 
-    if line.startswith(_LIST_BULLET_PREFIX):
+    bullet_match = _LIST_BULLET_RE.match(line)
+    if bullet_match is not None:
         return ListBulletToken(
             line=line_number,
-            text=line[len(_LIST_BULLET_PREFIX):],
+            text=line[bullet_match.end():],
+            depth=len(bullet_match.group(1)),
         )
-    if line.startswith(_LIST_NUMBER_PREFIX):
+    number_match = _LIST_NUMBER_RE.match(line)
+    if number_match is not None:
         return ListNumberToken(
             line=line_number,
-            text=line[len(_LIST_NUMBER_PREFIX):],
+            text=line[number_match.end():],
+            depth=len(number_match.group(1)),
         )
 
     if line == _CODE_FENCE_LITERAL:

@@ -166,9 +166,31 @@ An *unordered* list uses a leading `*`; an *ordered* list uses a leading
 . Third step
 ----
 
-Limit: in Folio's subset list items are *single-line only* — no nested
-sub-lists and no continuation lines. (Full AsciiDoc supports nesting;
-Folio does not.)
+Lists *nest* up to three levels deep: repeat the marker once more for
+each level (`**` or `..` for level two, `***` or `...` for level three).
+A space must follow the marker run. Levels may mix freely — an ordered
+sublist can sit under an unordered item and the reverse:
+
+* Produce
+** Apples
+** Pears
+* Dairy
+.. Milk
+.. Cheese
+
+----
+* Produce
+** Apples
+** Pears
+* Dairy
+.. Milk
+.. Cheese
+----
+
+Limit: nesting stops at three levels, and list items are
+*single-line only* — no continuation lines. A list must start at the top
+level (a single `*` or `.`), and each level may deepen by only one marker
+at a time.
 
 === Code blocks
 

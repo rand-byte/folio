@@ -500,6 +500,20 @@ def _message_for(kind: ParseErrorKind, line: int) -> str:
                 f"Line {line}: this note has more than one `:tags:` line — "
                 "combine them into a single comma-separated list."
             )
+        case ParseErrorKind.LIST_STARTS_BELOW_TOP_LEVEL:
+            return (
+                f"Line {line}: a list must start at the top level — begin "
+                "with a single `*` or `.` before nesting deeper."
+            )
+        case ParseErrorKind.LIST_NESTING_SKIPS_LEVEL:
+            return (
+                f"Line {line}: this list item nests too fast — add only one "
+                "more `*` or `.` than the item above it."
+            )
+        case ParseErrorKind.LIST_NESTING_TOO_DEEP:
+            return (
+                f"Line {line}: lists can nest at most three levels deep."
+            )
 
 
 def _placeholder_image_bytes(_filename: str) -> bytes:

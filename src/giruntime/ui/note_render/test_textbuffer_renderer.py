@@ -19,15 +19,18 @@ from giruntime.ui.note_render.tag_table import (
 from giruntime.ui.note_render.textbuffer_renderer import (
     TextBufferRenderer,
     _CellRun,
+    _ORDERED_STYLES,
     _PlaceholderImagePaintable,
     _ScaledImagePaintable,
+    _UNORDERED_GLYPHS,
+    _format_ordinal,
     _table_column_pixels,
     _table_tab_stops,
     _truncate_cell,
 )
-from enums import AdmonitionKind
+from enums import AdmonitionKind, ListNumberStyle
 from models.parse_error import ParseError
-from config.defaults import TABLE_CELL_HPADDING_PX
+from config.defaults import MAX_LIST_DEPTH, TABLE_CELL_HPADDING_PX
 
 
 # ---------------------------------------------------------------------------
@@ -365,6 +368,94 @@ class ListRenderingTests(unittest.TestCase):
             _ranges_with_tag(buffer, TagName.BOLD.value),
             [(emp_start, emp_start + len("emphatic"))],
         )
+
+    def test_depth_tables_match_max_list_depth(self) -> None:
+        # The cap and the two presentation tables cannot drift.
+        self.assertEqual(len(_UNORDERED_GLYPHS), MAX_LIST_DEPTH)
+        self.assertEqual(len(_ORDERED_STYLES), MAX_LIST_DEPTH)
+
+    def test_nested_unordered_exact_buffer_text(self) -> None:
+        # Three unordered levels: indent scales by depth (4 spaces per
+        # level) and the glyph changes •/◦/▪ with depth. A trailing
+        # paragraph makes the list's block separator deterministic (the
+        # buffer's final blank line is otherwise trimmed).
+        src = "= D\n\n* one\n** two\n*** three\n* four\n\nEnd.\n"
+        renderer, buffer, _ = _build_renderer()
+        renderer.render_into(src, buffer, note_id="n1")
+        self.assertEqual(
+            _full_text(buffer),
+            "D\n"
+            "    •  one\n"
+            "        ◦  two\n"
+            "            ▪  three\n"
+            "    •  four\n"
+            "\n"
+            "End.",
+        )
+
+    def test_nested_ordered_numbering_by_depth_restarts_per_sublist(
+        self,
+    ) -> None:
+        # arabic at level 1, lower-alpha at level 2; each sub-list numbers
+        # from the top.
+        src = "= D\n\n. one\n.. sub-a\n.. sub-b\n. two\n\nEnd.\n"
+        renderer, buffer, _ = _build_renderer()
+        renderer.render_into(src, buffer, note_id="n1")
+        self.assertEqual(
+            _full_text(buffer),
+            "D\n"
+            "    1. one\n"
+            "        a. sub-a\n"
+            "        b. sub-b\n"
+            "    2. two\n"
+            "\n"
+            "End.",
+        )
+
+    def test_three_level_ordered_uses_roman_at_depth_three(self) -> None:
+        src = "= D\n\n. one\n.. a\n... i\n\nEnd.\n"
+        renderer, buffer, _ = _build_renderer()
+        renderer.render_into(src, buffer, note_id="n1")
+        self.assertEqual(
+            _full_text(buffer),
+            "D\n"
+            "    1. one\n"
+            "        a. a\n"
+            "            i. i\n"
+            "\n"
+            "End.",
+        )
+
+    def test_mixed_nesting_uses_child_list_kind(self) -> None:
+        # An ordered sub-list under an unordered item renders with
+        # ordered markers at the deeper indent.
+        src = "= D\n\n* parent\n.. step\n\nEnd.\n"
+        renderer, buffer, _ = _build_renderer()
+        renderer.render_into(src, buffer, note_id="n1")
+        self.assertEqual(
+            _full_text(buffer),
+            "D\n    •  parent\n        a. step\n\nEnd.",
+        )
+
+
+class FormatOrdinalTests(unittest.TestCase):
+    """The depth→style ordinal formatter and its base-26 / roman cases."""
+
+    def test_arabic(self) -> None:
+        self.assertEqual(_format_ordinal(ListNumberStyle.ARABIC, 1), "1.")
+        self.assertEqual(_format_ordinal(ListNumberStyle.ARABIC, 42), "42.")
+
+    def test_lower_alpha_basic_and_boundary(self) -> None:
+        self.assertEqual(_format_ordinal(ListNumberStyle.LOWER_ALPHA, 1), "a.")
+        self.assertEqual(_format_ordinal(ListNumberStyle.LOWER_ALPHA, 26), "z.")
+        # Bijective base-26 rolls z -> aa (not `[a` or a gap).
+        self.assertEqual(_format_ordinal(ListNumberStyle.LOWER_ALPHA, 27), "aa.")
+        self.assertEqual(_format_ordinal(ListNumberStyle.LOWER_ALPHA, 28), "ab.")
+
+    def test_lower_roman(self) -> None:
+        self.assertEqual(_format_ordinal(ListNumberStyle.LOWER_ROMAN, 1), "i.")
+        self.assertEqual(_format_ordinal(ListNumberStyle.LOWER_ROMAN, 4), "iv.")
+        self.assertEqual(_format_ordinal(ListNumberStyle.LOWER_ROMAN, 9), "ix.")
 
 
 @unittest.skipUnless(_display_available(), "no GDK display")
