@@ -1,86 +1,183 @@
-= Folio help: the AsciiDoc subset
+= Folio help: writing notes in AsciiDoc
 :tags: help
 
-Folio notes are written in a strict subset of *AsciiDoc*, a plain-text
-format. The promise is simple: well-formed markup renders, while
-malformed inline markup surfaces an _error_ in the read view rather than
-quietly rendering garbage — and a note still saves while you are
-mid-edit, so a half-finished line never loses your work.
+Welcome to Folio. Every note you write here is plain text marked up in
+*AsciiDoc* — a lightweight format where a few punctuation characters
+stand in for bold, headings, lists, and so on, so the raw text stays
+readable even before it is rendered. You do not need to know AsciiDoc
+already: this reference teaches the small slice of it that Folio
+understands, one construct at a time.
 
-This reference shows each supported construct: its literal markup (in a
-monospace span or a code block, so the markup itself is visible), then
-how it renders, then the one limit worth remembering. The reference is
-itself a Folio note, written in exactly the subset it documents.
+You edit a note in the *Source* view and read it in the *View* view; the
+toggle at the top switches between them. The View view is exactly what
+the examples below preview. Folio accepts a deliberately *strict subset*
+of AsciiDoc, so most of what you write is ordinary prose with the
+occasional marker. Two promises make that subset safe to live in:
+well-formed markup renders, while a malformed inline marker surfaces a
+clear _error_ in the View rather than quietly rendering garbage — and a
+note still saves while you are mid-edit, so a half-finished line never
+costs you your work.
+
+This page is itself a Folio note, written in the very subset it
+documents. The full AsciiDoc language is much larger; for anything beyond
+this subset, the official documentation lives at
+https://docs.asciidoctor.org/asciidoc/latest/[the AsciiDoc language docs]
+and a one-page tour is the
+https://docs.asciidoctor.org/asciidoc/latest/syntax-quick-reference/[syntax quick reference].
 
 == Structure
 
-A note's first non-blank line may be its title, written `= Title`. Only
-the very first line may be a level-0 title.
+Every construct below follows the same shape: first *how it renders*,
+then *the source that produced it* in a code block, then the one limit
+worth remembering. Here is a whole tiny note, end to end, to show how the
+pieces fit together:
 
-Directly under the title, a `:tags:` header files the note. Both lines
-look like this:
+----
+= Shopping
+:tags: home, errands
+
+A quick list before the *weekend*.
+
+== To buy
+
+* Milk
+* Bread
+----
+
+That source is a *title* (`= Shopping` — a single `=`), a `:tags:` line that
+files the note under two tags, a paragraph with one bold word, a
+*section heading* (`== To buy`), and a short *list*. The rest of this
+reference takes those pieces one at a time.
+
+=== Title and tags
+
+A note's first non-blank line may be its title, written `= Title` — one
+`=`, a space, then the text. A title uses a *single* `=`, and only the
+very first line may be one.
+
+Directly under the title, an optional `:tags:` line files the note under
+one or more comma-separated tags. Together they look like this:
 
 ----
 = My note title
 :tags: work, ideas
 ----
 
-Section headings use two to six `=` signs — `==` through `======`. A
-deeper heading nests under a shallower one; an equal-or-shallower
-heading closes it.
+Limit: the title is valid *only* on the first line; a `=` line anywhere
+later in the note is rejected rather than treated as a heading.
+
+=== Section headings
+
+Headings inside the body use two to six `=` signs — `==` through
+`======`. A heading with more `=` signs nests under one with fewer; a
+heading with equal-or-fewer `=` signs closes it and starts a new one.
+(The official docs count these as "levels", where the title is level 0
+and a `==` heading is level 1 — always one less than the number of `=`
+signs. This page just counts the `=` signs, to sidestep that off-by-one.)
+
+The subsection titles you are reading on this page — "Title and tags",
+"Section headings", and the rest — are themselves live headings, each a
+level deeper than "Structure" or "Blocks" above them. Their source is
+just the heading line, for example:
 
 ----
-== A section
+== A top-level section
 === A nested subsection
+====== The deepest allowed heading
 ----
 
-Limit: level 0 is the title and is valid only on the first line; a `=`
-heading anywhere later is rejected.
+Limit: the single-`=` title is valid only as the first non-blank line
+(blank lines above it are fine). A `=` line anywhere later in the note is
+rejected rather than treated as a heading.
 
 == Text & emphasis
 
-Inline markup wraps a span inside a single line. Each item below shows
-the markup verbatim, then the rendered result.
+Inline markup styles a span of text *within a single line*. Each style
+below is shown first as it renders, then with the literal markers you
+type. (See also the official
+https://docs.asciidoctor.org/asciidoc/latest/text/[text formatting] page.)
 
-* Bold uses `*stars*` and renders as *bold*.
-* Italic uses `_underscores_` and renders as _italic_.
-* Strike uses `[.line-through]#text#` and renders as [.line-through]#struck through#.
-* Underline uses `[.underline]#text#` and renders as [.underline]#underlined#.
-* Monospace uses a backtick span and renders as `monospace`.
+* *bold* — type `*bold*` (a pair of asterisks)
+* _italic_ — type `_italic_` (a pair of underscores)
+* [.line-through]#struck through# — type `[.line-through]#text#`
+* [.underline]#underlined# — type `[.underline]#text#`
+* `monospace` — wrap the span in single backtick characters
 
-Limit: a marker does not nest inside the same marker, and a monospace
-span's contents are shown verbatim — they are never re-parsed, which is
-exactly why the markup samples above survive intact.
+A monospace span is special: its contents are shown *verbatim* and never
+re-parsed, which is exactly why every markup sample on this page can sit
+inside one and survive intact.
+
+Limit: a marker does not nest inside the same marker (no bold inside
+bold), though different markers may nest, such as bold inside italic. An
+unpaired marker on a line is reported as an error rather than rendered
+literally.
 
 == Blocks
 
-Blocks are the larger structures: links, lists, code, quotes,
-admonitions, tables, and images.
+Blocks are the larger structures stacked down the page: links, lists,
+code, quotes, admonitions, tables, and images. Each subsection shows the
+rendered result first, then its source.
 
-Links may be a bare URL such as https://example.com, a URL with display
-text in the `URL[label]` form, or the explicit `link:URL[label]` macro.
-The allowed schemes are exactly `http`, `https`, and `mailto`; anything
-else stays plain text. A rendered example: https://example.com[the Folio website]. For a URL that itself contains markup characters, wrap it in a
+=== Links
+
+A link can be written three ways: a bare URL such as
+https://example.com, a URL with display text in the `URL[label]` form, or
+the explicit `link:URL[label]` macro (the macro always needs a label; for
+the other two forms a label is optional). Only the schemes `http`,
+`https`, and `mailto` are recognised, and the three forms treat an
+unrecognised scheme differently: in the bare and `URL[label]` forms, text
+that does not begin with an allowed scheme is simply left as ordinary
+text — it is not turned into a link — whereas the explicit `link:` macro
+is stricter and reports a disallowed scheme as an error. Rendered, a
+labelled link looks like this: https://example.com[the Folio website].
+
+----
+Bare: https://example.com
+Labelled: https://example.com[the Folio website]
+Macro: link:https://example.com[the Folio website]
+----
+
+For a URL that itself contains markup characters, wrap it in a
 `link:++URL++[label]` passthrough so the `++ ... ++` keeps every
-character literal. Limit: links never nest inside other links.
+character literal.
 
-An unordered list uses a leading `*`:
+Limit: links never nest inside other links.
+
+=== Lists
+
+An *unordered* list uses a leading `*`; an *ordered* list uses a leading
+`.`. Rendered, they look like this:
 
 * First point
 * Second point
 * Third point
 
-An ordered list uses a leading `.`:
-
 . First step
 . Second step
 . Third step
 
-Limit: list items are single-line only — no nesting and no continuation
-lines.
+----
+* First point
+* Second point
+* Third point
 
-A code block is fenced by `----`, with an optional `[source,lang]`
-directive. Its body is verbatim and never re-parsed:
+. First step
+. Second step
+. Third step
+----
+
+Limit: in Folio's subset list items are *single-line only* — no nested
+sub-lists and no continuation lines. (Full AsciiDoc supports nesting;
+Folio does not.)
+
+=== Code blocks
+
+A code block is fenced by a line of four hyphens (`----`) above and below
+it. An optional `[source,language]` directive may sit on the line before
+the opening fence — `[source,python]` is accepted — but Folio does not yet
+syntax-highlight the rendered View, so the language is recorded without
+any visible effect for now. Its body is shown verbatim and is never
+re-parsed, so any markers inside stay literal. Rendered:
 
 [source,python]
 ----
@@ -88,8 +185,18 @@ def hello():
     print("Hello!")
 ----
 
-A block quote is fenced by `____`, with an optional
-`[quote, Author, Source]` attribution. Its body is paragraphs only:
+The source is the same three-line body wrapped in `----` fences, preceded
+by `[source,python]`. (See the official
+https://docs.asciidoctor.org/asciidoc/latest/verbatim/source-blocks/[source blocks]
+page.)
+
+Limit: because the fence itself is four hyphens, a code block cannot
+contain a line that is only four hyphens — that line would close it.
+
+=== Quotes
+
+A block quote is fenced by four underscores (`____`), with an optional
+`[quote, Author, Source]` attribution line before it. Rendered:
 
 [quote, Ada Lovelace, Notes]
 ____
@@ -97,29 +204,96 @@ That brain of mine is something more than merely mortal, as time will
 show.
 ____
 
-Admonitions call out a NOTE, TIP, IMPORTANT, WARNING, or CAUTION. The
-single-line form is `KIND: text`:
+Its source pairs the attribution with the `____` fences:
+
+----
+[quote, Ada Lovelace, Notes]
+____
+That brain of mine is something more than merely mortal, as time will
+show.
+____
+----
+
+Limit: a quote's body is paragraphs only — no lists, tables, or other
+blocks nested inside.
+
+=== Admonitions
+
+An admonition calls out a `NOTE`, `TIP`, `IMPORTANT`, `WARNING`, or
+`CAUTION`. The single-line form is `KIND: text`, rendered like this:
 
 NOTE: This is the single-line admonition form.
 
-The block form pairs a `[KIND]` directive with a `====` fence and an
-inline-only body:
+The block form pairs a `[KIND]` directive with a `====` fence (four equals
+signs) around a body of one or more paragraphs (inline text only — no
+nested blocks):
 
 [TIP]
 ====
 This is the block admonition form.
 ====
 
-A table is fenced by `|===`; each `|cell` is single-line and
-inline-only. The first row reads as the header:
+The source of both forms:
+
+----
+NOTE: This is the single-line admonition form.
+
+[TIP]
+====
+This is the block admonition form.
+====
+----
+
+Limit: only the five kinds above are recognised; the body of the block
+form is inline text only, not nested blocks.
+
+=== Tables
+
+A table is fenced by `|===`, with one `|cell` per cell. The first row is
+read as the header. Rendered:
 
 |===
-|Markup |Renders
+|Markup |Renders as
 |*stars* |bold text
-|_score_ |italic text
+|_underscores_ |italic text
 |===
 
-An image is placed with the `image::file[attrs]` block macro; it renders
-inline, capped at the column width:
+Its source places each cell after a leading `|`:
 
-image::help-demo.png[Folio demo image,width=160]
+----
+|===
+|Markup |Renders as
+|*stars* |bold text
+|_underscores_ |italic text
+|===
+----
+
+Limit: each cell is *single-line and inline-only*, and cell text does not
+wrap — a cell too wide for its column is truncated with an ellipsis
+rather than flowing onto a second line. Keep cells short. (The full table
+syntax is in the official
+https://docs.asciidoctor.org/asciidoc/latest/tables/build-a-basic-table/[build a basic table]
+page.)
+
+=== Images
+
+An image is placed with the `image::file[]` block macro. It renders
+inline at its natural size, scaled down only if it would be wider than
+the reading column:
+
+image::help-demo.png[]
+
+The source is the filename followed by a required pair of brackets:
+
+----
+image::help-demo.png[]
+----
+
+In full AsciiDoc those brackets carry attributes such as alt text and a
+`width`, but Folio's subset does *not* interpret them: anything you place
+between the brackets is ignored, and the image always renders at its
+natural size capped at the column width.
+
+Limit: you cannot set an image's size or alt text from the source —
+sizing is automatic. The brackets must still be present and balanced,
+with no further `[` or `]` between them.
