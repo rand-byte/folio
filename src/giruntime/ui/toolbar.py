@@ -1,27 +1,39 @@
-"""The application's top header bar — New, search, mode switch, More menu.
+"""The application's top header bar — New, Delete, search, mode switch, Help.
 
 Principles & invariants
 -----------------------
 * :class:`Toolbar` is the application's top bar — a
   :class:`Gtk.HeaderBar` populated with the controls the design
-  shows in its titlebar:
+  shows in its titlebar, **all surfaced directly with no overflow
+  menus**:
 
   * a *New* button on the left that creates a fresh note pre-filled
     with the currently selected tag set (when the sidebar has a tag
     selection) and selects it for editing;
+  * a *Delete* button immediately after *New* — a standalone
+    trash-icon button (icon-only, tooltip-labelled) so the two
+    note-lifecycle actions sit together. It is **separate** from the
+    *New* button (its own border, a gap between them) rather than
+    linked, so the pair does not read as a single split/dropdown
+    button;
   * a global search entry that mirrors :attr:`AppState.query`
     bidirectionally;
   * an empty centre title widget (no breadcrumb — the tag-based
     library has no hierarchy to surface);
   * a View / Source segmented toggle on the right that mirrors
     :attr:`AppState.view_mode` bidirectionally;
-  * a *More* menu button whose popover surfaces the *Duplicate note*
-    and *Delete note* actions matching the design's three-dot menu;
-  * a primary (hamburger) menu whose model surfaces the app-scoped
-    *Help* item, targeting the application's ``app.help`` action.
+  * a *Help* button on the right (icon + ``Syntax`` label) that opens
+    the AsciiDoc syntax reference by activating the app-scoped
+    ``app.help`` action.
 
   The toolbar sits in the window via :meth:`Gtk.Window.set_titlebar`
   on :class:`MainWindow`.
+
+* There are **no menu buttons**. An earlier design split actions across
+  a note-scoped *More* popover (Duplicate / Delete) and an app-scoped
+  primary (hamburger) menu (Help); both are gone. *Duplicate* was
+  dropped, and *Delete* and *Help* were promoted to first-class
+  toolbar buttons so every action is visible and one click away.
 
 * The +New button's seed source is produced by
   :func:`controllers.note_controller.make_initial_source`, which
@@ -50,24 +62,35 @@ Principles & invariants
   handlers are fenced by the ``_suppress_signal_writeback`` guard flag,
   matching the editor's ``_loading`` field.
 
-* The More menu is a :class:`Gtk.MenuButton` with a hand-built
-  :class:`Gtk.Popover` containing :class:`Gtk.Button` rows.
-  The menu button is **disabled** when no note is selected.
-
-* The Delete action goes through an injected
+* The *Delete* button is **note-scoped**: it is insensitive when no
+  note is selected (the sensitivity rule the removed *More* menu
+  carried) and goes through an injected
   :data:`ConfirmDialogPresenter`. Production wires
-  :func:`default_confirm_dialog_presenter`.
+  :func:`default_confirm_dialog_presenter`. It is styled quietly (no
+  ``destructive-action`` accent) — the confirmation dialog, not the
+  toolbar icon, is where the destructive weight belongs.
+
+* The *Help* button is **app-scoped**: it carries no click handler and
+  is never note-dependent. It points at the ``app.help`` action via
+  :meth:`Gtk.Actionable.set_action_name` — the same action the ``F1``
+  accelerator triggers — so GTK activates it when the button is clicked.
+  The action and its accelerator are registered by
+  :class:`giruntime.ui.application.NotesApplication`; the button only
+  references them. GTK exposes application actions to every widget in
+  the window under the ``app.`` prefix, so the reference resolves once
+  the toolbar is in the window's hierarchy.
 
 * GTK 4 currency: :class:`Gtk.HeaderBar`, :class:`Gtk.SearchEntry`,
-  :class:`Gtk.MenuButton`, :class:`Gtk.ToggleButton.set_group`,
-  :meth:`Gtk.Widget.get_root`.
+  :class:`Gtk.Button`, :meth:`Gtk.Button.set_icon_name`,
+  :meth:`Gtk.Actionable.set_action_name`,
+  :meth:`Gtk.ToggleButton.set_group`, :meth:`Gtk.Widget.get_root`.
 """
 
 from __future__ import annotations
 
 from typing import Final
 
-from gi.repository import Gio, GObject, Gtk
+from gi.repository import GObject, Gtk
 
 from enums import ViewMode
 from giruntime.controllers.app_state import AppState
@@ -86,29 +109,25 @@ from giruntime.ui.dialogs import (
 
 _NEW_BUTTON_LABEL: Final[str] = "New"
 _NEW_BUTTON_TOOLTIP: Final[str] = "New note (Ctrl+N)"
+_NEW_BUTTON_ICON: Final[str] = "list-add-symbolic"
+
+_DELETE_BUTTON_TOOLTIP: Final[str] = "Delete note"
+_DELETE_BUTTON_ICON: Final[str] = "user-trash-symbolic"
 
 _SEARCH_PLACEHOLDER: Final[str] = "Search notes\u2026"
 
 _MODE_VIEW_LABEL: Final[str] = "View"
 _MODE_SOURCE_LABEL: Final[str] = "Source"
 
-_MORE_BUTTON_TOOLTIP: Final[str] = "More"
-_MORE_BUTTON_ICON: Final[str] = "view-more-symbolic"
-
-_PRIMARY_MENU_TOOLTIP: Final[str] = "Main menu"
-_PRIMARY_MENU_ICON: Final[str] = "open-menu-symbolic"
-_MENU_HELP_LABEL: Final[str] = "Help"
+_HELP_BUTTON_LABEL: Final[str] = "Syntax"
+_HELP_BUTTON_TOOLTIP: Final[str] = "AsciiDoc syntax help (F1)"
+_HELP_BUTTON_ICON: Final[str] = "help-about-symbolic"
 _HELP_ACTION_DETAILED_NAME: Final[str] = "app.help"
-"""Detailed name of the application-level help action the primary menu
-item targets. The action and its ``F1`` accelerator are registered by
-:class:`giruntime.ui.application.NotesApplication`; the menu only points
-at it, keeping Help app-scoped rather than note-scoped like the More
-menu's Duplicate / Delete."""
-
-_NEW_BUTTON_ICON: Final[str] = "list-add-symbolic"
-
-_MENU_DUPLICATE_LABEL: Final[str] = "Duplicate note"
-_MENU_DELETE_LABEL: Final[str] = "Delete note"
+"""Detailed name of the application-level help action the *Help* button
+activates. The action and its ``F1`` accelerator are registered by
+:class:`giruntime.ui.application.NotesApplication`; the button only
+points at it via :meth:`Gtk.Actionable.set_action_name`, keeping Help
+app-scoped (always available) rather than note-scoped like *Delete*."""
 
 _DELETE_DIALOG_TITLE_FORMAT: Final[str] = 'Delete "{title}"?'
 _DELETE_DIALOG_DETAIL: Final[str] = (
@@ -140,9 +159,8 @@ class Toolbar(  # pylint: disable=too-many-instance-attributes
     _query_binding: GObject.Binding
     _view_button: Gtk.ToggleButton
     _source_button: Gtk.ToggleButton
-    _more_menu_button: Gtk.MenuButton
-    _more_popover: Gtk.Popover
-    _primary_menu_button: Gtk.MenuButton
+    _delete_button: Gtk.Button
+    _help_button: Gtk.Button
 
     _suppress_signal_writeback: bool
 
@@ -163,14 +181,19 @@ class Toolbar(  # pylint: disable=too-many-instance-attributes
         self._confirm_dialog_presenter = confirm_dialog_presenter
         self._suppress_signal_writeback = False
 
-        # ---------- left side: New button + search entry ----------
+        # ---------- left side: New + Delete + search entry ----------
+        # New and Delete are the two note-lifecycle actions, kept
+        # adjacent but as separate buttons (not a linked pair) so they
+        # do not read as one split button.
         new_button = self._build_new_button()
+        self._delete_button = self._build_delete_button()
         self._search_entry = self._build_search_entry()
         left_box = Gtk.Box.new(
             Gtk.Orientation.HORIZONTAL,
             _TOOLBAR_INNER_SPACING_PX,
         )
         left_box.append(new_button)
+        left_box.append(self._delete_button)
         left_box.append(self._search_entry)
         self.pack_start(left_box)
 
@@ -180,11 +203,9 @@ class Toolbar(  # pylint: disable=too-many-instance-attributes
         # with the window title (which would duplicate the OS title bar).
         self.set_title_widget(Gtk.Label.new(""))
 
-        # ---------- right side: View/Source segmented + More ----------
+        # ---------- right side: View/Source segmented + Help ----------
         self._view_button, self._source_button = self._build_mode_toggle()
-        self._more_popover = self._build_more_popover()
-        self._more_menu_button = self._build_more_menu_button(self._more_popover)
-        self._primary_menu_button = self._build_primary_menu_button()
+        self._help_button = self._build_help_button()
 
         right_box = Gtk.Box.new(
             Gtk.Orientation.HORIZONTAL,
@@ -194,8 +215,7 @@ class Toolbar(  # pylint: disable=too-many-instance-attributes
         mode_box.append(self._view_button)
         mode_box.append(self._source_button)
         right_box.append(mode_box)
-        right_box.append(self._more_menu_button)
-        right_box.append(self._primary_menu_button)
+        right_box.append(self._help_button)
         self.pack_end(right_box)
 
         # ---------- AppState bindings & subscriptions ----------
@@ -223,7 +243,7 @@ class Toolbar(  # pylint: disable=too-many-instance-attributes
 
         # ---------- initial state ----------
         # The search entry is seeded by the binding's SYNC_CREATE above.
-        self._refresh_more_menu_sensitivity()
+        self._refresh_delete_sensitivity()
         self._sync_mode_toggle_from_app_state()
 
     # ------------------------------------------------------------------
@@ -243,6 +263,20 @@ class Toolbar(  # pylint: disable=too-many-instance-attributes
         button.connect("clicked", self._on_new_clicked)
         return button
 
+    def _build_delete_button(self) -> Gtk.Button:
+        """Build the standalone, note-scoped *Delete* button.
+
+        Icon-only (a trash can) with a tooltip carrying the label, so it
+        is compact yet accessible. It is **not** given the
+        ``destructive-action`` accent: the toolbar icon stays quiet and
+        the confirmation dialog supplies the destructive weight.
+        """
+        button = Gtk.Button.new()
+        button.set_icon_name(_DELETE_BUTTON_ICON)
+        button.set_tooltip_text(_DELETE_BUTTON_TOOLTIP)
+        button.connect("clicked", self._on_delete_clicked)
+        return button
+
     def _build_search_entry(self) -> Gtk.SearchEntry:
         entry = Gtk.SearchEntry.new()
         entry.set_placeholder_text(_SEARCH_PLACEHOLDER)
@@ -258,52 +292,27 @@ class Toolbar(  # pylint: disable=too-many-instance-attributes
         source_button.connect("toggled", self._on_source_toggle_changed)
         return view_button, source_button
 
-    def _build_more_popover(self) -> Gtk.Popover:
-        popover = Gtk.Popover.new()
-        contents = Gtk.Box.new(Gtk.Orientation.VERTICAL, 0)
+    def _build_help_button(self) -> Gtk.Button:
+        """Build the app-scoped *Help* button.
 
-        duplicate_button = Gtk.Button.new_with_label(_MENU_DUPLICATE_LABEL)
-        duplicate_button.set_has_frame(False)
-        duplicate_button.connect("clicked", self._on_duplicate_clicked)
-        contents.append(duplicate_button)
-
-        delete_button = Gtk.Button.new_with_label(_MENU_DELETE_LABEL)
-        delete_button.set_has_frame(False)
-        delete_button.add_css_class("destructive-action")
-        delete_button.connect("clicked", self._on_delete_clicked)
-        contents.append(delete_button)
-
-        popover.set_child(contents)
-        return popover
-
-    def _build_more_menu_button(
-        self,
-        popover: Gtk.Popover,
-    ) -> Gtk.MenuButton:
-        button = Gtk.MenuButton.new()
-        button.set_icon_name(_MORE_BUTTON_ICON)
-        button.set_tooltip_text(_MORE_BUTTON_TOOLTIP)
-        button.set_popover(popover)
-        return button
-
-    def _build_primary_menu_button(self) -> Gtk.MenuButton:
-        """Build the app-scoped primary (hamburger) menu.
-
-        A :class:`Gio.Menu` model with a single *Help* item pointing at
-        the application-level ``app.help`` action — the same action the
-        ``F1`` accelerator triggers. The menu is app-scoped (always
-        available, never note-dependent), which is why it is a separate
-        button from the note-scoped *More* menu and why it carries a
-        menu *model* (an action reference) rather than hand-built button
-        rows. GTK resolves ``app.help`` against the window's
-        application when the menu is shown.
+        An icon + ``Syntax`` label that points at the application-level
+        ``app.help`` action — the same action the ``F1`` accelerator
+        triggers — via :meth:`Gtk.Actionable.set_action_name`. The button
+        carries no click handler: GTK activates the referenced action on
+        click and resolves ``app.help`` against the window's application.
+        Because it targets an always-enabled app action rather than a
+        per-note one, it is never note-scoped.
         """
-        menu = Gio.Menu.new()
-        menu.append(_MENU_HELP_LABEL, _HELP_ACTION_DETAILED_NAME)
-        button = Gtk.MenuButton.new()
-        button.set_icon_name(_PRIMARY_MENU_ICON)
-        button.set_tooltip_text(_PRIMARY_MENU_TOOLTIP)
-        button.set_menu_model(menu)
+        button = Gtk.Button.new()
+        content = Gtk.Box.new(
+            Gtk.Orientation.HORIZONTAL,
+            _TOOLBAR_INNER_SPACING_PX // 2,
+        )
+        content.append(Gtk.Image.new_from_icon_name(_HELP_BUTTON_ICON))
+        content.append(Gtk.Label.new(_HELP_BUTTON_LABEL))
+        button.set_child(content)
+        button.set_tooltip_text(_HELP_BUTTON_TOOLTIP)
+        button.set_action_name(_HELP_ACTION_DETAILED_NAME)
         return button
 
     # ------------------------------------------------------------------
@@ -328,15 +337,7 @@ class Toolbar(  # pylint: disable=too-many-instance-attributes
         if button.get_active():
             self._app_state.set_view_mode(ViewMode.EDIT)
 
-    def _on_duplicate_clicked(self, _button: Gtk.Button) -> None:
-        self._more_popover.popdown()
-        note_id = self._app_state.selected_note_id
-        if note_id is None:
-            return
-        self._note_controller.duplicate_note(note_id)
-
     def _on_delete_clicked(self, _button: Gtk.Button) -> None:
-        self._more_popover.popdown()
         note_id = self._app_state.selected_note_id
         if note_id is None:
             return
@@ -368,7 +369,7 @@ class Toolbar(  # pylint: disable=too-many-instance-attributes
         _state: AppState,
         _pspec: GObject.ParamSpec,
     ) -> None:
-        self._refresh_more_menu_sensitivity()
+        self._refresh_delete_sensitivity()
 
     def _on_app_state_view_mode_changed(
         self,
@@ -381,8 +382,8 @@ class Toolbar(  # pylint: disable=too-many-instance-attributes
     # Refresh / sync helpers
     # ------------------------------------------------------------------
 
-    def _refresh_more_menu_sensitivity(self) -> None:
-        self._more_menu_button.set_sensitive(
+    def _refresh_delete_sensitivity(self) -> None:
+        self._delete_button.set_sensitive(
             self._app_state.selected_note_id is not None
         )
 
@@ -420,13 +421,9 @@ class Toolbar(  # pylint: disable=too-many-instance-attributes
         return self._source_button
 
     @property
-    def more_menu_button(self) -> Gtk.MenuButton:
-        return self._more_menu_button
+    def delete_button(self) -> Gtk.Button:
+        return self._delete_button
 
     @property
-    def more_popover(self) -> Gtk.Popover:
-        return self._more_popover
-
-    @property
-    def primary_menu_button(self) -> Gtk.MenuButton:
-        return self._primary_menu_button
+    def help_button(self) -> Gtk.Button:
+        return self._help_button

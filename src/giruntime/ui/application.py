@@ -57,7 +57,7 @@ Principles & invariants
 * The application owns the single, non-modal :class:`HelpWindow`. It
   registers an app-scoped ``help`` action (``F1``) on first activation
   and, when that action fires (from the accelerator or the toolbar's
-  primary menu), builds the help window once and reuses it thereafter —
+  Help button), builds the help window once and reuses it thereafter —
   re-opening :meth:`Gtk.Window.present`-s the existing window rather than
   spawning a duplicate. The help is app-scoped, so the action and the
   window live here rather than on any per-note widget. Reuse depends on
@@ -311,8 +311,8 @@ class NotesApplication(Gtk.Application):
     ) -> None:
         """Open (or raise) the help window when ``app.help`` activates.
 
-        Wired to both the ``F1`` accelerator and the primary-menu Help
-        item. The ``_parameter`` is unused — the action carries no
+        Wired to both the ``F1`` accelerator and the toolbar's Help
+        button. The ``_parameter`` is unused — the action carries no
         target — but it is part of the ``activate`` signal signature.
         """
         self._present_help_window()
