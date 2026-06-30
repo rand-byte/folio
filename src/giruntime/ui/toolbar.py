@@ -60,7 +60,12 @@ Principles & invariants
   update cycle (programmatic ``set_active`` → ``toggled`` →
   ``set_view_mode`` → ``notify::view-mode`` → ``set_active``) those
   handlers are fenced by the ``_suppress_signal_writeback`` guard flag,
-  matching the editor's ``_loading`` field.
+  matching the editor's ``_loading`` field. The two grouped toggles are
+  wrapped in a ``linked`` box (:data:`_MODE_TOGGLE_CSS_CLASS`) so they
+  render as a **single segmented widget** — the natural shape for one
+  two-way mode switch. This is the deliberate opposite of the *New* /
+  *Delete* pair, which stays unlinked so it does not read as a split
+  button.
 
 * The *Delete* button is **note-scoped**: it is insensitive when no
   note is selected (the sensitivity rule the removed *More* menu
@@ -118,6 +123,12 @@ _SEARCH_PLACEHOLDER: Final[str] = "Search notes\u2026"
 
 _MODE_VIEW_LABEL: Final[str] = "View"
 _MODE_SOURCE_LABEL: Final[str] = "Source"
+_MODE_TOGGLE_CSS_CLASS: Final[str] = "linked"
+"""GTK style class that fuses the View / Source toggle pair into a single
+segmented control (shared borders, only the outer corners rounded). Applied
+to the box that holds the two grouped :class:`Gtk.ToggleButton`s so the mode
+switch reads as one widget rather than two adjacent buttons. Standard
+Adwaita style class — no project CSS rule backs it."""
 
 _HELP_BUTTON_LABEL: Final[str] = "Syntax"
 _HELP_BUTTON_TOOLTIP: Final[str] = "AsciiDoc syntax help (F1)"
@@ -212,6 +223,11 @@ class Toolbar(  # pylint: disable=too-many-instance-attributes
             _TOOLBAR_INNER_SPACING_PX,
         )
         mode_box = Gtk.Box.new(Gtk.Orientation.HORIZONTAL, 0)
+        # `linked` fuses the two grouped toggles into one segmented
+        # control — the natural representation of a single two-way mode
+        # switch (unlike New/Delete, which stay separate so they do not
+        # read as a split button).
+        mode_box.add_css_class(_MODE_TOGGLE_CSS_CLASS)
         mode_box.append(self._view_button)
         mode_box.append(self._source_button)
         right_box.append(mode_box)
