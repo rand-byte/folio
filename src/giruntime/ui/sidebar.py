@@ -59,6 +59,19 @@ Principles & invariants
   ``notes-changed`` fan-out to listen for. When a tag's last note is
   removed the model drops the row; the sidebar then drops that tag from
   :class:`AppState`'s selection (the AND filter contracts accordingly).
+* A change to an **existing** tag's count (e.g. ``1 -> 2`` when a second
+  note gains that tag) is *not* an ``items-changed`` — the model leaves
+  the row in place and only updates :attr:`TagItem.count`, firing
+  ``notify::count``. The row's count label therefore cannot be painted
+  once at ``bind`` time; the tag-row factory instead binds
+  ``TagItem:count`` to the label via :meth:`GObject.Object.bind_property`
+  (``SYNC_CREATE`` paints the initial value, an ``int -> str`` transform
+  feeds the label). Because list rows are recycled — the same widget is
+  re-bound to different :class:`TagItem`\\ s — every ``bind`` binding is
+  torn down in the matching ``unbind`` (``binding.unbind()``); a leaked
+  binding would write a stale tag's count into the recycled row. The
+  per-row bindings are tracked in a factory-owned dict keyed by the
+  :class:`Gtk.ListItem`.
   The Library counts (``All notes`` / ``Untagged``) are derived from
   the store's contents and recomputed on the store's ``items-changed``.
   The Library section's row set never changes, only its counts.
@@ -349,9 +362,24 @@ def _make_tag_row_factory(
     The factory holds no widget state itself.
     """
     factory = Gtk.SignalListItemFactory.new()
+    # Per-row ``count`` bindings, keyed by the recycled ``Gtk.ListItem``.
+    # ``bind`` records a binding here; ``unbind`` tears it down. A leaked
+    # binding would keep writing a previous tag's count into a row that
+    # GTK has since rebound to a different tag.
+    bindings: dict[Gtk.ListItem, GObject.Binding] = {}
     factory.connect("setup", _on_tag_factory_setup, on_row_clicked)
-    factory.connect("bind", _on_tag_factory_bind)
+    factory.connect("bind", _on_tag_factory_bind, bindings)
+    factory.connect("unbind", _on_tag_factory_unbind, bindings)
     return factory
+
+
+def _tag_count_to_text(_binding: GObject.Binding, value: int) -> str:
+    """Transform a :class:`TagItem` ``count`` into its label text.
+
+    GLib registers no ``int -> string`` :class:`GObject.Binding`
+    transform by default, so the count binding supplies this one.
+    """
+    return str(value)
 
 
 def _on_tag_factory_setup(
@@ -417,6 +445,7 @@ def _on_tag_row_gesture_released(
 def _on_tag_factory_bind(
     _factory: Gtk.SignalListItemFactory,
     list_item: Gtk.ListItem,
+    bindings: dict[Gtk.ListItem, GObject.Binding],
 ) -> None:
     item = list_item.get_item()
     box = list_item.get_child()
@@ -424,10 +453,38 @@ def _on_tag_factory_bind(
         return
     label = box.get_first_child()
     if isinstance(label, Gtk.Label):
+        # The tag name is immutable for a given ``TagItem``, so a one-shot
+        # set is correct; only ``count`` is live (see below).
         label.set_text(f"{_TAG_PREFIX}{item.name}")
     count_label = box.get_last_child()
     if isinstance(count_label, Gtk.Label):
-        count_label.set_text(str(item.count))
+        # ``count`` changes without an ``items-changed`` (the model fires
+        # only ``notify::count`` for a same-tag bump), so the label must
+        # track the property rather than be painted once here.
+        # ``SYNC_CREATE`` paints the current value immediately.
+        bindings[list_item] = item.bind_property(
+            "count",
+            count_label,
+            "label",
+            GObject.BindingFlags.SYNC_CREATE,
+            _tag_count_to_text,
+        )
+
+
+def _on_tag_factory_unbind(
+    _factory: Gtk.SignalListItemFactory,
+    list_item: Gtk.ListItem,
+    bindings: dict[Gtk.ListItem, GObject.Binding],
+) -> None:
+    """Tear down the row's ``count`` binding before GTK reuses the row.
+
+    GTK always ``unbind``\\ s a row before rebinding it to another item,
+    so dropping the binding here keeps a recycled row from inheriting a
+    previous tag's live count.
+    """
+    binding = bindings.pop(list_item, None)
+    if binding is not None:
+        binding.unbind()
 
 
 # ---------------------------------------------------------------------------

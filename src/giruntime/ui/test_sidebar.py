@@ -22,10 +22,12 @@ from datetime import UTC, datetime
 
 from gi.repository import Gdk, GLib, Gtk
 
+from asciidoc.summary import derive_summary
 from enums import SmartFilter
 from models.note import Note
 from search.note_filter import TagSelection
 from giruntime.controllers.app_state import AppState
+from giruntime.controllers.note_controller import make_initial_source
 from giruntime.controllers.note_list_store import NoteListStore
 from giruntime.ui.sidebar import (
     Sidebar,
@@ -314,6 +316,143 @@ class SidebarMultiSelectTests(unittest.TestCase):
         self.assertIsInstance(selection, TagSelection)
         assert isinstance(selection, TagSelection)  # for mypy/pylint
         self.assertEqual(selection.tags, frozenset({"bread"}))
+
+
+class _WritableNoteRepository:
+    """A note repository whose ``insert`` actually persists.
+
+    ``list_all`` seeds the store and ``insert`` derives the cached
+    ``(title, snippet, tags)`` from the source exactly as the real
+    :class:`storage.note_repository.NoteRepository` does — so a
+    ``store.create`` lands a note carrying its parsed ``:tags:``,
+    driving the same ``items-changed`` the production path emits. Every
+    other protocol method is unused here and raises.
+    """
+
+    _notes: list[Note]
+
+    def __init__(self, notes: list[Note]) -> None:
+        self._notes = list(notes)
+
+    def list_all(self) -> list[Note]:
+        return list(self._notes)
+
+    def insert(self, note: Note) -> Note:
+        summary = derive_summary(note.source)
+        persisted = Note(
+            id=note.id,
+            title=summary.title,
+            source=note.source,
+            snippet=summary.snippet,
+            tags=summary.tags,
+            created_at=note.created_at,
+            modified_at=note.modified_at,
+        )
+        self._notes.append(persisted)
+        return persisted
+
+    def list_tags(self) -> tuple[tuple[str, int], ...]:
+        raise NotImplementedError
+
+    def get(self, note_id: str) -> Note:
+        raise NotImplementedError
+
+    def list_modified_since(self, since: datetime) -> list[Note]:
+        raise NotImplementedError
+
+    def search(self, query: str) -> list[Note]:
+        raise NotImplementedError
+
+    def update_source(
+        self,
+        note_id: str,
+        source: str,
+        modified_at: datetime,
+    ) -> Note:
+        raise NotImplementedError
+
+    def delete(self, note_id: str) -> None:
+        raise NotImplementedError
+
+
+def _tag_row_count_text(sidebar: Sidebar, name: str) -> str:
+    """The rendered count text on the realised tag row for ``name``.
+
+    Walks the Tags ``ListView``'s realised widget subtree, finds the
+    ``#name`` label, and reads its sibling count label — i.e. what the
+    user actually sees, not the model's ``count`` (which was always
+    right; the regression was the *label* going stale).
+    """
+    wanted = f"#{name}"
+    stack: list[Gtk.Widget | None] = [sidebar.tag_list_view.get_first_child()]
+    while stack:
+        widget = stack.pop()
+        if widget is None:
+            continue
+        if isinstance(widget, Gtk.Label) and widget.get_text() == wanted:
+            box = widget.get_parent()
+            assert isinstance(box, Gtk.Box)
+            count_label = box.get_last_child()
+            assert isinstance(count_label, Gtk.Label)
+            return str(count_label.get_text())
+        stack.append(widget.get_next_sibling())
+        stack.append(widget.get_first_child())
+    raise AssertionError(f"no realised tag row for {name!r}")
+
+
+@unittest.skipUnless(_display_available(), "no GDK display")
+class SidebarTagCountLiveUpdateTests(unittest.TestCase):
+    """A new note carrying an existing tag bumps that tag's *rendered*
+    count live.
+
+    Regression: the row's count label was painted once at ``bind`` time,
+    but a same-tag bump (``1 -> 2``) is a count-only ``notify::count`` on
+    the existing :class:`TagItem` — no ``items-changed``, so GTK never
+    re-binds the row — and the label stayed at ``1``. The factory now
+    binds ``TagItem:count`` to the label, so the displayed text tracks
+    the model.
+    """
+
+    app_state: AppState
+    store: NoteListStore
+    sidebar: Sidebar
+    window: Gtk.Window
+
+    def setUp(self) -> None:
+        repository = _WritableNoteRepository(
+            notes=[_note_with_tags("1", ("work",))],
+        )
+        self.store = NoteListStore(repository=repository)
+        self.store.load()
+        self.app_state = AppState()
+        self.sidebar = Sidebar(
+            note_store=self.store,
+            app_state=self.app_state,
+        )
+        self.window = Gtk.Window()
+        self.window.set_child(self.sidebar)
+        self.window.present()
+        _pump()
+
+    def tearDown(self) -> None:
+        self.window.set_child(None)
+        self.window.destroy()
+        _pump(20)
+
+    def test_second_note_with_existing_tag_updates_count_label(self) -> None:
+        # Precondition: the lone "work" note renders a count of 1.
+        self.assertEqual(_tag_row_count_text(self.sidebar, "work"), "1")
+
+        # Create a second note carrying the same tag — exactly what the
+        # toolbar's "+ New" does while a tag is selected.
+        source = make_initial_source(TagSelection(frozenset({"work"})))
+        self.store.create(source)
+        _pump()
+
+        # The store holds two notes and — the regression point — the
+        # rendered label now reads 2 rather than the stale bind-time 1.
+        self.assertEqual(self.store.get_n_items(), 2)
+        self.assertEqual(_tag_row_count_text(self.sidebar, "work"), "2")
 
 
 if __name__ == "__main__":
