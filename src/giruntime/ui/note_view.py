@@ -222,7 +222,7 @@ from config.defaults import (
     ARTICLE_TOP_MARGIN_LINES,
     TARGET_CHARS_PER_LINE,
 )
-from enums import LinkScheme, ParseErrorKind
+from enums import LinkScheme, ParseErrorKind, WashShape
 from giruntime.controllers.app_state import AppState
 from giruntime.controllers.note_list_store import NoteListStore
 from giruntime.ui._dates import format_date_long
@@ -345,9 +345,10 @@ _METADATA_MODIFIED_LABEL: str = "Modified "
 
 _HAIRLINE_THICKNESS_PX: int = 1
 """Height, in pixels, of the hairline rule the wash painter draws at
-the bottom of a :class:`WashSpec` flagged ``hairline`` (the metadata
-line's divider). Painted as a 1-px band rather than a full-height
-fill — see :meth:`ArticleTextView._wash_rect_for_line`."""
+the bottom of a :class:`WashSpec` whose ``shape`` is
+:data:`WashShape.HAIRLINE` (the metadata line's divider). Painted as a
+1-px band rather than a full-height fill — see
+:meth:`ArticleTextView._wash_rect_for_line`."""
 
 
 _HSCROLL_STEP_FRACTION: float = 0.1
@@ -788,9 +789,12 @@ class ArticleTextView(Gtk.TextView):
         buffer-coordinate y into widget-coordinate y via
         :meth:`Gtk.TextView.buffer_to_window_coords` — the same
         translation a manual draw against the text window would
-        perform. A :class:`WashSpec` flagged ``hairline`` paints a
-        1-px rule at the line's bottom instead of a full-height fill;
-        every other spec fills the full vertical extent of the line.
+        perform. :data:`WashShape.HAIRLINE` paints a 1-px rule at the
+        line's bottom instead of a full-height fill;
+        :data:`WashShape.LEFT_BAR` paints a thin vertical rule of width
+        ``spec.bar_width_px`` at the box's left edge instead of a fill;
+        :data:`WashShape.FILL` (the default) fills the full vertical
+        extent of the line.
         """
         ok, line_iter = buffer.get_iter_at_line(line_no)
         if not ok:
@@ -811,7 +815,7 @@ class ArticleTextView(Gtk.TextView):
             - spec.box_right_inset_px
         )
         rect = Graphene.Rect()
-        if spec.hairline:
+        if spec.shape is WashShape.HAIRLINE:
             # A 1-px rule at the bottom of the line rather than a
             # full-height fill: the divider between the metadata line
             # and the body. ``pixels-below-lines`` on the metadata tag
@@ -822,6 +826,17 @@ class ArticleTextView(Gtk.TextView):
                 float(line_y_widget + line_h - _HAIRLINE_THICKNESS_PX),
                 float(box_w),
                 float(_HAIRLINE_THICKNESS_PX),
+            )
+        elif spec.shape is WashShape.LEFT_BAR:
+            # A thin vertical rule at the box's left edge, no fill: the
+            # blockquote left rule. Spans the same vertical extent a
+            # FILL shape would, so stacking the per-line rects across a
+            # multi-line body forms one continuous rule.
+            rect.init(
+                float(box_x),
+                float(line_y_widget),
+                float(spec.bar_width_px),
+                float(line_h),
             )
         else:
             rect.init(

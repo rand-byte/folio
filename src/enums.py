@@ -182,6 +182,31 @@ class ListNumberStyle(Enum):
     LOWER_ROMAN = auto()
 
 
+class WashShape(Enum):
+    """Paint shape for a block-level wash behind a rendered paragraph.
+
+    The rendered-view wash painter (``ArticleTextView`` in
+    :mod:`ui.note_view`) walks the buffer one logical line at a time and,
+    for each line whose first iter carries a wash-bearing tag, paints one
+    coloured rectangle. This enum selects which rectangle: a full tinted
+    card behind admonitions / code blocks / the table header, a thin 1-px
+    rule at the bottom of the line for the metadata line and table data
+    rows, or a thin vertical rule at the left edge for blockquotes. It is
+    an enum rather than a boolean (or a second boolean bolted on) so the
+    painter's shape dispatch is exhaustive: adding a shape forces every
+    consumer — the painter and the :class:`WashSpec` construction sites —
+    to handle it.
+
+    Plain :class:`enum.Enum` with :func:`auto` values because the shape is
+    a purely in-memory presentation choice — it is never persisted, so its
+    on-disk representation is undefined and no migration is implied.
+    """
+
+    FILL = auto()       # full tinted card (admonition, code, table header)
+    HAIRLINE = auto()   # 1-px bottom rule (metadata line, table data row)
+    LEFT_BAR = auto()   # thin left vertical rule, no fill (blockquote)
+
+
 class AdmonitionKind(StrEnum):
     """The five admonition labels recognised by the parser.
 

@@ -529,7 +529,26 @@ class TextBufferRenderer:
         buffer: Gtk.TextBuffer,
         section: Section,
     ) -> None:
-        self._emit_heading(buffer, section.title, level=section.level)
+        # Reclaim the blank line the previous block left: _strip_trailing_
+        # blank drops *every* trailing newline (it is also the helper
+        # that guarantees no dangling blank line at the very end of the
+        # whole render), so a single line-ending newline is put back
+        # immediately after it — unless the buffer is still empty, i.e.
+        # this heading is the very first content and there is nothing to
+        # reclaim. The net effect for non-empty buffers is exactly one
+        # separator newline instead of the block separator's two, so the
+        # heading's own top gap is its paragraph tag's pixels-above-lines
+        # alone, not a blank line plus padding (see _make_heading_tag's
+        # 2 : 1 spacing model).
+        self._strip_trailing_blank(buffer)
+        if buffer.get_end_iter().get_offset() > 0:
+            buffer.insert(buffer.get_end_iter(), "\n")
+        self._emit_heading(
+            buffer,
+            section.title,
+            level=section.level,
+            trailing=HeadingTrailing.SINGLE_NEWLINE,
+        )
         for block in section.blocks:
             self._emit_block(buffer, block)
 
@@ -539,14 +558,19 @@ class TextBufferRenderer:
         title_inlines: tuple[InlineNode, ...],
         *,
         level: int,
-        trailing: HeadingTrailing = HeadingTrailing.BLOCK_SEPARATOR,
+        trailing: HeadingTrailing,
     ) -> None:
-        # ``trailing`` controls what follows the heading text. Body
-        # headings keep the default full block separator; the document
-        # title passes ``SINGLE_NEWLINE`` so the metadata line (inserted
-        # by ``render_into``'s post-title hook) can sit on the
-        # immediately following line, with the renderer completing the
-        # block gap after that inserted text.
+        # ``trailing`` controls what follows the heading text. Both
+        # callers now pass ``SINGLE_NEWLINE``, but for different reasons:
+        # the document title so the metadata line (inserted by
+        # ``render_into``'s post-title hook) can sit on the immediately
+        # following line, with the renderer completing the block gap
+        # after that inserted text; a body section heading so its own
+        # bottom gap is the heading paragraph tag's pixels-below-lines
+        # alone (see ``_emit_section``, which also strips the preceding
+        # blank line so the top gap is pixels-above-lines alone).
+        # Explicit at each call site (no default) because a value that
+        # is always supplied is not meaningfully optional.
         heading_tag = self._tag(heading_tag_name(level))
         start_offset = buffer.get_end_iter().get_offset()
         for inline in title_inlines:
@@ -634,18 +658,27 @@ class TextBufferRenderer:
 
         The content is inserted verbatim. Two tags are layered across
         the same range: :data:`TagName.CODE_BLOCK` for the paragraph
-        background tint and side margins, and :data:`TagName.MONOSPACE`
-        for the monospace family. The outer ``Gtk.TextView`` already
-        sets ``wrap-mode = WORD_CHAR``, so unwrappably-long lines
-        soft-wrap inside the column — no horizontal scrollbar, no wrap
-        indicator (deferred). Copy through the block yields the
-        original source unchanged.
+        background tint, side margins, and zero inter-line leading, and
+        :data:`TagName.MONOSPACE` for the monospace family. The outer
+        ``Gtk.TextView`` already sets ``wrap-mode = WORD_CHAR``, so
+        unwrappably-long lines soft-wrap inside the column — no
+        horizontal scrollbar, no wrap indicator (deferred). Copy through
+        the block yields the original source unchanged.
+
+        Because :data:`TagName.CODE_BLOCK` carries no vertical padding
+        of its own (adjacent lines must abut so box-drawing characters
+        connect), the block's top and bottom breathing room is applied
+        separately: :data:`TagName.CODE_BLOCK_TOP_PAD` is layered across
+        the block's first logical line and
+        :data:`TagName.CODE_BLOCK_BOTTOM_PAD` across its last — the same
+        line for a single-line block, which then carries both.
         """
         if not code_block.content:
             buffer.insert(buffer.get_end_iter(), _BLOCK_SEPARATOR)
             return
+        content = code_block.content
         start_offset = buffer.get_end_iter().get_offset()
-        buffer.insert(buffer.get_end_iter(), code_block.content)
+        buffer.insert(buffer.get_end_iter(), content)
         # Terminate with a newline so the paragraph tag's
         # paragraph-background-rgba paints to the line edge on the last
         # source line of the block.
@@ -655,6 +688,34 @@ class TextBufferRenderer:
         end_iter = buffer.get_iter_at_offset(end_offset)
         buffer.apply_tag(self._tag(TagName.CODE_BLOCK), start_iter, end_iter)
         buffer.apply_tag(self._tag(TagName.MONOSPACE), start_iter, end_iter)
+        # First logical line: from the block's start to (and including)
+        # its first internal newline, or to the block's end if the
+        # content is a single line.
+        first_newline_index = content.find("\n")
+        first_line_end_offset = (
+            start_offset + first_newline_index + 1
+            if first_newline_index != -1
+            else end_offset
+        )
+        # Last logical line: from just after the block's last internal
+        # newline to its end, or from the block's start if the content
+        # is a single line.
+        last_newline_index = content.rfind("\n")
+        last_line_start_offset = (
+            start_offset + last_newline_index + 1
+            if last_newline_index != -1
+            else start_offset
+        )
+        buffer.apply_tag(
+            self._tag(TagName.CODE_BLOCK_TOP_PAD),
+            start_iter,
+            buffer.get_iter_at_offset(first_line_end_offset),
+        )
+        buffer.apply_tag(
+            self._tag(TagName.CODE_BLOCK_BOTTOM_PAD),
+            buffer.get_iter_at_offset(last_line_start_offset),
+            end_iter,
+        )
         buffer.insert(buffer.get_end_iter(), "\n")
 
     def _emit_image(

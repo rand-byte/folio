@@ -105,7 +105,17 @@ https://docs.asciidoctor.org/asciidoc/latest/text/[text formatting] page.)
 
 A monospace span is special: its contents are shown *verbatim* and never
 re-parsed, which is exactly why every markup sample on this page can sit
-inside one and survive intact.
+inside one and survive intact. It is also why the following combined
+example can show its own literal markers — backticks included — a code
+block never re-parses anything:
+
+This *sentence* uses _italic_, [.line-through]#strikethrough#,
+[.underline]#underline#, and `monospace` all in one place.
+
+----
+This *sentence* uses _italic_, [.line-through]#strikethrough#,
+[.underline]#underline#, and `monospace` all in one place.
+----
 
 Limit: a marker does not nest inside the same marker (no bold inside
 bold), though different markers may nest, such as bold inside italic. An

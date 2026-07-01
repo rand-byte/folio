@@ -272,6 +272,49 @@ class HeadingRenderingTests(unittest.TestCase):
             [(bold_start, bold_start + len("world"))],
         )
 
+    def test_body_heading_has_no_blank_line_before_or_after(self) -> None:
+        # A body section heading reclaims the preceding block's blank
+        # line (its own top gap comes from pixels-above-lines alone) and
+        # emits only a single trailing newline (its bottom gap comes
+        # from pixels-below-lines alone) — so there is exactly one
+        # newline on each side of the heading text, never two.
+        src = "First paragraph.\n\n== A Heading\n\nSecond paragraph.\n"
+        renderer, buffer, _ = _build_renderer()
+        renderer.render_into(src, buffer, note_id="n1")
+        text = _full_text(buffer)
+        self.assertNotIn("\n\n", text)
+        self.assertEqual(
+            text,
+            "First paragraph.\nA Heading\nSecond paragraph.",
+        )
+
+    def test_body_heading_tag_carries_two_to_one_pixel_padding(self) -> None:
+        renderer, buffer, table = _build_renderer()
+        renderer.render_into("== A Heading\n", buffer, note_id="n1")
+        tag = table.lookup(TagName.HEADING_2.value)
+        above = tag.get_property("pixels-above-lines")
+        below = tag.get_property("pixels-below-lines")
+        self.assertGreater(below, 0)
+        self.assertEqual(above, 2 * below)
+
+    def test_title_and_metadata_path_is_unchanged_before_first_heading(
+        self,
+    ) -> None:
+        # The title -> metadata-line -> first-body-heading sequence
+        # still drops exactly one blank line's worth of separation: the
+        # metadata hook's own block separator is what the heading's
+        # strip-and-reclaim removes, leaving one newline, matching the
+        # no-hook case above.
+        def hook(buffer: Gtk.TextBuffer) -> None:
+            buffer.insert(buffer.get_end_iter(), "META")
+
+        renderer, buffer, _ = _build_renderer()
+        renderer.render_into(
+            "= Title\n\n== A Heading\n", buffer, note_id="n1", post_title_hook=hook,
+        )
+        text = _full_text(buffer)
+        self.assertEqual(text, "Title\nMETA\nA Heading")
+
 
 @unittest.skipUnless(_display_available(), "no GDK display")
 class InlineRenderingTests(unittest.TestCase):
@@ -513,6 +556,56 @@ class CodeBlockRenderingTests(unittest.TestCase):
         renderer, buffer, _ = _build_renderer()
         renderer.render_into(src, buffer, note_id="n1")
         self.assertIn(code, _full_text(buffer))
+
+    def test_multi_line_code_block_pads_only_first_and_last_line(self) -> None:
+        # Zero inter-line leading on interior lines; edge padding lands
+        # only on the block's first and last logical line via the
+        # top/bottom pad tags. A trailing paragraph keeps the block's
+        # own terminating newline from being swept by the end-of-render
+        # trailing-blank strip, so the ranges below reflect the block's
+        # own structure rather than that unrelated cleanup.
+        code = "line one\nline two\nline three"
+        src = f"= D\n\n----\n{code}\n----\n\nAfter paragraph.\n"
+        renderer, buffer, _ = _build_renderer()
+        renderer.render_into(src, buffer, note_id="n1")
+        text = _full_text(buffer)
+        start = text.index("line one")
+        # Every character of the block (plus its terminating newline)
+        # carries CODE_BLOCK.
+        code_range = _ranges_with_tag(buffer, TagName.CODE_BLOCK.value)
+        self.assertEqual(code_range, [(start, start + len(code) + 1)])
+        top_range = _ranges_with_tag(buffer, TagName.CODE_BLOCK_TOP_PAD.value)
+        bottom_range = _ranges_with_tag(
+            buffer, TagName.CODE_BLOCK_BOTTOM_PAD.value,
+        )
+        first_line_end = start + len("line one") + 1
+        last_line_start = start + len("line one\nline two\n")
+        self.assertEqual(top_range, [(start, first_line_end)])
+        self.assertEqual(
+            bottom_range, [(last_line_start, start + len(code) + 1)],
+        )
+        # The two pad ranges do not overlap for a multi-line block.
+        self.assertLessEqual(top_range[0][1], bottom_range[0][0])
+        # Copy-through is still byte-exact despite the extra tagging.
+        self.assertIn(code, text)
+
+    def test_single_line_code_block_carries_both_pad_tags(self) -> None:
+        # A single-line block has one logical line, so it needs edge
+        # padding on both sides — the same range carries both tags.
+        src = "= D\n\n----\nsolo line\n----\n\nAfter.\n"
+        renderer, buffer, _ = _build_renderer()
+        renderer.render_into(src, buffer, note_id="n1")
+        text = _full_text(buffer)
+        start = text.index("solo line")
+        expected = (start, start + len("solo line") + 1)
+        self.assertEqual(
+            _ranges_with_tag(buffer, TagName.CODE_BLOCK_TOP_PAD.value),
+            [expected],
+        )
+        self.assertEqual(
+            _ranges_with_tag(buffer, TagName.CODE_BLOCK_BOTTOM_PAD.value),
+            [expected],
+        )
 
     def test_code_block_does_not_attach_a_widget(self) -> None:
         # The whole point of the rewrite: no widgets for code blocks.

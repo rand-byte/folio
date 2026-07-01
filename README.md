@@ -146,6 +146,24 @@ standard library, so there is nothing extra to install for storage.
 
 ### Get and run Folio
 
+**Download a prebuilt archive from
+[Releases](https://github.com/rand-byte/folio/releases)** — this is the
+quickest way to get running:
+
+```sh
+# 1. Download folio.pyz from the repository's Releases page, then:
+chmod +x folio.pyz
+./folio.pyz
+```
+
+Assets downloaded from GitHub Releases do not reliably preserve the POSIX
+executable bit, so `chmod +x` after downloading is needed once. The runtime
+prerequisites above (Python 3.13+, GTK 4, GtkSourceView 5, PyGObject) still
+apply — the archive bundles only Folio's own code, not its system
+dependencies.
+
+#### Alternative: build from source
+
 Folio is distributed as a single runnable archive (`folio.pyz`). Building it
 needs `glib-compile-resources`, which ships with the GLib development tooling
 on any GTK system.
@@ -159,8 +177,11 @@ cd folio
 make pyz
 
 # 3. Run it
-python folio.pyz
+./folio.pyz
 ```
+
+A from-source `make pyz` build does not need the `chmod` — the executable bit
+is already set locally.
 
 If you would rather run straight from the source tree (handy while trying it
 out), the bundled `run` script builds what it needs and launches the app:

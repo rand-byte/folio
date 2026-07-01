@@ -67,16 +67,27 @@ Principles & invariants
   the returned dict on purpose — the painter must paint nothing
   behind them. The :data:`TagName.METADATA` line and every
   :data:`TagName.TABLE_ROW` are the *hairline* washes: their
-  :class:`WashSpec` carries ``hairline = True`` so the painter draws a
-  thin 1-px rule at the bottom of the line (the divider between the
-  metadata and the body, or between two table rows) rather than a
-  full-height tinted fill. :data:`TagName.TABLE_HEADER` keeps the
-  default full *fill* so the header reads as a tint band.
+  :class:`WashSpec` carries ``shape = WashShape.HAIRLINE`` so the
+  painter draws a thin 1-px rule at the bottom of the line (the divider
+  between the metadata and the body, or between two table rows) rather
+  than a full-height tinted fill. :data:`TagName.TABLE_HEADER` keeps
+  the default ``WashShape.FILL`` so the header reads as a tint band.
+  :data:`TagName.BLOCKQUOTE_BODY` uses ``WashShape.LEFT_BAR``: a thin
+  vertical rule at the box's left edge with no fill, so a quote reads
+  as unmistakably distinct from the filled admonition / code cards.
 * This module imports ``gi`` because the tag table *is* a GTK object —
   there is no useful pure-Python representation of a tag. The renderer
   is the only other place in :mod:`asciidoc` that imports
   ``gi``; everything else stays display-agnostic.
 """
+
+# The module's size reflects the breadth of visual styles it is the sole
+# owner of: inline, heading, and every block-level kind (admonitions,
+# blockquotes, code blocks, tables, metadata, the error notice, the
+# note sheet), each with its own tag builder, wash spec, and tuned
+# constants. Splitting solely to satisfy the line counter would scatter
+# constants and builders that share the "one style, one place" rule.
+# pylint: disable=too-many-lines
 
 from __future__ import annotations
 
@@ -86,7 +97,7 @@ from enum import StrEnum
 from gi.repository import Gtk, Pango
 
 from config.defaults import TABLE_CELL_HPADDING_PX
-from enums import AdmonitionKind
+from enums import AdmonitionKind, WashShape
 
 
 class TagName(StrEnum):
@@ -124,11 +135,25 @@ class TagName(StrEnum):
     two paragraph tags for blockquote bodies and their optional
     attribution line. The body's italic styling composes via the shared
     :data:`ITALIC` tag, applied by the renderer on top of the
-    paragraph tag.
+    paragraph tag. The body paints as a ``WashShape.LEFT_BAR`` — a thin
+    neutral-grey vertical rule at the box's left edge, no fill — so a
+    quote reads as unmistakably distinct from the filled admonition /
+    code cards; the attribution carries no wash at all, so the rule
+    spans only the quoted body lines, not the citation.
 
     :data:`CODE_BLOCK` is the paragraph tag carrying the code-block's
     left/right paragraph margins; monospace family comes from the
-    shared :data:`MONOSPACE` tag, layered on top by the renderer.
+    shared :data:`MONOSPACE` tag, layered on top by the renderer. It
+    carries **zero** inter-line leading (``pixels-above-lines`` /
+    ``pixels-below-lines`` / ``pixels-inside-wrap`` all ``0``) so
+    consecutive code lines abut at the bare font line height and
+    box-drawing glyphs connect into continuous rules. The block's
+    vertical breathing room instead comes from two thin edge-only tags,
+    :data:`CODE_BLOCK_TOP_PAD` (``pixels-above-lines`` only) and
+    :data:`CODE_BLOCK_BOTTOM_PAD` (``pixels-below-lines`` only), which
+    the renderer layers on top of :data:`CODE_BLOCK` across only the
+    block's first and last logical line respectively — mirroring the
+    admonition label/body padding-role split.
 
     :data:`TABLE_ROW` and :data:`TABLE_HEADER` are the two paragraph tags
     for the rows of a rendered table. Each table row is one logical
@@ -136,11 +161,12 @@ class TagName(StrEnum):
     :class:`Pango.TabArray` (minted anonymously per render by the
     renderer, not carried here). Both tags set ``wrap-mode = NONE`` so a
     row stays on one line and its column alignment holds. The header row
-    (``TABLE_HEADER``) paints a tint band behind the line (a *fill*
-    :class:`WashSpec`) and the renderer makes its cell text bold; each
-    data row (``TABLE_ROW``) paints a 1-px rule at the line's bottom (a
-    ``hairline`` :class:`WashSpec`, the same painter shape the metadata
-    divider uses) to separate it from the next row.
+    (``TABLE_HEADER``) paints a tint band behind the line (a
+    ``WashShape.FILL`` :class:`WashSpec`) and the renderer makes its
+    cell text bold; each data row (``TABLE_ROW``) paints a 1-px rule at
+    the line's bottom (a ``WashShape.HAIRLINE`` :class:`WashSpec`, the
+    same painter shape the metadata divider uses) to separate it from
+    the next row.
 
     :data:`METADATA` is the character/paragraph tag applied to the
     dim-grey metadata line the rendered view inserts directly under the
@@ -148,7 +174,7 @@ class TagName(StrEnum):
     foreground, a slightly reduced scale, and ``pixels-below-lines`` to
     open a gap between the metadata text and the thin horizontal rule
     that the wash painter draws at the bottom of the line (see the
-    ``hairline`` :class:`WashSpec` returned for it by
+    ``WashShape.HAIRLINE`` :class:`WashSpec` returned for it by
     :func:`build_wash_specs`). It is a :class:`Gtk.TextTag` name only —
     it is never persisted to disk, so it needs no migration.
 
@@ -200,6 +226,13 @@ class TagName(StrEnum):
     BLOCKQUOTE_ATTRIBUTION = "blockquote_attribution"
     # Code-block paragraph tag.
     CODE_BLOCK = "code_block"
+    # Code-block edge-padding tags. Carry only the one pixel-padding
+    # property they need (pixels-above-lines / pixels-below-lines);
+    # layered by the renderer on top of CODE_BLOCK across the block's
+    # first and last logical line respectively, mirroring the admonition
+    # label/body padding-role split.
+    CODE_BLOCK_TOP_PAD = "code_block_top_pad"
+    CODE_BLOCK_BOTTOM_PAD = "code_block_bottom_pad"
     # Table row paragraph tags. The header row (rows[0]) carries
     # ``TABLE_HEADER`` (a tint band + bold cell text); every data row
     # carries ``TABLE_ROW`` (a hairline bottom rule). Both also carry the
@@ -223,29 +256,36 @@ class TagName(StrEnum):
 class WashSpec:
     """Wash-painting parameters for one block-level tinted paragraph tag.
 
-    ``tint`` is the RGBA tuple painted behind the paragraph.
-    ``box_left_inset_px`` is the distance from the textview's widget
-    ``left-margin`` to the box's left edge. ``box_right_inset_px`` is
-    the corresponding distance on the right. The text lives one
-    M-width inside both edges — that offset is encoded in the
-    paragraph tag (added to its ``left-margin`` / ``right-margin``),
-    not here, because the painter does not need M-width to paint: it
-    only needs the inset.
+    ``tint`` is the RGBA tuple painted behind (or, for :data:`WashShape.
+    LEFT_BAR`, alongside) the paragraph. ``box_left_inset_px`` is the
+    distance from the textview's widget ``left-margin`` to the box's left
+    edge. ``box_right_inset_px`` is the corresponding distance on the
+    right. The text lives one M-width inside both edges — that offset is
+    encoded in the paragraph tag (added to its ``left-margin`` /
+    ``right-margin``), not here, because the painter does not need
+    M-width to paint: it only needs the inset.
 
-    ``hairline`` selects between two paint shapes. When ``False`` (the
-    default, used by admonitions, blockquotes, and code blocks) the
-    painter fills the full vertical extent of the logical line — the
-    tinted "card" behind the block. When ``True`` (used by the
-    metadata line) the painter draws a thin 1-px rule at the *bottom*
-    of the line instead of a full fill, producing the hairline divider
-    between the metadata and the body. The horizontal extent (driven by
-    the two insets) is computed identically in both cases.
+    ``shape`` selects the painted shape. :data:`WashShape.FILL` (the
+    default, used by admonitions and code blocks) fills the full vertical
+    extent of the logical line — the tinted "card" behind the block.
+    :data:`WashShape.HAIRLINE` (used by the metadata line and table data
+    rows) draws a thin 1-px rule at the *bottom* of the line instead of a
+    full fill. :data:`WashShape.LEFT_BAR` (used by blockquotes) draws a
+    thin vertical rule of width ``bar_width_px`` at the box's *left*
+    edge, with no fill — the horizontal extent otherwise computed from
+    the two insets is not painted. The horizontal extent for FILL and
+    HAIRLINE (driven by the two insets) is computed identically.
+
+    ``bar_width_px`` is the width of the left rule and is only
+    meaningful for :data:`WashShape.LEFT_BAR`; it is ``0`` for every
+    other shape.
     """
 
     tint: tuple[float, float, float, float]
     box_left_inset_px: int
     box_right_inset_px: int
-    hairline: bool = False
+    shape: WashShape = WashShape.FILL
+    bar_width_px: int = 0
 
 
 @dataclass(frozen=True)
@@ -287,6 +327,21 @@ _HEADING_SCALES: dict[int, float] = {
     5: 1.1,
     6: 1.0,
 }
+
+
+# Asymmetric vertical spacing for *body* headings (levels 2-6): the gap
+# above a heading is twice the gap below it, so the heading binds
+# visually to the content beneath it rather than floating midway between
+# two blocks. Applied as the heading paragraph tag's pixel padding so the
+# ratio is exact and font-agnostic; the renderer pairs this with
+# stripping the preceding block's trailing blank line and trimming the
+# heading's own trailing separator to a single newline, so each gap is
+# the tag's padding alone (see :func:`_make_heading_tag` and
+# ``textbuffer_renderer._emit_section``). The document title (level 0)
+# is out of scope — its spacing is governed by the title -> metadata-line
+# -> body sequence in ``render_into`` and carries no padding here.
+_HEADING_PIXELS_ABOVE_PX: int = 18
+_HEADING_PIXELS_BELOW_PX: int = 9
 
 
 def heading_tag_name(level: int) -> TagName:
@@ -404,12 +459,12 @@ _ADMONITION_KIND_FOREGROUNDS: dict[AdmonitionKind, str] = {
     AdmonitionKind.CAUTION: "#a02828",
 }
 
-# Neutral grey tint for blockquote bodies and code blocks. Both share
-# a similar wash so the visual weight is consistent; only blockquotes
-# add an italic style (composed via :data:`TagName.ITALIC`) and a
-# left-margin indent on top.
-_BLOCKQUOTE_TINT: tuple[float, float, float, float] = (0.5, 0.5, 0.5, 0.12)
+# Neutral grey tint for code blocks and the blockquote left rule. Code
+# blocks keep a low-alpha wash so the tint reads as a fill, not a card;
+# the blockquote rule is a fairly opaque, near-solid grey since it is a
+# thin line rather than a wash behind the text.
 _CODE_BLOCK_TINT: tuple[float, float, float, float] = (0.5, 0.5, 0.5, 0.08)
+_BLOCKQUOTE_BAR_TINT: tuple[float, float, float, float] = (0.5, 0.5, 0.5, 0.5)
 
 # Paragraph metrics applied to admonition paragraph tags. ``HMARGIN``
 # is the *box inset* from the textview's widget left/right margin to
@@ -425,20 +480,33 @@ _ADMONITION_VPADDING_PX: int = 8
 _ADMONITION_LINE_GAP_PX: int = 2
 
 # Paragraph metrics for blockquotes. The box insets are ``0`` so the
-# quote card spans the full prose column like a table; the same split
-# as admonitions applies — text sits one M-width inside the box edge on
-# each side. (Historically the left inset gave a quote a visible indent;
-# the aligned-card design drops that outer indent.)
+# quote's left rule aligns with the full prose column like a table; the
+# same split as admonitions applies — text sits one M-width inside the
+# box edge on each side, clearing the rule painted at the box's left
+# edge. (Historically the left inset gave a quote a visible indent; the
+# aligned-card design drops that outer indent.) ``_BLOCKQUOTE_BAR_WIDTH_PX``
+# is the width of the left rule the wash painter draws — see
+# :data:`WashSpec.bar_width_px`.
 _BLOCKQUOTE_HMARGIN_PX: int = 0
 _BLOCKQUOTE_RIGHT_MARGIN_PX: int = 0
 _BLOCKQUOTE_VPADDING_PX: int = 6
 _BLOCKQUOTE_LINE_GAP_PX: int = 2
+_BLOCKQUOTE_BAR_WIDTH_PX: int = 3
 
 # Paragraph metrics for code blocks. The box insets are ``0`` so the
 # code card spans the full prose column; the monospace text still sits
-# one M-width inside the card edge on each side.
+# one M-width inside the card edge on each side. There is **no**
+# inter-line leading (``pixels-above-lines`` / ``pixels-below-lines`` /
+# ``pixels-inside-wrap`` are all ``0`` on the ``CODE_BLOCK`` tag itself —
+# see :func:`_make_code_block_tag`) so consecutive code lines abut at
+# the bare font line height and box-drawing glyphs connect into
+# continuous rules. ``_CODE_BLOCK_EDGE_PADDING_PX`` is instead applied
+# only at the block's top and bottom edge, via the
+# :data:`TagName.CODE_BLOCK_TOP_PAD` / :data:`TagName.CODE_BLOCK_BOTTOM_PAD`
+# tags the renderer layers across the block's first and last logical
+# line respectively.
 _CODE_BLOCK_HMARGIN_PX: int = 0
-_CODE_BLOCK_VPADDING_PX: int = 8
+_CODE_BLOCK_EDGE_PADDING_PX: int = 8
 
 # Scale multiplier for the blockquote attribution line. Slightly
 # smaller than body text so the citation reads as secondary metadata.
@@ -559,7 +627,11 @@ def build_tag_table(*, char_width_px: int) -> Gtk.TextTagTable:
         )
     )
     for level, scale in _HEADING_SCALES.items():
-        table.add(_make_heading_tag(_LEVEL_TO_TAG_NAME[level], scale=scale))
+        table.add(
+            _make_heading_tag(
+                _LEVEL_TO_TAG_NAME[level], scale=scale, is_body=level != 0,
+            )
+        )
     for kind in _ADMONITION_TINTS:
         table.add(
             _make_admonition_paragraph_tag(
@@ -594,6 +666,14 @@ def build_tag_table(*, char_width_px: int) -> Gtk.TextTagTable:
     )
     table.add(
         _make_code_block_tag(TagName.CODE_BLOCK, char_width_px=char_width_px)
+    )
+    # Added after CODE_BLOCK so they take priority for the one pixel
+    # property each carries — GTK resolves a paragraph property from the
+    # highest-priority tag on the line that sets it, and later table
+    # insertion order is higher priority.
+    table.add(_make_code_block_pad_tag(TagName.CODE_BLOCK_TOP_PAD, is_top=True))
+    table.add(
+        _make_code_block_pad_tag(TagName.CODE_BLOCK_BOTTOM_PAD, is_top=False)
     )
     table.add(_make_table_row_tag(TagName.TABLE_ROW, is_header=False))
     table.add(_make_table_row_tag(TagName.TABLE_HEADER, is_header=True))
@@ -659,9 +739,11 @@ def build_wash_specs() -> dict[TagName, WashSpec]:
         specs[_ADMONITION_LABEL_TAG_NAMES[kind]] = spec
         specs[_ADMONITION_BODY_TAG_NAMES[kind]] = spec
     specs[TagName.BLOCKQUOTE_BODY] = WashSpec(
-        tint=_BLOCKQUOTE_TINT,
+        tint=_BLOCKQUOTE_BAR_TINT,
         box_left_inset_px=_BLOCKQUOTE_HMARGIN_PX,
         box_right_inset_px=_BLOCKQUOTE_RIGHT_MARGIN_PX,
+        shape=WashShape.LEFT_BAR,
+        bar_width_px=_BLOCKQUOTE_BAR_WIDTH_PX,
     )
     specs[TagName.CODE_BLOCK] = WashSpec(
         tint=_CODE_BLOCK_TINT,
@@ -680,13 +762,13 @@ def build_wash_specs() -> dict[TagName, WashSpec]:
         tint=_TABLE_RULE_TINT,
         box_left_inset_px=_TABLE_BOX_INSET_PX,
         box_right_inset_px=_TABLE_BOX_INSET_PX,
-        hairline=True,
+        shape=WashShape.HAIRLINE,
     )
     specs[TagName.METADATA] = WashSpec(
         tint=_METADATA_RULE_TINT,
         box_left_inset_px=_METADATA_RULE_INSET_PX,
         box_right_inset_px=_METADATA_RULE_INSET_PX,
-        hairline=True,
+        shape=WashShape.HAIRLINE,
     )
     return specs
 
@@ -743,11 +825,27 @@ def _make_inline_tag(  # pylint: disable=too-many-arguments
     return tag
 
 
-def _make_heading_tag(name: TagName, *, scale: float) -> Gtk.TextTag:
-    """Build a heading-style tag: bold weight at the given scale."""
+def _make_heading_tag(name: TagName, *, scale: float, is_body: bool) -> Gtk.TextTag:
+    """Build a heading-style tag: bold weight at the given scale.
+
+    ``is_body`` selects the asymmetric vertical spacing (2 : 1 above :
+    below) that applies to body section headings (levels 2-6): when
+    ``True`` the tag also carries ``pixels-above-lines`` /
+    ``pixels-below-lines`` from :data:`_HEADING_PIXELS_ABOVE_PX` /
+    :data:`_HEADING_PIXELS_BELOW_PX`, driving both gaps directly so the
+    ratio is exact and independent of the surrounding block separators
+    (see ``textbuffer_renderer._emit_section``, which strips the
+    preceding blank line and trims the heading's own trailing separator
+    to a single newline so nothing else contributes to either gap). The
+    document title (level 0) passes ``False`` — its spacing is governed
+    by the title -> metadata-line -> body sequence in ``render_into``.
+    """
     tag = Gtk.TextTag.new(name.value)
     tag.set_property("weight", Pango.Weight.BOLD)
     tag.set_property("scale", scale)
+    if is_body:
+        tag.set_property("pixels-above-lines", _HEADING_PIXELS_ABOVE_PX)
+        tag.set_property("pixels-below-lines", _HEADING_PIXELS_BELOW_PX)
     return tag
 
 
@@ -799,16 +897,17 @@ def _make_blockquote_body_tag(
     """Build the blockquote-body paragraph tag.
 
     Carries the text position only: with the box inset now ``0`` the
-    left/right margins are just one M-width, so the tinted card spans
-    the full prose column and the text sits one M-width inside the card
-    edge (the card's internal padding) — the quote no longer carries an
-    outer indent from the prose. ``accumulative-margin = True`` makes
-    those margins stack on the textview's widget-level margins (see
+    left/right margins are just one M-width, so the left rule aligns
+    with the full prose column and the text sits one M-width inside
+    that edge, clearing the rule the wash painter draws there — the
+    quote no longer carries an outer indent from the prose.
+    ``accumulative-margin = True`` makes those margins stack on the
+    textview's widget-level margins (see
     :func:`_make_admonition_paragraph_tag` for why this matters). The
     italic style is *not* set here — the renderer composes it by
     layering the shared :data:`TagName.ITALIC` tag across the body
     range so a future tweak to "what italic looks like" remains a
-    one-line edit. The tint is painted separately by
+    one-line edit. The rule itself is painted separately by
     ``ArticleTextView`` in :mod:`ui.note_view`.
     """
     tag = Gtk.TextTag.new(name.value)
@@ -860,13 +959,42 @@ def _make_code_block_tag(name: TagName, *, char_width_px: int) -> Gtk.TextTag:
     the shared :data:`TagName.MONOSPACE` tag, which the renderer
     applies on top of this one across the same range. The tint is
     painted separately by ``ArticleTextView`` in :mod:`ui.note_view`.
+
+    ``pixels-above-lines`` / ``pixels-below-lines`` / ``pixels-inside-wrap``
+    are all ``0`` — zero inter-line leading — so consecutive code lines
+    abut at the bare font line height and box-drawing characters
+    (``│ ├ └ ─``) in adjacent lines connect into continuous rules. The
+    block's vertical breathing room comes instead from
+    :func:`_make_code_block_pad_tag`, layered by the renderer on the
+    block's first and last logical line only.
     """
     tag = Gtk.TextTag.new(name.value)
     tag.set_property("accumulative-margin", True)
     tag.set_property("left-margin", _CODE_BLOCK_HMARGIN_PX + char_width_px)
     tag.set_property("right-margin", _CODE_BLOCK_HMARGIN_PX + char_width_px)
-    tag.set_property("pixels-above-lines", _CODE_BLOCK_VPADDING_PX)
-    tag.set_property("pixels-below-lines", _CODE_BLOCK_VPADDING_PX)
+    tag.set_property("pixels-above-lines", 0)
+    tag.set_property("pixels-below-lines", 0)
+    tag.set_property("pixels-inside-wrap", 0)
+    return tag
+
+
+def _make_code_block_pad_tag(name: TagName, *, is_top: bool) -> Gtk.TextTag:
+    """Build a code-block edge-padding tag (top or bottom role).
+
+    Carries only the one pixel-padding property its role needs —
+    ``pixels-above-lines`` for the top-pad tag, ``pixels-below-lines``
+    for the bottom-pad tag — from :data:`_CODE_BLOCK_EDGE_PADDING_PX`.
+    The renderer layers this on top of :data:`TagName.CODE_BLOCK` across
+    only the block's first (top role) or last (bottom role) logical
+    line, mirroring the admonition label/body padding-role split. Not
+    setting the other pixel properties leaves them to fall through to
+    :data:`TagName.CODE_BLOCK`'s zero inter-line leading.
+    """
+    tag = Gtk.TextTag.new(name.value)
+    if is_top:
+        tag.set_property("pixels-above-lines", _CODE_BLOCK_EDGE_PADDING_PX)
+    else:
+        tag.set_property("pixels-below-lines", _CODE_BLOCK_EDGE_PADDING_PX)
     return tag
 
 

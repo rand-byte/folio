@@ -18,7 +18,7 @@ from giruntime.ui.note_render.tag_table import (
     build_wash_specs,
     heading_tag_name,
 )
-from enums import AdmonitionKind
+from enums import AdmonitionKind, WashShape
 from config.defaults import TABLE_CELL_HPADDING_PX
 
 
@@ -132,6 +132,8 @@ class TagNameTests(unittest.TestCase):
             "BLOCKQUOTE_BODY",
             "BLOCKQUOTE_ATTRIBUTION",
             "CODE_BLOCK",
+            "CODE_BLOCK_TOP_PAD",
+            "CODE_BLOCK_BOTTOM_PAD",
             "TABLE_ROW",
             "TABLE_HEADER",
             "METADATA",
@@ -362,6 +364,26 @@ class HeadingTagPropertyTests(unittest.TestCase):
         h0 = self.table.lookup(TagName.HEADING_0.value).get_property("scale")
         h2 = self.table.lookup(TagName.HEADING_2.value).get_property("scale")
         self.assertGreater(h0, h2)
+
+    def test_body_heading_pixel_padding_is_two_to_one(self) -> None:
+        # Body headings (levels 2-6) carry asymmetric vertical spacing —
+        # the gap above is twice the gap below — driven by pixel padding
+        # on the heading tag itself so the ratio is exact.
+        for level in (2, 3, 4, 5, 6):
+            with self.subTest(level=level):
+                tag = self.table.lookup(heading_tag_name(level).value)
+                above = tag.get_property("pixels-above-lines")
+                below = tag.get_property("pixels-below-lines")
+                self.assertGreater(below, 0)
+                self.assertEqual(above, 2 * below)
+
+    def test_document_title_has_no_pixel_padding(self) -> None:
+        # The title (level 0) is out of scope for the 2 : 1 model — its
+        # spacing is governed by the title -> metadata-line -> body
+        # sequence in render_into.
+        tag = self.table.lookup(TagName.HEADING_0.value)
+        self.assertEqual(tag.get_property("pixels-above-lines"), 0)
+        self.assertEqual(tag.get_property("pixels-below-lines"), 0)
 
 
 class ParagraphBackgroundIsNotOnTagsTests(unittest.TestCase):
@@ -647,6 +669,25 @@ class CodeBlockTagPropertyTests(unittest.TestCase):
         tag = self.table.lookup(TagName.CODE_BLOCK.value)
         self.assertTrue(tag.get_property("accumulative-margin"))
 
+    def test_has_zero_inter_line_leading(self) -> None:
+        # No leading between code lines so box-drawing characters in
+        # consecutive lines connect into continuous rules; the block's
+        # edge padding lives on the separate top/bottom pad tags.
+        tag = self.table.lookup(TagName.CODE_BLOCK.value)
+        self.assertEqual(tag.get_property("pixels-above-lines"), 0)
+        self.assertEqual(tag.get_property("pixels-below-lines"), 0)
+        self.assertEqual(tag.get_property("pixels-inside-wrap"), 0)
+
+    def test_top_pad_tag_sets_only_pixels_above(self) -> None:
+        tag = self.table.lookup(TagName.CODE_BLOCK_TOP_PAD.value)
+        self.assertGreater(tag.get_property("pixels-above-lines"), 0)
+        self.assertEqual(tag.get_property("pixels-below-lines"), 0)
+
+    def test_bottom_pad_tag_sets_only_pixels_below(self) -> None:
+        tag = self.table.lookup(TagName.CODE_BLOCK_BOTTOM_PAD.value)
+        self.assertEqual(tag.get_property("pixels-above-lines"), 0)
+        self.assertGreater(tag.get_property("pixels-below-lines"), 0)
+
 
 _ERROR_NOTICE_TAGS: tuple[TagName, ...] = (
     TagName.ERROR_NOTICE_ICON,
@@ -803,21 +844,30 @@ class WashSpecTests(unittest.TestCase):
         # The metadata line under the title gets a hairline rule — a
         # 1-px divider drawn at the bottom of the line — rather than a
         # full-height fill. Its wash spec must therefore be present and
-        # carry ``hairline=True``.
+        # carry ``shape = WashShape.HAIRLINE``.
         self.assertIn(TagName.METADATA, self.specs)
-        self.assertTrue(self.specs[TagName.METADATA].hairline)
+        self.assertEqual(self.specs[TagName.METADATA].shape, WashShape.HAIRLINE)
 
     def test_table_header_wash_spec_is_a_fill_band(self) -> None:
         # The header row paints a full tint band (not a hairline) so it
         # reads as a header.
         self.assertIn(TagName.TABLE_HEADER, self.specs)
-        self.assertFalse(self.specs[TagName.TABLE_HEADER].hairline)
+        self.assertEqual(self.specs[TagName.TABLE_HEADER].shape, WashShape.FILL)
 
     def test_table_row_wash_spec_is_a_hairline(self) -> None:
         # Each data row paints a 1-px bottom rule to separate it from the
         # next row, the same painter shape as the metadata divider.
         self.assertIn(TagName.TABLE_ROW, self.specs)
-        self.assertTrue(self.specs[TagName.TABLE_ROW].hairline)
+        self.assertEqual(self.specs[TagName.TABLE_ROW].shape, WashShape.HAIRLINE)
+
+    def test_blockquote_body_wash_spec_is_a_left_bar(self) -> None:
+        # The quote body paints a thin left-edge rule, no fill, so it
+        # reads as unmistakably distinct from the filled admonition /
+        # code cards.
+        self.assertIn(TagName.BLOCKQUOTE_BODY, self.specs)
+        spec = self.specs[TagName.BLOCKQUOTE_BODY]
+        self.assertEqual(spec.shape, WashShape.LEFT_BAR)
+        self.assertGreater(spec.bar_width_px, 0)
 
     def test_table_specs_span_the_full_text_column(self) -> None:
         # A table fills the body column, so its band / rule sit at zero
@@ -831,8 +881,9 @@ class WashSpecTests(unittest.TestCase):
     def test_block_specs_span_the_full_text_column(self) -> None:
         # Admonition / blockquote / code-block cards align with the prose
         # column the same way tables do: their wash sits at zero inset on
-        # both sides, so the tinted card edge lands on the prose column
-        # rather than indented from it. (The text inside the card is still
+        # both sides, so the tinted card edge (or, for the blockquote's
+        # left rule, the rule itself) lands on the prose column rather
+        # than indented from it. (The text inside the card is still
         # padded one M-width in by the paragraph tag's margins — that is a
         # separate concern, asserted on the paragraph tags themselves.)
         block_names = [TagName.BLOCKQUOTE_BODY, TagName.CODE_BLOCK]
@@ -848,12 +899,22 @@ class WashSpecTests(unittest.TestCase):
     def test_only_metadata_and_table_rows_are_hairline_specs(self) -> None:
         # The hairline shape is shared by the metadata divider and table
         # data rows; every other wash-bearing tag paints a full-height
-        # fill. Guards against a future block kind accidentally
-        # inheriting the hairline flag.
+        # fill or a left bar. Guards against a future block kind
+        # accidentally inheriting the hairline shape.
         hairline_names = {TagName.METADATA, TagName.TABLE_ROW}
         for name, spec in self.specs.items():
             with self.subTest(name=name):
-                self.assertEqual(spec.hairline, name in hairline_names)
+                is_hairline = spec.shape is WashShape.HAIRLINE
+                self.assertEqual(is_hairline, name in hairline_names)
+
+    def test_only_blockquote_body_is_a_left_bar_spec(self) -> None:
+        # LEFT_BAR is currently unique to the blockquote body. Guards
+        # against a future block kind accidentally inheriting it.
+        left_bar_names = {TagName.BLOCKQUOTE_BODY}
+        for name, spec in self.specs.items():
+            with self.subTest(name=name):
+                is_left_bar = spec.shape is WashShape.LEFT_BAR
+                self.assertEqual(is_left_bar, name in left_bar_names)
 
 
 class BuildSheetWashTests(unittest.TestCase):

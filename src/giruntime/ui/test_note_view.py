@@ -2208,6 +2208,26 @@ class ArticleTextViewWashRectTests(unittest.TestCase):
         # The row is the thin hairline regardless of layout.
         self.assertEqual(row_rect.get_height(), float(_HAIRLINE_THICKNESS_PX))
 
+    def test_blockquote_body_line_produces_a_left_bar_rect(self) -> None:
+        # The blockquote body paints a thin vertical rule at the box's
+        # left edge, no fill — distinct from a full-width fill. Its rect
+        # width is the spec's bar width (not the column width), it sits
+        # at the box's left edge, and it spans the line's full height
+        # the same way a FILL shape would.
+        text_view, buffer, _table = _build_article_text_view_with_buffer()
+        buffer.set_text("quoted body text\n")
+        _apply_tag_across_line(buffer, 0, TagName.BLOCKQUOTE_BODY.value)
+        rects = text_view._compute_wash_rects()
+        self.assertEqual(len(rects), 1)
+        spec = build_wash_specs()[TagName.BLOCKQUOTE_BODY]
+        color, rect = rects[0]
+        self.assertEqual(_tuple_of(color), _tuple_of(_rgba_from_tint(spec.tint)))
+        self.assertEqual(rect.get_width(), float(spec.bar_width_px))
+        ok, line_iter = buffer.get_iter_at_line(0)
+        self.assertTrue(ok)
+        _line_y_buffer, line_h = text_view.get_line_yrange(line_iter)
+        self.assertEqual(rect.get_height(), float(line_h))
+
 
 class SheetRectTests(unittest.TestCase):
     """Drive the pure sheet helper.
