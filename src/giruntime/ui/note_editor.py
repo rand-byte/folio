@@ -32,10 +32,17 @@ Principles & invariants
   would point *into* the archive and the OS could not open it). The
   GResource is built from the committed ``folio.gresource.xml`` +
   ``language_spec.lang`` by ``run`` / ``make`` before any entry point
-  runs; it is registered exactly once behind the cached
-  :data:`_LANGUAGE_MANAGER` (see :func:`_configure_search_path`), and a
-  *missing* resource is a hard :class:`FileNotFoundError`, not a silent
-  fallback to plain-text highlighting.
+  runs; the search-path URI is obtained from the shared
+  :func:`giruntime.ui._gresource.resource_path` (see
+  :func:`_configure_search_path`), keyed by
+  :attr:`enums.GResourceSubtree.LANGUAGE_SPECS` — the same helper
+  :mod:`giruntime.ui.application` uses to make the bundled icon
+  resolvable, so the bundle is still registered from exactly one
+  place even though two modules now need resources out of it, and
+  obtaining a path is what triggers that registration rather than
+  being a step either caller could forget. A *missing* resource is a
+  hard :class:`FileNotFoundError`, not a silent fallback to
+  plain-text highlighting.
 * The :class:`GtkSource.LanguageManager` we build is *fresh* — not
   the process-global default. The default is shared with the rest of
   the desktop's text editing tooling and mutating its search path
@@ -83,16 +90,17 @@ Principles & invariants
 
 from __future__ import annotations
 
-import importlib.resources
 import sqlite3
 from collections.abc import Callable
 from typing import Final
 
-from gi.repository import Gio, GLib, GObject, Gtk, GtkSource
+from gi.repository import GLib, GObject, Gtk, GtkSource
 
+from enums import GResourceSubtree
 from giruntime.controllers.app_state import AppState
 from giruntime.controllers.note_controller import NoteController
 from giruntime.controllers.note_list_store import NoteListStore
+from giruntime.ui import _gresource
 from giruntime.ui._file_picker import (
     FileDialogOpener,
     default_file_dialog_opener,
@@ -113,31 +121,6 @@ Matches the ``id`` attribute of the ``<language>`` root element in
 ``ui/language_spec.lang``. Kept as a module-level
 constant rather than a literal so the grep target for "where is the
 language id used" is exactly one place.
-"""
-
-_GRESOURCE_NAME: Final[str] = "folio.gresource"
-"""File name of the compiled GResource bundle shipped next to this module.
-
-The bundle is a **generated artifact** (``src/giruntime/ui/folio.gresource``,
-gitignored) compiled from the committed ``folio.gresource.xml`` manifest
-plus ``language_spec.lang`` by ``glib-compile-resources``. Every entry
-point (``run``, ``make test``, ``make pyz``) builds it before launch, so
-the file is present whether the app runs from a source checkout or from
-inside ``folio.pyz``. It is read out of the package via
-:func:`importlib.resources.files`, which resolves identically in both
-cases because ``ui`` stays a real package at the archive root.
-"""
-
-_GRESOURCE_LANG_DIR: Final[str] = "resource:///org/folio/language-specs"
-"""``resource:///`` directory URI the grammar is published under.
-
-Matches the ``prefix`` of the ``<gresource>`` element in
-``folio.gresource.xml``. Handed verbatim to
-:meth:`GtkSource.LanguageManager.set_search_path`, which (since
-GtkSourceView 5.4) accepts a ``resource:///`` directory naming a folder
-inside a registered GResource as well as an on-disk directory. The
-grammar's ``language_spec.lang`` resolves at
-``resource:///org/folio/language-specs/language_spec.lang``.
 """
 
 AUTOSAVE_DEBOUNCE_MS: Final[int] = 300
@@ -225,38 +208,27 @@ def buffer_text(buffer: Gtk.TextBuffer) -> str:
 def _configure_search_path(manager: GtkSource.LanguageManager) -> None:
     """Register the compiled GResource and point ``manager`` at it.
 
-    The grammar always loads from the compiled
-    :data:`_GRESOURCE_NAME` blob — never from a filesystem path — so a
-    source checkout and the packaged ``folio.pyz`` behave identically.
-    The blob is read out of the ``giruntime.ui`` package with
-    :func:`importlib.resources.files`, which resolves whether
-    ``giruntime.ui`` is an on-disk directory
-    (``src/giruntime/ui/folio.gresource``) or a folder inside
-    the zip. The bytes are registered as a process-global
-    :class:`Gio.Resource`, after which the grammar is reachable at
-    :data:`_GRESOURCE_LANG_DIR` and that ``resource:///`` directory is
-    prepended to the manager's search path (since GtkSourceView 5.4 the
-    search path accepts ``resource:///`` directory URIs).
+    The search-path URI comes from the shared, idempotent
+    :func:`giruntime.ui._gresource.resource_path` — see that module
+    for why the bundle is registered from exactly one place even
+    though :mod:`giruntime.ui.application` also needs a resource out
+    of it (the icon), and why obtaining a path is itself what
+    triggers registration rather than being a separate step this
+    function could get out of order. The manager's search path is
+    then prepended with that URI (since GtkSourceView 5.4 the search
+    path accepts ``resource:///`` directory URIs naming a folder
+    inside a registered GResource).
 
-    A missing :data:`_GRESOURCE_NAME` makes :meth:`read_bytes` raise
-    :class:`FileNotFoundError`. That is the intended behaviour — a hard,
-    obvious error pointing at "build the resource first" rather than a
-    silent fallback to plain-text highlighting. Registration happens
-    exactly once per process because the only caller,
+    Runs at most once per process because the only caller,
     :func:`_get_language_manager`, is itself memoised behind
     :data:`_LANGUAGE_MANAGER`.
     """
     existing = list(manager.get_search_path() or ())
-    # ``GLib.Bytes.new`` is provided by the gi metaclass; pylint's
-    # astroid introspection misses it in the full-source lint run.
-    blob = GLib.Bytes.new(  # pylint: disable=no-member
-        importlib.resources.files("giruntime.ui").joinpath(_GRESOURCE_NAME).read_bytes()
-    )
-    Gio.resources_register(Gio.Resource.new_from_data(blob))
+    language_specs_dir = _gresource.resource_path(GResourceSubtree.LANGUAGE_SPECS)
     # Prepend so our bundled grammar wins over a system-installed
     # ``notes-asciidoc`` (none ships, but defending against an id
     # collision is cheap and keeps surprising debug stories at bay).
-    manager.set_search_path([_GRESOURCE_LANG_DIR, *existing])
+    manager.set_search_path([language_specs_dir, *existing])
 
 
 _LANGUAGE_MANAGER: GtkSource.LanguageManager | None = None

@@ -295,3 +295,31 @@ class HelpSection(StrEnum):
     STRUCTURE = "Structure"
     TEXT_AND_EMPHASIS = "Text & emphasis"
     BLOCKS = "Blocks"
+
+
+class GResourceSubtree(StrEnum):
+    """``resource://`` subtrees published by the compiled ``folio.gresource``.
+
+    ``folio.gresource`` is one compiled artifact but bundles more than
+    one thing at runtime — today the GtkSourceView grammar and the
+    application icon — each published under its own ``prefix`` in
+    ``giruntime/ui/folio.gresource.xml``. This enum is the single home
+    for "what does the bundle contain and where does each part live":
+    a new bundled subtree needs a member here *and* the matching
+    ``<gresource prefix=...>`` in the manifest, so a consumer can never
+    hardcode a path the manifest does not actually publish.
+
+    Each member's *value is the resource path itself*, in whatever form
+    the GTK API that consumes it expects — :class:`LANGUAGE_SPECS` is a
+    full ``resource:///`` URI (what
+    :meth:`GtkSource.LanguageManager.set_search_path` takes), while
+    :class:`ICONS` is a bare resource path with no ``resource://``
+    scheme (what :meth:`Gtk.IconTheme.add_resource_path` takes) — this
+    is a real difference between the two GTK APIs, not an
+    inconsistency to paper over. Values are in-memory only (never
+    persisted), so they carry no migration implication; they must,
+    however, stay in sync with the manifest's ``prefix`` attributes.
+    """
+
+    LANGUAGE_SPECS = "resource:///org/folio/language-specs"
+    ICONS = "/org/folio/icons"

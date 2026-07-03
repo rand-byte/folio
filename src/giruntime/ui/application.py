@@ -32,6 +32,16 @@ Principles & invariants
   :mod:`importlib.resources` so it works both from a source checkout
   and from inside the ``folio.pyz`` zipapp — there is no filesystem path
   assumption.
+* The application icon is registered the same way, once, on first
+  activation: :func:`_register_application_icon_resources` adds the
+  gresource-bundled SVG to the default display's :class:`Gtk.IconTheme`
+  and sets it as every window's fallback icon
+  (:meth:`Gtk.Window.set_default_icon_name`). This is **in-app**
+  plumbing only — it makes the icon resolvable by name (e.g. by a
+  future :class:`Gtk.AboutDialog`) with no install step, but GTK 4 has
+  no API to set a taskbar/dock icon directly (Wayland compositors
+  resolve that from a ``.desktop`` file's ``Icon=`` key via the
+  ``hicolor`` theme instead); that OS-level packaging is not done here.
 * The seeded welcome note is loaded by id (:data:`SEED_WELCOME_NOTE_ID`).
   If the user has deleted it, the application falls back to the most
   recently modified note in the library (:meth:`NoteRepositoryProtocol.list_all`
@@ -83,9 +93,11 @@ from gi.repository import Gdk, Gio, Gtk
 
 from config.defaults import SEED_WELCOME_NOTE_ID
 from config.paths import database_path
+from enums import GResourceSubtree
 from giruntime.controllers.app_state import AppState
 from giruntime.controllers.note_controller import NoteController
 from giruntime.controllers.note_list_store import NoteListStore
+from giruntime.ui import _gresource
 from giruntime.ui.help_window import HelpWindow
 from giruntime.ui.main_window import MainWindow
 from storage.attachment_store import AttachmentStore
@@ -208,7 +220,9 @@ class NotesApplication(Gtk.Application):
         run *after* :meth:`Gtk.Application.__init__` (so that GTK
         is initialised and a default display exists) but *before*
         any window is built (so the styling is in place for the
-        first paint).
+        first paint). The application icon is registered with the
+        icon theme right after, for the same before-any-window-exists
+        reason.
         """
         self._database = Database(database_path())
         apply_pending(self._database)
@@ -224,6 +238,7 @@ class NotesApplication(Gtk.Application):
         )
         self._install_help_action()
         _load_application_css()
+        _register_application_icon_resources()
 
     def _install_help_action(self) -> None:
         """Register the app-level ``help`` action and its ``F1`` accel.
@@ -406,3 +421,44 @@ def _load_application_css() -> None:
         provider,
         Gtk.STYLE_PROVIDER_PRIORITY_APPLICATION,
     )
+
+
+def _register_application_icon_resources() -> None:
+    """Make the bundled application icon resolvable by icon name.
+
+    :func:`giruntime.ui._gresource.resource_path` both registers the
+    compiled ``folio.gresource`` bundle (shared with
+    :mod:`giruntime.ui.note_editor`'s grammar loading, so the bundle is
+    still read from exactly one place) and returns
+    :attr:`enums.GResourceSubtree.ICONS`'s path in one call — obtaining
+    the path is what triggers registration, so there is no separate
+    "did I register yet" step to get wrong. That path is added to the
+    default display's :class:`Gtk.IconTheme`, which requires the
+    registered subtree to follow the ``hicolor`` theme's own layout —
+    hence the icon lives under ``scalable/apps/`` beneath it in
+    ``folio.gresource.xml``, one level above where the icon *name* (the
+    file's basename, sans extension) is looked up. The icon's name is
+    :data:`_APPLICATION_ID` — the ``hicolor`` convention that an
+    application's icon file is named after its application id, so the
+    same string that registers the app with the session bus also looks
+    up its icon; it is set as the fallback icon name for every window
+    that does not set its own (:meth:`Gtk.Window.set_default_icon_name`)
+    — every window in this process, today. This is in-app plumbing
+    only: it lets :class:`Gtk.Image` and :class:`Gtk.Window` resolve
+    the icon by name with no install step, but it is not OS-level
+    desktop integration (a taskbar/dock icon additionally requires
+    installing the icon under the host's ``hicolor`` theme and a
+    ``.desktop`` file naming it — out of scope here).
+
+    Returns silently when the default display is not available — the
+    same defensive guard :func:`_load_application_css` uses for
+    embedded or test contexts where :class:`Gtk.Application` runs
+    without a display. Production always has one by the time
+    :meth:`_initialise_runtime` runs.
+    """
+    display = Gdk.Display.get_default()
+    if display is None:
+        return
+    icon_theme = Gtk.IconTheme.get_for_display(display)
+    icon_theme.add_resource_path(_gresource.resource_path(GResourceSubtree.ICONS))
+    Gtk.Window.set_default_icon_name(_APPLICATION_ID)

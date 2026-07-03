@@ -17,7 +17,7 @@ from pathlib import Path
 
 from gi.repository import Gdk, Gtk, GtkSource
 
-from enums import AttachmentRejectionReason
+from enums import AttachmentRejectionReason, GResourceSubtree
 from models.attachment import Attachment
 from models.note import Note
 from storage.protocols import AttachmentRejected
@@ -29,7 +29,6 @@ from giruntime.ui.note_editor import (
     AUTOSAVE_DEBOUNCE_MS,
     LANGUAGE_ID,
     NoteEditor,
-    _GRESOURCE_LANG_DIR,
     _configure_search_path,
     buffer_text,
     load_asciidoc_language,
@@ -288,14 +287,20 @@ class ConfigureSearchPathTests(unittest.TestCase):
     def test_resource_dir_is_prepended_to_search_path(self) -> None:
         manager = GtkSource.LanguageManager.new()
         _configure_search_path(manager)
-        self.assertIn(_GRESOURCE_LANG_DIR, list(manager.get_search_path()))
+        self.assertIn(
+            GResourceSubtree.LANGUAGE_SPECS.value,
+            list(manager.get_search_path()),
+        )
 
     def test_resource_dir_is_first_in_search_path(self) -> None:
         # Prepending (not appending) is what lets the bundled grammar
         # win over an id-colliding system grammar.
         manager = GtkSource.LanguageManager.new()
         _configure_search_path(manager)
-        self.assertEqual(list(manager.get_search_path())[0], _GRESOURCE_LANG_DIR)
+        self.assertEqual(
+            list(manager.get_search_path())[0],
+            GResourceSubtree.LANGUAGE_SPECS.value,
+        )
 
 
 class LoadAsciidocLanguageTests(unittest.TestCase):

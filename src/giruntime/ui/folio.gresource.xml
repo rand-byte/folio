@@ -3,4 +3,7 @@
   <gresource prefix="/org/folio/language-specs">
     <file>language_spec.lang</file>
   </gresource>
+  <gresource prefix="/org/folio/icons">
+    <file alias="scalable/apps/org.folio.Folio.svg">icons/scalable/apps/org.folio.Folio.svg</file>
+  </gresource>
 </gresources>

@@ -15,7 +15,19 @@ from __future__ import annotations
 import unittest
 from unittest.mock import patch
 
-from giruntime.ui.application import NotesApplication
+from gi.repository import Gdk, Gtk
+
+from giruntime.ui.application import (
+    _APPLICATION_ID,
+    NotesApplication,
+    _register_application_icon_resources,
+)
+
+
+def _display_available() -> bool:
+    """True iff a GDK display can be opened — required for icon-theme lookups."""
+    Gtk.init_check()
+    return Gdk.Display.get_default() is not None
 
 
 class MainWindowCloseRequestTests(unittest.TestCase):
@@ -52,6 +64,36 @@ class MainWindowCloseRequestTests(unittest.TestCase):
             )
 
         self.assertFalse(proceed)
+
+
+@unittest.skipUnless(_display_available(), "no GDK display")
+class RegisterApplicationIconResourcesTests(unittest.TestCase):
+    """The bundled icon resolves by name once registration has run."""
+
+    def test_icon_theme_gains_the_application_icon(self) -> None:
+        """The gresource-bundled SVG becomes a resolvable icon name.
+
+        Without :func:`_register_application_icon_resources`, the
+        icon theme has never been told about ``folio.gresource``'s
+        ``/org/folio/icons`` subtree, so it would not resolve
+        :data:`_APPLICATION_ID` by name.
+        """
+        display = Gdk.Display.get_default()
+        assert display is not None  # narrows for the type checker
+
+        _register_application_icon_resources()
+
+        icon_theme = Gtk.IconTheme.get_for_display(display)
+        self.assertTrue(icon_theme.has_icon(_APPLICATION_ID))
+
+    def test_sets_the_default_window_icon_name(self) -> None:
+        """Every window without its own icon falls back to the app icon."""
+        _register_application_icon_resources()
+
+        self.assertEqual(
+            Gtk.Window.get_default_icon_name(),
+            _APPLICATION_ID,
+        )
 
 
 if __name__ == "__main__":

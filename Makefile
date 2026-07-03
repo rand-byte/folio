@@ -7,14 +7,15 @@ PY_TST := $(shell find src -type f -name "test_*.py")
 # generated artifact (gitignored): every entry point builds it from the
 # committed manifest before launch, so dev, test, and prod all load the
 # grammar through the same compiled bundle.
-PYZ      := folio.pyz
-GRES     := src/giruntime/ui/folio.gresource
-GRES_XML := src/giruntime/ui/folio.gresource.xml
-GRES_SRC := src/giruntime/ui/language_spec.lang
-SHEBANG  := /usr/bin/env python3
+PYZ       := folio.pyz
+GRES      := src/giruntime/ui/folio.gresource
+GRES_XML  := src/giruntime/ui/folio.gresource.xml
+GRES_SRC  := src/giruntime/ui/language_spec.lang
+GRES_ICON := src/giruntime/ui/icons/scalable/apps/org.folio.Folio.svg
+SHEBANG   := /usr/bin/env python3
 
-# compile grammar -> GResource (sourcedir = where the manifest's <file> resolves)
-$(GRES): $(GRES_XML) $(GRES_SRC)
+# compile grammar + icon -> GResource (sourcedir = where the manifest's <file> resolves)
+$(GRES): $(GRES_XML) $(GRES_SRC) $(GRES_ICON)
 	glib-compile-resources --sourcedir=src/giruntime/ui --target=$@ $(GRES_XML)
 
 # named alias so `run` (and humans) need not know the artifact path
