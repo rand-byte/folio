@@ -64,17 +64,39 @@ Principles & invariants
 * The initial pane positions match the per-widget hints
   (:data:`_SIDEBAR_INITIAL_POSITION_PX`,
   :data:`_NOTE_LIST_INITIAL_POSITION_PX`), and the initial *window
-  width* is derived from them plus the rendered article column via
+  width* — when no size was restored from a previous run (see below) —
+  is derived from them plus the rendered article column via
   :func:`_default_window_width`, called once after :class:`NoteView`
   has measured the body font (:meth:`NoteView.preferred_column_width_px`).
   This guarantees the fixed-width column opens fully visible and
   centred rather than overflowing into a horizontal scroll — the
   derived width scales with the font instead of being a literal guess.
-  All of these are *initial* values only; once the user drags either
-  handle or resizes the window GTK records the new value internally
-  and our defaults stop applying. Saving and restoring those across
-  launches is a v2 feature — there is no settings store in v1
-  (decision 4 of the plan).
+  The pane positions themselves are always the fixed initial hints —
+  restoring a paned-divider position is out of scope for the current
+  session-state feature. Once the user drags either handle or resizes
+  the window, GTK records the new value internally and our defaults
+  stop applying for the rest of that run.
+* The constructor's ``restored_state`` parameter is the window's half
+  of :class:`SessionState`
+  (:mod:`giruntime.ui.application`'s :class:`NotesApplication` owns the
+  other half — the initial note selection). When
+  ``restored_state.window_size`` is set, it replaces the computed
+  ``_default_window_width(...)`` × :data:`_DEFAULT_WINDOW_HEIGHT_PX`
+  pair above; when ``restored_state.window_maximized`` is true, the
+  window additionally calls :meth:`Gtk.Window.maximize` once, after
+  :meth:`Gtk.Window.set_default_size` — maximizing before the window is
+  ever shown is documented GTK behaviour ("the window will be maximized
+  when it appears onscreen initially"), and the pre-maximize size is
+  still worth setting first so there is a sane size to fall back to if
+  the window is ever un-maximized. GTK 4 has no window**-position** API
+  (Wayland compositors own placement, not the app), so there is
+  deliberately nothing to restore there — only size and maximized
+  state. ``restored_state`` defaults to
+  :data:`models.session_state.DEFAULT_SESSION_STATE` for the same
+  reason ``attachment_store`` defaults to ``None`` below: existing
+  per-pane test suites construct :class:`MainWindow` directly and
+  should not all need to know about session restoration to keep
+  working.
 * The window owns no data. Everything it needs — the note store, the
   controller, the app state — is reached through references that
   originate in :class:`NotesApplication`. Tests can construct the same
@@ -97,6 +119,7 @@ from giruntime.ui.note_list import NoteList
 from giruntime.ui.note_view import NoteView
 from giruntime.ui.sidebar import Sidebar
 from giruntime.ui.toolbar import Toolbar
+from models.session_state import DEFAULT_SESSION_STATE, SessionState
 from storage.protocols import AttachmentStoreProtocol
 
 
@@ -277,6 +300,7 @@ class MainWindow(  # pylint: disable=too-many-instance-attributes
         note_controller: NoteController,
         app_state: AppState,
         attachment_store: AttachmentStoreProtocol | None = None,
+        restored_state: SessionState = DEFAULT_SESSION_STATE,
     ) -> None:
         super().__init__(application=application)
         self._note_store = note_store
@@ -338,16 +362,27 @@ class MainWindow(  # pylint: disable=too-many-instance-attributes
         )
 
         # Now that the rendered view exists (and has measured the body
-        # font), size the window so the fixed-width article column fits
-        # alongside the two left panes with slack on both sides — the
-        # centring branch of ``ArticleContainer`` then fires on the very
-        # first allocation instead of the column overflowing into a
-        # horizontal scroll. The width tracks the font because
-        # ``preferred_column_width_px`` is the measured column.
-        self.set_default_size(
-            _default_window_width(self._note_view.preferred_column_width_px()),
-            _DEFAULT_WINDOW_HEIGHT_PX,
-        )
+        # font), size the window. A restored size from the previous run
+        # wins outright; otherwise fall back to the computed default —
+        # the fixed-width article column fitting alongside the two left
+        # panes with slack on both sides, so the centring branch of
+        # ``ArticleContainer`` fires on the very first allocation instead
+        # of the column overflowing into a horizontal scroll. The default
+        # width tracks the font because ``preferred_column_width_px`` is
+        # the measured column.
+        if restored_state.window_size is not None:
+            width, height = restored_state.window_size
+        else:
+            width = _default_window_width(
+                self._note_view.preferred_column_width_px(),
+            )
+            height = _DEFAULT_WINDOW_HEIGHT_PX
+        self.set_default_size(width, height)
+        if restored_state.window_maximized:
+            # Permitted before the window is shown: GTK maximizes it as
+            # soon as it appears onscreen. The size set above is still
+            # what the window returns to if the user un-maximizes it.
+            self.maximize()
 
         # The right pane is a Gtk.Stack: rendered view OR editor,
         # never both. The transition is a fade — the default — which

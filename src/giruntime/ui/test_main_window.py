@@ -8,12 +8,13 @@ from datetime import UTC, datetime
 from functools import cache
 from pathlib import Path
 
-from gi.repository import Gdk, Gio, Gtk
+from gi.repository import Gdk, Gio, GLib, Gtk
 
 from asciidoc.summary import derive_summary
 from enums import ViewMode
 from models.attachment import Attachment
 from models.note import Note
+from models.session_state import DEFAULT_SESSION_STATE, SessionState
 from giruntime.controllers.app_state import AppState
 from giruntime.controllers.note_controller import NoteController
 from giruntime.controllers.note_list_store import NoteListStore
@@ -51,6 +52,20 @@ def _display_available() -> bool:
     construction."""
     Gtk.init_check()
     return Gdk.Display.get_default() is not None
+
+
+def _pump_main_loop() -> None:
+    """Drain pending GLib main-loop events.
+
+    A headless compositor does not reliably map/allocate a presented
+    surface synchronously, so any assertion that depends on realised
+    window state (e.g. :meth:`Gtk.Window.is_maximized` after
+    :meth:`Gtk.Window.present`) needs the loop pumped first.
+    """
+    context = GLib.MainContext.default()
+    for _ in range(50):
+        while context.pending():
+            context.iteration(False)
 
 
 @cache
@@ -249,6 +264,7 @@ class MainWindowConstructionTests(unittest.TestCase):
         self,
         *,
         app_state: AppState | None = None,
+        restored_state: SessionState = DEFAULT_SESSION_STATE,
     ) -> MainWindow:
         application = _test_application()
         notes = _FakeNoteRepository()
@@ -274,6 +290,7 @@ class MainWindowConstructionTests(unittest.TestCase):
             note_store=store,
             note_controller=controller,
             app_state=state,
+            restored_state=restored_state,
         )
 
     def test_constructs_and_reports_default_size(self) -> None:
@@ -334,6 +351,84 @@ class MainWindowConstructionTests(unittest.TestCase):
         self.assertIsInstance(stack, Gtk.Stack)
         self.assertIs(stack.get_child_by_name("view"), window._note_view)
         self.assertIs(stack.get_child_by_name("edit"), window._note_editor)
+
+
+@unittest.skipUnless(_display_available(), "no GDK display")
+class RestoredSessionStateTests(unittest.TestCase):
+    """A restored :class:`SessionState` overrides the computed default
+    window size and drives the maximized state; omitting it (the
+    :data:`DEFAULT_SESSION_STATE` default) reproduces today's
+    unrestored behaviour."""
+
+    def _build_window(self, *, restored_state: SessionState) -> MainWindow:
+        application = _test_application()
+        notes = _FakeNoteRepository()
+        notes.notes["n1"] = Note(
+            id="n1",
+            title="Hello",
+            source="= Hello\n\nbody.\n",
+            snippet="body.",
+            tags=(),
+            created_at=_FIXED_NOW,
+            modified_at=_FIXED_NOW,
+        )
+        state = AppState()
+        store = NoteListStore(repository=notes)
+        store.load()
+        controller = NoteController(
+            note_store=store,
+            attachments=_FakeAttachmentStore(),
+            app_state=state,
+        )
+        return MainWindow(
+            application=application,
+            note_store=store,
+            note_controller=controller,
+            app_state=state,
+            restored_state=restored_state,
+        )
+
+    def test_no_restored_state_uses_computed_default(self) -> None:
+        window = self._build_window(restored_state=DEFAULT_SESSION_STATE)
+        expected_width = _default_window_width(
+            window._note_view.preferred_column_width_px(),
+        )
+        self.assertEqual(
+            window.get_default_size(),
+            (expected_width, 800),
+        )
+        self.assertFalse(window.is_maximized())
+
+    def test_restored_size_overrides_the_computed_default(self) -> None:
+        restored = SessionState(
+            selected_note_id=None,
+            window_size=(1500, 950),
+            window_maximized=False,
+        )
+        window = self._build_window(restored_state=restored)
+        self.assertEqual(window.get_default_size(), (1500, 950))
+
+    def test_restored_maximized_true_maximizes_the_window(self) -> None:
+        restored = SessionState(
+            selected_note_id=None,
+            window_size=(1200, 800),
+            window_maximized=True,
+        )
+        window = self._build_window(restored_state=restored)
+        window.present()
+        _pump_main_loop()
+        self.assertTrue(window.is_maximized())
+
+    def test_restored_maximized_false_does_not_maximize(self) -> None:
+        restored = SessionState(
+            selected_note_id=None,
+            window_size=(1200, 800),
+            window_maximized=False,
+        )
+        window = self._build_window(restored_state=restored)
+        window.present()
+        _pump_main_loop()
+        self.assertFalse(window.is_maximized())
 
 
 @unittest.skipUnless(_display_available(), "no GDK display")

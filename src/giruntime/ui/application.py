@@ -43,11 +43,30 @@ Principles & invariants
   resolve that from a ``.desktop`` file's ``Icon=`` key via the
   ``hicolor`` theme instead); that OS-level packaging is not done here.
 * The seeded welcome note is loaded by id (:data:`SEED_WELCOME_NOTE_ID`).
-  If the user has deleted it, the application falls back to the most
+  The restored-from-last-run note (see below) is tried first; if there
+  is none, or it no longer exists, the welcome note is tried next; if
+  the user has deleted it, the application falls back to the most
   recently modified note in the library (:meth:`NoteRepositoryProtocol.list_all`
   is sorted by ``modified_at DESC``). If no notes exist at all, the
   selection stays ``None`` and the right pane renders empty — exactly
   the policy :class:`NoteView.refresh` already implements.
+* The last-open note and the main window's size/maximized state persist
+  across launches through :class:`SessionStateStore`
+  (:mod:`storage.session_state_store`), a plain JSON file at
+  :func:`session_state_path` — not GSettings, since the app ships as an
+  installer-less zipapp with no step that would install a compiled
+  GSettings schema. The state is loaded once, in
+  :meth:`_build_initial_window`, before the window and the initial
+  selection are built, and saved once, in
+  :meth:`_on_main_window_close_request`, right before the process ends
+  — there is no intermediate autosave, since nothing between those two
+  points needs to be recovered. Both the load and the save degrade
+  gracefully: a missing, unreadable, or malformed state file behaves
+  exactly like "no prior run" (:meth:`SessionStateStore.load` never
+  raises), and a restored note id that no longer exists (the note was
+  deleted, or the database was reset and rebuilt) falls through to the
+  pre-existing welcome/newest/none chain rather than leaving the
+  selection empty or crashing.
 * Database errors during activation surface through
   :class:`sqlite3.DatabaseError`; we let them propagate. A failure to
   open the database is fatal for v1 (no data → nothing to show) and
@@ -88,11 +107,12 @@ Principles & invariants
 from __future__ import annotations
 
 import importlib.resources
+from typing import Protocol
 
 from gi.repository import Gdk, Gio, Gtk
 
 from config.defaults import SEED_WELCOME_NOTE_ID
-from config.paths import database_path
+from config.paths import database_path, session_state_path
 from enums import GResourceSubtree
 from giruntime.controllers.app_state import AppState
 from giruntime.controllers.note_controller import NoteController
@@ -100,10 +120,12 @@ from giruntime.controllers.note_list_store import NoteListStore
 from giruntime.ui import _gresource
 from giruntime.ui.help_window import HelpWindow
 from giruntime.ui.main_window import MainWindow
+from models.session_state import SessionState
 from storage.attachment_store import AttachmentStore
 from storage.database import Database
 from storage.migrations import apply_pending
 from storage.note_repository import NoteRepository
+from storage.session_state_store import SessionStateStore
 
 
 _APPLICATION_ID: str = "org.folio.Folio"
@@ -153,7 +175,27 @@ _HELP_ACCELERATOR: str = "F1"
 convention for help."""
 
 
-class NotesApplication(Gtk.Application):
+class _WindowGeometryProtocol(Protocol):
+    """The two read-only bits of window state
+    :meth:`NotesApplication._save_session_state` needs.
+
+    :class:`MainWindow` (a :class:`Gtk.ApplicationWindow`) satisfies this
+    structurally with no extra wiring — it is exactly the call surface
+    :class:`Gtk.Window` already exposes. Naming it narrows
+    ``_save_session_state``'s parameter to only what it actually calls
+    (per the project's "minimum necessary type" rule) rather than the
+    full :class:`MainWindow` widget, and lets tests substitute a
+    display-free fake instead of constructing a real window.
+    """
+
+    def get_default_size(self) -> tuple[int, int]: ...
+
+    def is_maximized(self) -> bool: ...
+
+
+class NotesApplication(  # pylint: disable=too-many-instance-attributes
+    Gtk.Application,
+):
     """The application's :class:`Gtk.Application` subclass.
 
     Holds the long-lived dependencies — database, repositories,
@@ -169,6 +211,7 @@ class NotesApplication(Gtk.Application):
     _app_state: AppState | None
     _note_controller: NoteController | None
     _help_window: HelpWindow | None
+    _session_state_store: SessionStateStore | None
 
     def __init__(self) -> None:
         super().__init__(
@@ -182,6 +225,7 @@ class NotesApplication(Gtk.Application):
         self._app_state = None
         self._note_controller = None
         self._help_window = None
+        self._session_state_store = None
 
     def do_activate(self) -> None:  # pylint: disable=arguments-differ
         """Build the world if it does not yet exist, then present a
@@ -223,6 +267,13 @@ class NotesApplication(Gtk.Application):
         first paint). The application icon is registered with the
         icon theme right after, for the same before-any-window-exists
         reason.
+
+        The :class:`SessionStateStore` is constructed here too (its
+        path resolved through :func:`session_state_path`, which — like
+        :func:`database_path` — honours ``XDG_DATA_HOME``) but not read
+        from yet; :meth:`_build_initial_window` is what calls
+        :meth:`SessionStateStore.load`, once the note store it needs to
+        validate a restored note id against already exists.
         """
         self._database = Database(database_path())
         apply_pending(self._database)
@@ -236,6 +287,7 @@ class NotesApplication(Gtk.Application):
             attachments=self._attachment_store,
             app_state=self._app_state,
         )
+        self._session_state_store = SessionStateStore(session_state_path())
         self._install_help_action()
         _load_application_css()
         _register_application_icon_resources()
@@ -260,13 +312,26 @@ class NotesApplication(Gtk.Application):
         """Construct the first :class:`MainWindow` and seed the
         selection.
 
-        After construction, the welcome note is selected if it is
-        still in the library; otherwise the most recently modified
-        note is selected; otherwise nothing is selected (the right
-        pane renders empty). Selection happens *after* window
-        construction so that the :class:`NoteView`'s
-        ``selected-note-changed`` handler is already wired by the
-        time the signal fires.
+        The session state saved on the previous run — if any — is
+        loaded here (once, before the window exists) and used two
+        ways: :meth:`_select_initial_note` tries its ``selected_note_id``
+        first, ahead of the welcome/newest/none fallback; and
+        :class:`MainWindow` is constructed with the whole
+        :class:`SessionState` so it can restore the saved window
+        size/maximized state instead of always using its computed
+        default. A missing or unparsable saved state resolves to
+        :data:`models.session_state.DEFAULT_SESSION_STATE`
+        (:meth:`SessionStateStore.load` never raises), which is
+        indistinguishable from "no prior run" to both consumers —
+        first launch is not a special case here.
+
+        After construction, the restored note is selected if it still
+        exists; otherwise the welcome note is selected if it is still
+        in the library; otherwise the most recently modified note is
+        selected; otherwise nothing is selected (the right pane renders
+        empty). Selection happens *after* window construction so that
+        the :class:`NoteView`'s ``selected-note-changed`` handler is
+        already wired by the time the signal fires.
         """
         # Local non-None aliases — narrows ``Optional`` for the type
         # checker and documents the precondition that
@@ -275,6 +340,9 @@ class NotesApplication(Gtk.Application):
         assert self._attachment_store is not None
         assert self._app_state is not None
         assert self._note_controller is not None
+        assert self._session_state_store is not None
+
+        restored_state = self._session_state_store.load()
 
         window = MainWindow(
             application=self,
@@ -282,17 +350,25 @@ class NotesApplication(Gtk.Application):
             note_controller=self._note_controller,
             app_state=self._app_state,
             attachment_store=self._attachment_store,
+            restored_state=restored_state,
         )
         # The main window is the application's primary window: closing it
         # must end the program even when the hide-on-close help window is
         # still registered (and merely hidden). See
         # :meth:`_on_main_window_close_request`.
         window.connect("close-request", self._on_main_window_close_request)
-        self._select_initial_note(self._note_store, self._app_state)
+        self._select_initial_note(
+            self._note_store,
+            self._app_state,
+            restored_state.selected_note_id,
+        )
         return window
 
-    def _on_main_window_close_request(self, _window: MainWindow) -> bool:
-        """Quit the application when its primary window is closed.
+    def _on_main_window_close_request(
+        self,
+        window: _WindowGeometryProtocol,
+    ) -> bool:
+        """Save session state, then quit the application.
 
         ``Gtk.Application`` keeps its main loop alive while *any* window
         is registered with it, and registration tracks windows by
@@ -312,12 +388,48 @@ class NotesApplication(Gtk.Application):
         ever introduced, this would need to quit on the *last* one
         instead.
 
+        The session-state save happens first, and only here: this is
+        the one point in the app's lifetime that is both after the
+        user's last possible interaction and guaranteed to run before
+        the process exits, so there is nothing later to capture and
+        nothing earlier that would need re-saving.
+
         Returns ``False`` so GTK's default handler still runs and
         destroys the window — the veto path (returning ``True``) is never
         wanted here.
         """
+        self._save_session_state(window)
         self.quit()
         return False
+
+    def _save_session_state(self, window: _WindowGeometryProtocol) -> None:
+        """Persist the current note selection and window geometry.
+
+        ``Gtk.Window.get_default_size`` is GTK's own documented
+        round-trip getter for this purpose: unlike the live allocated
+        size, it keeps reporting the pre-maximize size while the window
+        is maximized, so saving it (alongside the separate
+        :meth:`Gtk.Window.is_maximized` flag) and restoring both on the
+        next launch puts an un-maximized window back exactly where the
+        user last left it. A ``(0, 0)`` reading — GTK's documented
+        signal that no explicit size was ever set — is treated as "no
+        size to save" rather than persisted verbatim; every real
+        :class:`MainWindow` calls :meth:`Gtk.Window.set_default_size`
+        during construction, so this only guards a degenerate case, the
+        same role :data:`_MIN_DEFAULT_WINDOW_WIDTH_PX` plays in
+        :mod:`giruntime.ui.main_window`.
+        """
+        assert self._app_state is not None
+        assert self._session_state_store is not None
+
+        width, height = window.get_default_size()
+        window_size = (width, height) if width > 0 and height > 0 else None
+        state = SessionState(
+            selected_note_id=self._app_state.selected_note_id,
+            window_size=window_size,
+            window_maximized=window.is_maximized(),
+        )
+        self._session_state_store.save(state)
 
     def _on_help_activated(
         self,
@@ -359,17 +471,32 @@ class NotesApplication(Gtk.Application):
     def _select_initial_note(
         store: NoteListStore,
         app_state: AppState,
+        restored_note_id: str | None,
     ) -> None:
-        """Pick the welcome note, or fall back to the newest note.
+        """Pick the restored note, the welcome note, or the newest note.
 
         Reads the in-memory store — the same truth the panes bind to —
         rather than the repository, so startup selection cannot diverge
-        from what the views show. The two-step fallback (welcome →
-        newest → none) keeps the first-launch experience predictable
+        from what the views show. ``restored_note_id`` (the last-open
+        note from a previous run, or ``None`` if there isn't one — see
+        :meth:`_build_initial_window`) is tried first; a ``KeyError``
+        from :meth:`NoteListStore.get_note` (the note was deleted, or
+        the database was reset and rebuilt without it) falls through to
+        the pre-existing three-step chain unchanged: welcome → newest →
+        none. That chain keeps the first-launch experience predictable
         while not breaking the app for a user who has cleaned out their
-        library. The fallback chain is documented at the module level —
-        keep them in sync.
+        library, or reset their database, or both. The fallback chain
+        is documented at the module level — keep them in sync.
         """
+        if restored_note_id is not None:
+            try:
+                restored = store.get_note(restored_note_id)
+            except KeyError:
+                restored = None
+            if restored is not None:
+                app_state.set_selected_note_id(restored.id)
+                return
+
         try:
             welcome = store.get_note(SEED_WELCOME_NOTE_ID)
         except KeyError:

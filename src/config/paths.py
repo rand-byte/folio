@@ -32,6 +32,17 @@ APP_DIRECTORY_NAME: str = "folio"
 DATABASE_FILENAME: str = "notes.db"
 """The single SQLite file inside the app directory."""
 
+SESSION_STATE_FILENAME: str = "state.json"
+"""The single session-state file inside the app directory.
+
+Holds the last-open note id and the window's last size/maximized state
+(:class:`storage.session_state_store.SessionState`). A plain JSON file,
+not GSettings: the app ships as an installer-less zipapp with no step
+that would compile and install a GSettings schema, and a sibling file
+here keeps every piece of persistent state inside the one directory
+:func:`data_directory` promises holds everything.
+"""
+
 XDG_DATA_HOME_ENV: str = "XDG_DATA_HOME"
 """Environment variable consulted before falling back to ~/.local/share."""
 
@@ -61,6 +72,18 @@ def database_path() -> Path:
     or creating it).
     """
     return data_directory() / DATABASE_FILENAME
+
+
+def session_state_path() -> Path:
+    """Return the absolute path to the session-state file.
+
+    Same contract as :func:`database_path`: the parent directory is
+    guaranteed to exist on return, but the file itself may or may not —
+    a first launch has no prior session to restore, and
+    :class:`storage.session_state_store.SessionStateStore` treats a
+    missing file as "use defaults", not an error.
+    """
+    return data_directory() / SESSION_STATE_FILENAME
 
 
 def _xdg_data_root() -> Path:

@@ -8,8 +8,8 @@ Principles & invariants
   from a higher layer (controllers, ui), and at runtime it never imports
   ``gi`` or ``sqlite3``. Concrete implementations live in sibling modules
   (``note_repository.py``, ``attachment_store.py``,
-  ``ui/note_render/textbuffer_renderer.py``) and depend on this module —
-  never the other way round.
+  ``session_state_store.py``, ``ui/note_render/textbuffer_renderer.py``)
+  and depend on this module — never the other way round.
 * Every method signature uses **specific** parameter and return types —
   no ``Any``, no ``object``. The protocol *is* the contract; vague types
   here propagate vagueness to every call site.
@@ -41,6 +41,7 @@ from typing import TYPE_CHECKING, Protocol
 from enums import AttachmentRejectionReason
 from models.attachment import Attachment
 from models.note import Note
+from models.session_state import SessionState
 
 if TYPE_CHECKING:
     # GTK is only a runtime dependency from build step 8 onwards. Pulling
@@ -218,6 +219,27 @@ class AttachmentStoreProtocol(Protocol):
         surface a per-note attachment badge cheaply without touching the
         metadata/bytes split that the rest of this protocol enforces.
         """
+
+
+class SessionStateProtocol(Protocol):
+    """Read/write surface for the last-open-note and window session state.
+
+    Unlike :class:`NoteRepositoryProtocol` / :class:`AttachmentStoreProtocol`,
+    neither method raises to the caller: a missing, unreadable, or
+    malformed state file is not an error the rest of the app should ever
+    have to handle — :meth:`load` returns
+    :data:`models.session_state.DEFAULT_SESSION_STATE` instead, so the
+    caller always gets a usable value and startup can never be blocked
+    by a corrupt session file.
+    """
+
+    def load(self) -> SessionState:
+        """Return the persisted session state, or
+        :data:`models.session_state.DEFAULT_SESSION_STATE` if none exists
+        or the stored one could not be parsed."""
+
+    def save(self, state: SessionState) -> None:
+        """Persist ``state``, replacing whatever was previously saved."""
 
 
 class RendererProtocol(Protocol):

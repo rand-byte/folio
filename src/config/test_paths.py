@@ -130,5 +130,58 @@ class DatabasePathTests(unittest.TestCase):
             self.assertFalse(db.exists())
 
 
+class SessionStatePathTests(unittest.TestCase):
+    def test_returns_state_filename_inside_data_directory(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_str:
+            with mock.patch.dict(
+                os.environ,
+                {paths.XDG_DATA_HOME_ENV: tmp_str},
+                clear=False,
+            ):
+                state_path = paths.session_state_path()
+                expected = (
+                    Path(tmp_str)
+                    / paths.APP_DIRECTORY_NAME
+                    / paths.SESSION_STATE_FILENAME
+                )
+            self.assertEqual(state_path, expected)
+
+    def test_parent_directory_exists_after_call(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_str:
+            with mock.patch.dict(
+                os.environ,
+                {paths.XDG_DATA_HOME_ENV: tmp_str},
+                clear=False,
+            ):
+                state_path = paths.session_state_path()
+            self.assertTrue(state_path.parent.is_dir())
+
+    def test_does_not_create_state_file(self) -> None:
+        # The helper only ensures the directory; a first launch has no
+        # prior session, and SessionStateStore treats that as "use
+        # defaults", not an error.
+        with tempfile.TemporaryDirectory() as tmp_str:
+            with mock.patch.dict(
+                os.environ,
+                {paths.XDG_DATA_HOME_ENV: tmp_str},
+                clear=False,
+            ):
+                state_path = paths.session_state_path()
+            self.assertFalse(state_path.exists())
+
+    def test_distinct_from_database_path(self) -> None:
+        # Both files live in the same directory but must not collide.
+        with tempfile.TemporaryDirectory() as tmp_str:
+            with mock.patch.dict(
+                os.environ,
+                {paths.XDG_DATA_HOME_ENV: tmp_str},
+                clear=False,
+            ):
+                db = paths.database_path()
+                state_path = paths.session_state_path()
+            self.assertEqual(db.parent, state_path.parent)
+            self.assertNotEqual(db.name, state_path.name)
+
+
 if __name__ == "__main__":
     unittest.main()
