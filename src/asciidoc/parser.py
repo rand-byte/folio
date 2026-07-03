@@ -49,21 +49,38 @@ Principles & invariants
   the exact source line, never at the first line of the paragraph.
   Lines are joined in the AST with :class:`SoftBreak` connectors.
 * Lists may nest up to :data:`config.defaults.MAX_LIST_DEPTH` levels,
-  ordered and unordered, mixed freely: the repeated-marker run length
-  is the depth (``*``/``.`` = 1, ``**``/``..`` = 2, ``***``/``...`` = 3).
-  A single stack-based builder (:meth:`_Parser._parse_list`) turns the
-  flat run of depth-tagged list tokens into a recursive tree, where each
-  :class:`ListItem` carries its own inline text plus its child sub-lists.
-  A blank line internal to a list is a separator, not a terminator: the
-  run continues across it when the next non-blank line is another list
-  item (so ordered numbering stays continuous rather than restarting). A
-  run is terminated by the first non-blank, non-list token (heading,
-  fence, paragraph, EOF) or by a *top-level* marker whose kind differs
-  from the list it opened (which starts a sibling list block, preserving
-  the original flat-list bullet→number split). Three depth conditions are
-  hard errors, checked
-  in this precedence: starts-below-top-level, skips-a-level, too-deep.
-  Multi-line items and ``+`` continuations remain deferred.
+  ordered and unordered, mixed freely. Within a single marker kind the
+  repeated-marker run length is the depth (``*``/``.`` = 1, ``**``/``..``
+  = 2, ``***``/``...`` = 3). A single stack-based builder
+  (:meth:`_Parser._parse_list`) turns the flat run of depth-tagged list
+  tokens into a recursive tree, where each :class:`ListItem` carries its
+  own inline text plus its child sub-lists. **A marker whose ``(kind,
+  depth)`` signature is not already open anywhere on the stack always
+  begins one new nesting level under the item currently being built** —
+  this is what lets ``* A`` immediately followed by ``. B`` nest ``B``
+  under ``A`` rather than starting a second, sibling list, matching the
+  rule that a new list level is created for each unique marker
+  encountered, independent of numeric run length. A marker whose
+  signature *is* already open — either the current deepest frame or an
+  ancestor — instead resumes at that existing level: an exact match on
+  the current frame starts a sibling item there, and a match further up
+  the stack closes the intervening frames (hanging each as a child of
+  its parent's current item) before starting the sibling item, so
+  reusing an outer-level marker returns to that outer level rather than
+  opening yet another one. A blank line internal to a list is a
+  separator, not a terminator: the run continues across it when the next
+  non-blank line is another list item (so ordered numbering stays
+  continuous rather than restarting). A run is terminated by the first
+  non-blank, non-list token (heading, fence, paragraph, EOF) — a marker
+  kind change alone, at any depth, no longer ends the run. Three depth
+  conditions are hard errors, checked in this precedence:
+  starts-below-top-level, skips-a-level, too-deep. The skips-a-level
+  check only constrains a *same-kind* deepening (run length must be
+  exactly the parent's plus one); a kind switch that opens a level not
+  already on the stack carries no such run-length expectation of its
+  own — only the too-deep cap, now measured by resulting stack depth
+  rather than the token's raw run length, still applies. Multi-line
+  items and ``+`` continuations remain deferred.
 """
 
 # The module's size reflects the asciidoc subset's full surface area —
@@ -212,8 +229,12 @@ class _OpenList:
 
     ``kind`` is the marker kind (:data:`TokenKind.LIST_BULLET` or
     :data:`TokenKind.LIST_NUMBER`); it decides whether the finished list
-    is an :class:`UnorderedList` or an :class:`OrderedList` and whether a
-    same-depth marker is a sibling item or a type switch.
+    is an :class:`UnorderedList` or an :class:`OrderedList`. Together
+    with ``depth``, ``(kind, depth)`` is the frame's *signature* —
+    :meth:`_Parser._parse_list` matches an incoming token's signature
+    against the open frames to decide whether it is a sibling item on
+    an already-open frame (signature matches) or the start of a brand
+    new nesting level (signature matches nothing currently open).
     """
 
     kind: TokenKind
@@ -605,30 +626,33 @@ class _Parser:
 
         Walks the flat run of depth-tagged :class:`ListBulletToken` /
         :class:`ListNumberToken` tokens with an explicit stack of
-        :class:`_OpenList` frames (depth-1 root … deepest open sub-list).
-        For each list token, relative to the deepest open frame:
+        :class:`_OpenList` frames (depth-1 root … deepest open sub-list),
+        each identified by its ``(kind, depth)`` signature. For each list
+        token, relative to the open frames:
 
-        * **deeper** — open a new sub-list on the current item, after the
-          skip-level and depth-cap checks;
-        * **same depth, same kind** — finalise the current item and start
-          a sibling item;
-        * **same depth, different kind** — at the top level, stop so the
-          block loop starts a sibling list block (the original
-          bullet→number split); nested, end the sub-list and start a
-          sibling sub-list under the same parent item;
-        * **shallower** — pop frames until the depths match, then re-apply
-          the same-depth rule.
+        * **matches the current (deepest) frame's signature** — finalise
+          its current item and start a sibling item on it;
+        * **matches an ancestor frame's signature** — pop frames down to
+          that ancestor (hanging each popped frame under its parent's
+          current item), then start a sibling item on it, exactly as
+          above. This is what lets an outer-level marker reappear after a
+          deeper digression and resume at its original level instead of
+          opening yet another one;
+        * **matches no open frame at all** — the marker has not been seen
+          anywhere in this run, so it always opens one new nesting level
+          under the item the deepest frame is currently building (see
+          :meth:`_open_deeper` for the skip-level / depth-cap checks that
+          gate this).
 
         A blank line internal to the run is a separator, not a terminator:
         when the next non-blank token is another list marker the blank run
         is absorbed (via :meth:`_run_continues_after_blanks`) and the list
         continues across it. The run ends at the first non-blank, non-list
-        token (heading, fence, paragraph, EOF) or at a top-level type
-        switch; in either case ``self.pos`` is left on the terminating
-        token — a blank that ends the run is left in place so
-        :meth:`_parse_blocks` skips it exactly as before. The three depth
-        errors are raised with the precedence pinned in the module
-        docstring.
+        token (heading, fence, paragraph, EOF); ``self.pos`` is left on
+        that terminating token — a blank that ends the run is left in
+        place so :meth:`_parse_blocks` skips it exactly as before. The
+        three depth errors are raised with the precedence pinned in the
+        module docstring.
         """
         stack: list[_OpenList] = []
         while self.pos < len(self.tokens):
@@ -660,31 +684,50 @@ class _Parser:
                 self.pos += 1
                 continue
 
-            if token.depth > stack[-1].depth:
-                self._open_deeper(stack, token)
-                self.pos += 1
-                continue
-
-            # Same depth or shallower: dedent to the matching frame first.
-            while stack[-1].depth > token.depth:
-                self._close_top(stack)
             top = stack[-1]
-            if top.kind == token.kind:
+            if token.kind == top.kind and token.depth == top.depth:
                 self._start_sibling_item(top, token)
                 self.pos += 1
                 continue
-            # Same depth, different kind.
-            if top.depth == _TOP_LIST_DEPTH:
-                # A top-level type switch ends this list; the block loop
-                # picks the next token up as a sibling list block.
-                break
-            # Nested type switch: end the sub-list, start a sibling
-            # sub-list under the same parent item.
-            self._close_top(stack)
-            stack.append(self._open_list(token))
+
+            ancestor_index = self._find_matching_frame(stack, token)
+            if ancestor_index is not None:
+                while len(stack) - 1 > ancestor_index:
+                    self._close_top(stack)
+                self._start_sibling_item(stack[ancestor_index], token)
+                self.pos += 1
+                continue
+
+            # No open frame carries this signature: it is a marker not
+            # yet seen in this run, so it always deepens by one level
+            # under the item the current deepest frame is building.
+            self._open_deeper(stack, token)
             self.pos += 1
 
         return self._close_all(stack)
+
+    @staticmethod
+    def _find_matching_frame(
+        stack: list[_OpenList],
+        token: ListBulletToken | ListNumberToken,
+    ) -> int | None:
+        """Return the index of the open frame whose signature matches.
+
+        Searches the stack excluding its top (the caller already checked
+        the top frame itself via the fast same-signature path in
+        :meth:`_parse_list`), from the nearest ancestor outward, for a
+        frame whose ``(kind, depth)`` equals ``token``'s. Returns ``None``
+        when the marker's signature is not currently open anywhere,
+        meaning it starts a brand new nesting level rather than resuming
+        an existing one. Signatures are unique across the stack: a token
+        that matched an already-open frame always resumes there instead
+        of opening a duplicate, so at most one index can ever match.
+        """
+        for index in range(len(stack) - 2, -1, -1):
+            frame = stack[index]
+            if frame.kind == token.kind and frame.depth == token.depth:
+                return index
+        return None
 
     def _run_continues_after_blanks(self) -> bool:
         """Report whether a list run continues past the blanks at ``pos``.
@@ -725,33 +768,54 @@ class _Parser:
         stack: list[_OpenList],
         token: ListBulletToken | ListNumberToken,
     ) -> None:
-        """Push a deeper sub-list, enforcing skip-level then depth-cap.
+        """Push a new deepest frame, enforcing skip-level then depth-cap.
 
-        The precedence here is half of the module-level ordering: a jump
-        of more than +1 is a skip (caught first), and a clean +1 step that
-        crosses the cap is too-deep. ``LIST_STARTS_BELOW_TOP_LEVEL`` is
-        handled by the first-item check in :meth:`_parse_list`, so it
-        never competes with these two.
+        Reached only when ``token``'s ``(kind, depth)`` signature matches
+        no frame currently open (:meth:`_parse_list` handles same-frame
+        and ancestor-frame matches itself), so this always adds one level
+        under the item the current deepest frame is building. Two
+        different legality checks apply depending on ``token``'s kind:
+
+        * **Same kind as the current deepest frame** — the
+          repeated-marker-run-length convention is in effect for that
+          kind's chain, so ``token.depth`` must be exactly one more than
+          the current frame's, else :class:`ParseErrorKind.
+          LIST_NESTING_SKIPS_LEVEL`.
+        * **Different kind** — this marker has no run-length precedent of
+          its own at this position (nothing of its kind is open here), so
+          any run length is accepted; only the depth cap below applies.
+          This is why ``* a`` / ``.. b`` may open directly at depth two —
+          ``..`` is simply ``b``'s own first-appearance marker, not a
+          "jump" relative to ``a``'s unrelated bullet chain.
+
+        Either way the resulting stack depth (``len(stack) + 1``) — not
+        ``token.depth``, which no longer tracks stack depth once kind
+        switches are involved — must not exceed
+        :data:`config.defaults.MAX_LIST_DEPTH`, else :class:`ParseErrorKind.
+        LIST_NESTING_TOO_DEEP`. ``LIST_STARTS_BELOW_TOP_LEVEL`` is handled
+        by the first-item check in :meth:`_parse_list`, so it never
+        competes with these two.
         """
-        parent_depth = stack[-1].depth
-        if token.depth != parent_depth + 1:
+        top = stack[-1]
+        if token.kind == top.kind and token.depth != top.depth + 1:
             raise ParseError(
                 line=token.line,
                 column=0,
                 message=(
-                    f"list item jumps from depth {parent_depth} to "
+                    f"list item jumps from depth {top.depth} to "
                     f"{token.depth}; nesting may deepen by only one level "
                     "at a time"
                 ),
                 kind=ParseErrorKind.LIST_NESTING_SKIPS_LEVEL,
             )
-        if token.depth > MAX_LIST_DEPTH:
+        new_stack_depth = len(stack) + 1
+        if new_stack_depth > MAX_LIST_DEPTH:
             raise ParseError(
                 line=token.line,
                 column=0,
                 message=(
-                    f"list nests {token.depth} levels deep; the maximum is "
-                    f"{MAX_LIST_DEPTH}"
+                    f"list nests {new_stack_depth} levels deep; the "
+                    f"maximum is {MAX_LIST_DEPTH}"
                 ),
                 kind=ParseErrorKind.LIST_NESTING_TOO_DEEP,
             )
@@ -792,9 +856,10 @@ class _Parser:
     def _close_top(stack: list[_OpenList]) -> None:
         """Pop the deepest frame and hang it under its parent's item.
 
-        Only called while a parent frame exists (during dedent and nested
-        type switches, and by :meth:`_close_all` down to the root), so the
-        built sub-list always has a current item to attach to.
+        Only called while a parent frame exists (while dedenting to a
+        matching ancestor frame in :meth:`_parse_list`, and by
+        :meth:`_close_all` down to the root), so the built sub-list
+        always has a current item to attach to.
         """
         child = _Parser._build_list(stack.pop())
         stack[-1].cur_children.append(child)

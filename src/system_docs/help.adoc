@@ -189,6 +189,8 @@ An *unordered* list uses a leading `*`; an *ordered* list uses a leading
 * Second point
 * Third point
 
+Numbered:
+
 . First step
 . Second step
 . Third step
@@ -198,15 +200,36 @@ An *unordered* list uses a leading `*`; an *ordered* list uses a leading
 * Second point
 * Third point
 
+Numbered:
+
 . First step
 . Second step
 . Third step
 ----
 
-Lists *nest* up to three levels deep: repeat the marker once more for
-each level (`**` or `..` for level two, `***` or `...` for level three).
-A space must follow the marker run. Levels may mix freely — an ordered
-sublist can sit under an unordered item and the reverse:
+Switching the marker character on the very next line, with no other text
+between the two lists, does *not* start a second list at the same level —
+it nests the new marker one level under the item above it, since a new
+nesting level is created for every marker not already open, regardless of
+how many characters it repeats. So `* A` immediately followed by `. B`
+renders `B` nested under `A`:
+
+* A
+. B
+
+----
+* A
+. B
+----
+
+To keep two lists like the "First point" / "Numbered" example above
+fully separate, put something other than a blank line between them — a
+short line of text, as shown, or a heading.
+
+Lists also *nest* by repeating the marker once more for each level (`**`
+or `..` for level two, `***` or `...` for level three). A space must
+follow the marker run. Levels may mix freely — an ordered sublist can
+sit under an unordered item and the reverse:
 
 * Produce
 ** Apples

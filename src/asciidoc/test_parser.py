@@ -488,31 +488,101 @@ class NestedListTests(unittest.TestCase):
         self.assertEqual(len(top.items[0].children), 1)
         self.assertEqual(top.items[1].children, ())
 
-    def test_same_depth_type_switch_yields_two_sibling_lists(self) -> None:
+    def test_top_level_type_switch_nests_one_level(self) -> None:
+        # A marker-kind switch, even at the top level, is a marker not
+        # already open anywhere: it nests one level under the preceding
+        # item rather than starting a second, sibling list.
         doc = parse("* a\n. b\n")
-        self.assertEqual(len(doc.blocks), 2)
-        first, second = doc.blocks
-        self.assertIsInstance(first, UnorderedList)
-        self.assertIsInstance(second, OrderedList)
+        self.assertEqual(len(doc.blocks), 1)
+        top = doc.blocks[0]
+        assert isinstance(top, UnorderedList)
+        self.assertEqual(len(top.items), 1)
+        item = top.items[0]
+        self.assertEqual(_item_text(item), "a")
+        self.assertEqual(len(item.children), 1)
+        sub = item.children[0]
+        assert isinstance(sub, OrderedList)
+        self.assertEqual(_item_text(sub.items[0]), "b")
 
-    def test_nested_type_switch_makes_sibling_sublists(self) -> None:
-        # Two sub-lists of different kinds hang under the same item.
+    def test_nested_type_switch_nests_under_the_preceding_item(self) -> None:
+        # ``c``'s marker (``**``) has not been seen anywhere in this run
+        # (``b`` opened with ``..``), so it nests under ``b`` rather than
+        # becoming a second sub-list sibling to ``b`` under ``a``.
         doc = parse("* a\n.. b\n** c\n")
         top = doc.blocks[0]
         assert isinstance(top, UnorderedList)
-        children = top.items[0].children
-        self.assertEqual(len(children), 2)
-        self.assertIsInstance(children[0], OrderedList)
-        self.assertIsInstance(children[1], UnorderedList)
+        a = top.items[0]
+        self.assertEqual(len(a.children), 1)
+        b_list = a.children[0]
+        assert isinstance(b_list, OrderedList)
+        b = b_list.items[0]
+        self.assertEqual(_item_text(b), "b")
+        self.assertEqual(len(b.children), 1)
+        c_list = b.children[0]
+        assert isinstance(c_list, UnorderedList)
+        self.assertEqual(_item_text(c_list.items[0]), "c")
 
-    def test_blank_separated_type_switch_still_splits_siblings(self) -> None:
-        # The blank is absorbed, then the top-level bullet→number switch
-        # runs exactly as in the no-blank case: two sibling list blocks.
+    def test_blank_separated_type_switch_still_nests(self) -> None:
+        # The blank is absorbed, then the top-level type switch runs
+        # exactly as in the no-blank case: ``b`` nests under ``a``.
         doc = parse("* a\n\n. b\n")
-        self.assertEqual(len(doc.blocks), 2)
-        first, second = doc.blocks
-        self.assertIsInstance(first, UnorderedList)
-        self.assertIsInstance(second, OrderedList)
+        self.assertEqual(len(doc.blocks), 1)
+        top = doc.blocks[0]
+        assert isinstance(top, UnorderedList)
+        item = top.items[0]
+        self.assertEqual(len(item.children), 1)
+        sub = item.children[0]
+        assert isinstance(sub, OrderedList)
+        self.assertEqual(_item_text(sub.items[0]), "b")
+
+    def test_reusing_an_outer_marker_returns_to_that_level(self) -> None:
+        # Mirrors the canonical AsciiDoc "Linux / Fedora / Ubuntu / BSD /
+        # FreeBSD" example: a marker that reappears after a deeper
+        # digression resumes its original level as a sibling item, it
+        # does not open yet another nested level.
+        doc = parse(". Linux\n* Fedora\n* Ubuntu\n. BSD\n* FreeBSD\n")
+        top = doc.blocks[0]
+        assert isinstance(top, OrderedList)
+        self.assertEqual([_item_text(i) for i in top.items], ["Linux", "BSD"])
+        linux, bsd = top.items
+        self.assertEqual(len(linux.children), 1)
+        linux_sub = linux.children[0]
+        assert isinstance(linux_sub, UnorderedList)
+        self.assertEqual(
+            [_item_text(i) for i in linux_sub.items], ["Fedora", "Ubuntu"]
+        )
+        self.assertEqual(len(bsd.children), 1)
+        bsd_sub = bsd.children[0]
+        assert isinstance(bsd_sub, UnorderedList)
+        self.assertEqual(_item_text(bsd_sub.items[0]), "FreeBSD")
+
+    def test_kind_switch_deepens_from_a_nested_level(self) -> None:
+        # ``c``'s marker (``.``) matches no open frame (``a`` is a bullet,
+        # ``b`` is a deeper bullet) so it opens a third level under ``b``.
+        doc = parse("* a\n** b\n. c\n")
+        top = doc.blocks[0]
+        assert isinstance(top, UnorderedList)
+        a = top.items[0]
+        b_list = a.children[0]
+        assert isinstance(b_list, UnorderedList)
+        b = b_list.items[0]
+        self.assertEqual(len(b.children), 1)
+        c_list = b.children[0]
+        assert isinstance(c_list, OrderedList)
+        self.assertEqual(_item_text(c_list.items[0]), "c")
+
+    def test_kind_switch_chain_can_still_raise_too_deep(self) -> None:
+        # Every line opens a marker not yet seen in the run, so each one
+        # deepens by a level regardless of its own run length; the fourth
+        # level exceeds MAX_LIST_DEPTH (3) even though no single jump in
+        # raw marker-run-length looks larger than two.
+        with self.assertRaises(ParseError) as ctx:
+            parse("* a\n. b\n** c\n.. d\n")
+        self.assertEqual(
+            ctx.exception.kind,
+            ParseErrorKind.LIST_NESTING_TOO_DEEP,
+        )
+        self.assertEqual(ctx.exception.line, 4)
 
     def test_blank_inside_nested_list_keeps_one_tree(self) -> None:
         # A blank between two nested items is absorbed; the whole run is
