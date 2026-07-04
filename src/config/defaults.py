@@ -87,6 +87,43 @@ table's length equals it — so the cap and the presentation tables cannot
 drift.
 """
 
+LIST_MARKER_FIELD_CHARS: int = 3
+"""Width of the list-marker field, as a multiple of the body ``"M"`` width.
+
+The rendered view lays each list item out with a *right-aligned* marker and
+a *hanging indent*. Each item line is ``\\t{marker}\\t{text}``, and the
+depth's paragraph tag carries two tab stops (both measured from the tag's
+``left-margin``): a ``RIGHT`` stop at ``FIELD`` and a ``LEFT`` stop at
+``FIELD + GAP``, where ``FIELD = LIST_MARKER_FIELD_CHARS * char_width_px``
+and ``GAP = round(LIST_MARKER_GAP_CHARS * char_width_px)``. The leading tab
+right-aligns the marker so its trailing ``.`` lands on the ``FIELD`` column
+(periods align within a list, regardless of marker width); the second tab
+drops the text on the ``FIELD + GAP`` column. Because these positions are
+fixed per depth — not measured per list — the text column is identical for
+every list at a given depth, so sibling sub-lists whose markers differ in
+width still align their text.
+
+Three M-widths comfortably holds the 3–4-glyph ordinals notes produce
+(``123.``, ``xviii.``, ``ab.``). A marker *wider* than ``FIELD`` (e.g.
+``1000.``) still right-aligns, so it simply extends further left into the
+indent — a rare, accepted overflow rather than a case designed around.
+Larger ``FIELD`` is safer against overflow but floats short markers further
+right; smaller is tighter but overflows sooner. Like the other rendered-view
+metrics it is a typography decision, not a runtime knob.
+(:mod:`giruntime.ui.note_render.tag_table` builds the per-depth tags,
+:mod:`giruntime.ui.note_render.textbuffer_renderer` emits the item lines.)
+"""
+
+LIST_MARKER_GAP_CHARS: float = 0.6
+"""Gap between a list marker's period column and the item text.
+
+Expressed as a multiple of the body ``"M"`` width; the pixel gap is
+``round(LIST_MARKER_GAP_CHARS * char_width_px)``. The per-depth nesting step
+is ``STEP = FIELD + GAP`` (see :data:`LIST_MARKER_FIELD_CHARS`), so a child
+list's marker field begins exactly at its parent's text column. A typography
+decision, not a runtime knob.
+"""
+
 TARGET_CHARS_PER_LINE: int = 66
 """Target text-column width in characters for the rendered view.
 

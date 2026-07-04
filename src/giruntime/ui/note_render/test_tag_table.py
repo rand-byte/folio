@@ -17,9 +17,15 @@ from giruntime.ui.note_render.tag_table import (
     build_tag_table,
     build_wash_specs,
     heading_tag_name,
+    list_item_tag_name,
 )
 from enums import AdmonitionKind, WashShape
-from config.defaults import TABLE_CELL_HPADDING_PX
+from config.defaults import (
+    LIST_MARKER_FIELD_CHARS,
+    LIST_MARKER_GAP_CHARS,
+    MAX_LIST_DEPTH,
+    TABLE_CELL_HPADDING_PX,
+)
 
 
 # Default M-width used by tests that don't care about the actual
@@ -68,6 +74,8 @@ class TagNameTests(unittest.TestCase):
         self.assertEqual(TagName.LINK.value, "link")
         self.assertEqual(TagName.HEADING_0.value, "heading_0")
         self.assertEqual(TagName.HEADING_6.value, "heading_6")
+        self.assertEqual(TagName.LIST_ITEM_1.value, "list_item_1")
+        self.assertEqual(TagName.LIST_ITEM_3.value, "list_item_3")
         self.assertEqual(
             TagName.ADMONITION_NOTE_LABEL.value, "admonition_note_label"
         )
@@ -114,6 +122,9 @@ class TagNameTests(unittest.TestCase):
             "HEADING_4",
             "HEADING_5",
             "HEADING_6",
+            "LIST_ITEM_1",
+            "LIST_ITEM_2",
+            "LIST_ITEM_3",
             "ADMONITION_NOTE_LABEL",
             "ADMONITION_TIP_LABEL",
             "ADMONITION_IMPORTANT_LABEL",
@@ -169,6 +180,103 @@ class HeadingTagNameTests(unittest.TestCase):
             with self.subTest(level=level):
                 with self.assertRaises(KeyError):
                     heading_tag_name(level)
+
+
+class ListItemTagNameTests(unittest.TestCase):
+    def test_each_depth_maps_to_enum_member(self) -> None:
+        for depth, expected in (
+            (1, TagName.LIST_ITEM_1),
+            (2, TagName.LIST_ITEM_2),
+            (3, TagName.LIST_ITEM_3),
+        ):
+            with self.subTest(depth=depth):
+                self.assertIs(list_item_tag_name(depth), expected)
+
+    def test_mapping_covers_exactly_max_list_depth(self) -> None:
+        # One list-item tag per legal depth — the depth cap and this
+        # presentation table cannot drift (mirrors the renderer's
+        # glyph / ordinal-style tables).
+        for depth in range(1, MAX_LIST_DEPTH + 1):
+            with self.subTest(depth=depth):
+                self.assertIsInstance(list_item_tag_name(depth), TagName)
+
+    def test_depth_zero_and_beyond_cap_raise_key_error(self) -> None:
+        for depth in (0, -1, MAX_LIST_DEPTH + 1, 100):
+            with self.subTest(depth=depth):
+                with self.assertRaises(KeyError):
+                    list_item_tag_name(depth)
+
+
+class ListItemTagPropertyTests(unittest.TestCase):
+    """Each depth's tag right-aligns the marker and hangs wrapped lines.
+
+    ``left-margin`` steps by ``STEP`` per depth; the tabs are a ``RIGHT``
+    stop at ``FIELD`` (marker/period column) then a ``LEFT`` stop at
+    ``FIELD + GAP`` (text column); ``indent`` is ``-(FIELD + GAP)`` so
+    wrapped continuation lines hang under the text column. Here
+    ``FIELD = LIST_MARKER_FIELD_CHARS * char_width_px``,
+    ``GAP = round(LIST_MARKER_GAP_CHARS * char_width_px)``, and
+    ``STEP = FIELD + GAP``.
+    """
+
+    table: Gtk.TextTagTable
+
+    def setUp(self) -> None:
+        self.table = build_tag_table(char_width_px=_TEST_CHAR_WIDTH_PX)
+
+    @property
+    def _field(self) -> int:
+        return LIST_MARKER_FIELD_CHARS * _TEST_CHAR_WIDTH_PX
+
+    @property
+    def _gap(self) -> int:
+        return round(LIST_MARKER_GAP_CHARS * _TEST_CHAR_WIDTH_PX)
+
+    @property
+    def _step(self) -> int:
+        return self._field + self._gap
+
+    def test_every_depth_has_a_tag(self) -> None:
+        for depth in range(1, MAX_LIST_DEPTH + 1):
+            with self.subTest(depth=depth):
+                tag = self.table.lookup(list_item_tag_name(depth).value)
+                self.assertIsNotNone(tag)
+
+    def test_left_margin_steps_one_step_per_depth(self) -> None:
+        for depth in range(1, MAX_LIST_DEPTH + 1):
+            with self.subTest(depth=depth):
+                tag = self.table.lookup(list_item_tag_name(depth).value)
+                self.assertEqual(
+                    tag.get_property("left-margin"), (depth - 1) * self._step,
+                )
+
+    def test_indent_is_negative_one_step(self) -> None:
+        for depth in range(1, MAX_LIST_DEPTH + 1):
+            with self.subTest(depth=depth):
+                tag = self.table.lookup(list_item_tag_name(depth).value)
+                self.assertEqual(tag.get_property("indent"), -self._step)
+
+    def test_right_then_left_tab_stops(self) -> None:
+        for depth in range(1, MAX_LIST_DEPTH + 1):
+            with self.subTest(depth=depth):
+                tag = self.table.lookup(list_item_tag_name(depth).value)
+                tabs = tag.get_property("tabs")
+                self.assertIsNotNone(tabs)
+                self.assertEqual(tabs.get_size(), 2)
+                right_align, right_loc = tabs.get_tab(0)
+                left_align, left_loc = tabs.get_tab(1)
+                self.assertEqual(right_align, Pango.TabAlign.RIGHT)
+                self.assertEqual(right_loc, self._field)
+                self.assertEqual(left_align, Pango.TabAlign.LEFT)
+                self.assertEqual(left_loc, self._step)
+
+    def test_margins_are_accumulative(self) -> None:
+        # So the list indent stacks on the article's inner padding rather
+        # than replacing the widget-level margins (like the block tags).
+        for depth in range(1, MAX_LIST_DEPTH + 1):
+            with self.subTest(depth=depth):
+                tag = self.table.lookup(list_item_tag_name(depth).value)
+                self.assertTrue(tag.get_property("accumulative-margin"))
 
 
 class AdmonitionTagNameLookupTests(unittest.TestCase):

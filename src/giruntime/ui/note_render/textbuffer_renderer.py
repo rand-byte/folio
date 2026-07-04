@@ -153,6 +153,7 @@ from giruntime.ui.note_render.tag_table import (
     admonition_kind_tag_name,
     admonition_label_tag_name,
     heading_tag_name,
+    list_item_tag_name,
 )
 from config.defaults import TABLE_CELL_HPADDING_PX
 from enums import HeadingTrailing, ListNumberStyle
@@ -214,10 +215,15 @@ anchors remain only for tables.
 # asserts ``len(_UNORDERED_GLYPHS) == MAX_LIST_DEPTH``.
 _UNORDERED_GLYPHS: tuple[str, ...] = ("•", "◦", "▪")
 
-# Trailing spacing after a list marker (bullet glyph or ordinal),
-# separating it from the item text. Two spaces, matching the original
-# flat-list rendering.
-_LIST_MARKER_GAP: str = "  "
+# Tab character used to build a list item's ``\t{marker}\t{text}`` line.
+# The per-depth list-item tag carries two stops (see
+# ``tag_table._make_list_item_tag``): the *leading* tab drives the marker
+# to a RIGHT stop at the period column (right-aligning it, so periods line
+# up within a list), and the *separating* tab drives the text to a LEFT
+# stop at the text column (fixed per depth, so every list at a depth shares
+# it). Tabs — not runs of spaces — are what keep the columns aligned across
+# markers of different widths.
+_LIST_MARKER_TAB: str = "\t"
 
 # Ordered-list numbering style by nesting depth (1-based: index
 # ``depth - 1``). Arabic at the top, then lower-alpha, then lower-roman.
@@ -228,13 +234,6 @@ _ORDERED_STYLES: tuple[ListNumberStyle, ...] = (
     ListNumberStyle.LOWER_ALPHA,
     ListNumberStyle.LOWER_ROMAN,
 )
-
-# Spaces of indentation that prefix every list item. Plain ASCII space
-# rather than the ``left_margin`` tag property, because tag-driven
-# margins do not affect the buffer's character offsets and tests check
-# the exact buffer text. A list item at depth ``d`` is indented by this
-# unit repeated ``d`` times.
-_LIST_ITEM_INDENT: str = "    "
 
 # Depth of an outermost list. Only the top-level list appends the
 # trailing blank line that separates it from the next block; nested
@@ -603,9 +602,8 @@ class TextBufferRenderer:
         depth: int = 1,
     ) -> None:
         glyph = _UNORDERED_GLYPHS[depth - 1]
-        marker = f"{_LIST_ITEM_INDENT * depth}{glyph}{_LIST_MARKER_GAP}"
         for item in ulist.items:
-            self._emit_list_item(buffer, item, marker, depth)
+            self._emit_list_item(buffer, item, glyph, depth)
         if depth == _TOP_LIST_DEPTH:
             buffer.insert(buffer.get_end_iter(), "\n")
 
@@ -618,8 +616,7 @@ class TextBufferRenderer:
         style = _ORDERED_STYLES[depth - 1]
         for index, item in enumerate(olist.items, start=1):
             ordinal = _format_ordinal(style, index)
-            marker = f"{_LIST_ITEM_INDENT * depth}{ordinal} "
-            self._emit_list_item(buffer, item, marker, depth)
+            self._emit_list_item(buffer, item, ordinal, depth)
         if depth == _TOP_LIST_DEPTH:
             buffer.insert(buffer.get_end_iter(), "\n")
 
@@ -632,17 +629,39 @@ class TextBufferRenderer:
     ) -> None:
         """Emit one item line then recurse into its child sub-lists.
 
-        The marker (indent + bullet/ordinal) is literal buffer text so
-        offsets stay exact for the renderer tests; numbering and glyph
-        restart per nested list because each sub-list is emitted from its
-        own :meth:`_emit_ordered_list` / :meth:`_emit_unordered_list`
-        call. Only the top-level list appends the trailing blank line, so
-        nested sub-lists stay flush under their parent item.
+        The line is a leading tab, the marker, a tab, then the item text
+        (``\\t{marker}\\t{text}``); the marker is the bare bullet glyph or
+        ordinal (no indent or gap spaces). Layout is *tag geometry*, not
+        buffer whitespace: the whole item line (both tabs, marker, text, and
+        its terminating newline) is tagged with the depth's
+        :data:`TagName.LIST_ITEM_1` … :data:`LIST_ITEM_3` tag. The leading
+        tab hits that tag's RIGHT stop, right-aligning the marker so periods
+        line up within the list; the second tab hits the LEFT stop, placing
+        the text on the depth's fixed text column (so every list at the depth
+        aligns); the negative ``indent`` hangs wrapped lines under that text
+        column (see :func:`tag_table._make_list_item_tag`). Tagging through
+        the newline keeps the paragraph geometry applied to the last line.
+
+        Numbering and glyph restart per nested list because each sub-list is
+        emitted from its own :meth:`_emit_ordered_list` /
+        :meth:`_emit_unordered_list` call. Only the top-level list appends
+        the trailing blank line, so nested sub-lists stay flush under their
+        parent item.
         """
-        buffer.insert(buffer.get_end_iter(), marker)
+        start_offset = buffer.get_end_iter().get_offset()
+        buffer.insert(
+            buffer.get_end_iter(),
+            f"{_LIST_MARKER_TAB}{marker}{_LIST_MARKER_TAB}",
+        )
         for inline in item.inlines:
             self._emit_inline(buffer, inline, [])
         buffer.insert(buffer.get_end_iter(), "\n")
+        end_iter = buffer.get_end_iter()
+        buffer.apply_tag(
+            self._tag(list_item_tag_name(depth)),
+            buffer.get_iter_at_offset(start_offset),
+            end_iter,
+        )
         for child in item.children:
             if isinstance(child, UnorderedList):
                 self._emit_unordered_list(buffer, child, depth + 1)

@@ -13,9 +13,15 @@ Principles & invariants
   package as much as anywhere else.
 * The current tag set covers, in addition to the inline subset (bold,
   italic, strikethrough, underline, monospace, link) and the heading
-  levels the parser produces, the **block-level paragraph styling** for
-  admonitions, blockquotes, and code blocks, the under-title metadata
-  line, and the four centred lines of the in-surface parse-error notice
+  levels the parser produces, the **per-depth list-item geometry**
+  (:data:`TagName.LIST_ITEM_1` … :data:`TagName.LIST_ITEM_3` —
+  ``left-margin`` + a ``RIGHT`` tab stop + a ``LEFT`` tab stop + a negative
+  ``indent``, so the marker right-aligns, wrapped lines hang under the text,
+  and every list at a depth shares one text column regardless of marker
+  width; see :func:`_make_list_item_tag`), the **block-level
+  paragraph styling** for admonitions, blockquotes, and code blocks, the
+  under-title metadata line, and the four centred lines of the in-surface
+  parse-error notice
   (:data:`TagName.ERROR_NOTICE_ICON` … :data:`TagName.ERROR_NOTICE_HINT`).
   Block-level tags carry
   only the *text position* (``accumulative-margin = True`` plus
@@ -96,7 +102,11 @@ from enum import StrEnum
 
 from gi.repository import Gtk, Pango
 
-from config.defaults import TABLE_CELL_HPADDING_PX
+from config.defaults import (
+    LIST_MARKER_FIELD_CHARS,
+    LIST_MARKER_GAP_CHARS,
+    TABLE_CELL_HPADDING_PX,
+)
 from enums import AdmonitionKind, WashShape
 
 
@@ -114,6 +124,16 @@ class TagName(StrEnum):
     parser does not produce level-1 headings outside of the document
     title — a mid-document ``=`` heading is rejected as an
     ``UNKNOWN_BLOCK``.
+
+    The list-item members (:data:`LIST_ITEM_1` … :data:`LIST_ITEM_3`)
+    map to nesting depth (1-based) and carry that depth's geometry —
+    ``left-margin``, a ``RIGHT`` tab stop (marker/period column), a
+    ``LEFT`` tab stop (text column), and a negative ``indent`` — so the
+    marker right-aligns, wrapped lines hang under the text, and every
+    list at a depth shares one text column regardless of marker width.
+    Use :func:`list_item_tag_name` to look one up by depth. The depth
+    range is :data:`config.defaults.MAX_LIST_DEPTH`, the same cap the
+    renderer's bullet-glyph and ordinal-style tables are sized to.
 
     :data:`MONOSPACE` and :data:`LINK` provide the *visual* styling
     for those constructs. The link's *URL identity* is carried by
@@ -203,6 +223,10 @@ class TagName(StrEnum):
     HEADING_4 = "heading_4"
     HEADING_5 = "heading_5"
     HEADING_6 = "heading_6"
+
+    LIST_ITEM_1 = "list_item_1"
+    LIST_ITEM_2 = "list_item_2"
+    LIST_ITEM_3 = "list_item_3"
     # Admonition paragraph tags (per kind, role LABEL).
     ADMONITION_NOTE_LABEL = "admonition_note_label"
     ADMONITION_TIP_LABEL = "admonition_tip_label"
@@ -362,6 +386,34 @@ _LEVEL_TO_TAG_NAME: dict[int, TagName] = {
     5: TagName.HEADING_5,
     6: TagName.HEADING_6,
 }
+
+
+# ---------------------------------------------------------------------------
+# List-item tag-name lookup (per nesting depth)
+# ---------------------------------------------------------------------------
+#
+# One paragraph tag per 1-based nesting depth, sized to
+# :data:`MAX_LIST_DEPTH` so the depth cap and this table cannot drift — a
+# tag-table test asserts ``len(_DEPTH_TO_LIST_ITEM_TAG_NAME) ==
+# MAX_LIST_DEPTH`` (mirroring the renderer's bullet-glyph / ordinal-style
+# tables). Each tag carries only the right-aligned marker + hanging-indent
+# geometry for its depth (see :func:`_make_list_item_tag`).
+_DEPTH_TO_LIST_ITEM_TAG_NAME: dict[int, TagName] = {
+    1: TagName.LIST_ITEM_1,
+    2: TagName.LIST_ITEM_2,
+    3: TagName.LIST_ITEM_3,
+}
+
+
+def list_item_tag_name(depth: int) -> TagName:
+    """Return the :class:`TagName` for a list item at ``depth`` (1-based).
+
+    Raises :class:`KeyError` for a depth the parser never produces (``< 1``
+    or ``> MAX_LIST_DEPTH``) — a misuse from the renderer's side that
+    deserves to fail loudly rather than silently fall back to a default,
+    matching :func:`heading_tag_name`.
+    """
+    return _DEPTH_TO_LIST_ITEM_TAG_NAME[depth]
 
 
 # ---------------------------------------------------------------------------
@@ -632,6 +684,12 @@ def build_tag_table(*, char_width_px: int) -> Gtk.TextTagTable:
                 _LEVEL_TO_TAG_NAME[level], scale=scale, is_body=level != 0,
             )
         )
+    for depth, list_item_name in _DEPTH_TO_LIST_ITEM_TAG_NAME.items():
+        table.add(
+            _make_list_item_tag(
+                list_item_name, depth=depth, char_width_px=char_width_px,
+            )
+        )
     for kind in _ADMONITION_TINTS:
         table.add(
             _make_admonition_paragraph_tag(
@@ -846,6 +904,52 @@ def _make_heading_tag(name: TagName, *, scale: float, is_body: bool) -> Gtk.Text
     if is_body:
         tag.set_property("pixels-above-lines", _HEADING_PIXELS_ABOVE_PX)
         tag.set_property("pixels-below-lines", _HEADING_PIXELS_BELOW_PX)
+    return tag
+
+
+def _make_list_item_tag(name: TagName, *, depth: int, char_width_px: int) -> Gtk.TextTag:
+    """Build the right-aligned, hanging-indent paragraph tag for ``depth``.
+
+    ``FIELD = LIST_MARKER_FIELD_CHARS * char_width_px`` is the marker field
+    width, ``GAP = round(LIST_MARKER_GAP_CHARS * char_width_px)`` the
+    marker-to-text gap, and ``STEP = FIELD + GAP`` the per-depth nesting step
+    (see :data:`config.defaults.LIST_MARKER_FIELD_CHARS`). The renderer emits
+    each item as ``\\t{marker}\\t{text}``, and this tag lays that line out
+    (verified against GTK's / Pango's own tab and indent semantics):
+
+    * ``left-margin = (depth - 1) * STEP`` positions this depth's marker
+      field. With ``accumulative-margin = True`` it stacks on the widget's
+      inner padding (like the block tags) rather than replacing it, and —
+      because tab stops are measured from the line's text start *after* the
+      left-margin (the convention the table rows rely on) — the two stops
+      below are expressed relative to it.
+    * a **RIGHT** tab stop at ``FIELD``: the leading tab right-aligns the
+      marker so its trailing ``.`` lands on the ``FIELD`` column. Periods
+      therefore align within a list, and because ``FIELD`` is fixed per depth
+      the column is shared by every list at this depth.
+    * a **LEFT** tab stop at ``FIELD + GAP``: the second tab drops the item
+      text on the text column — identical for every list at this depth, so
+      sibling sub-lists whose markers differ in width still align their text.
+    * ``indent = -(FIELD + GAP)`` is a *hanging* indent: Pango insets every
+      wrapped continuation line by one step, so wrapped prose hangs under the
+      text column, not back at the marker.
+
+    A marker wider than ``FIELD`` (only a pathologically long ordinal) still
+    right-aligns, extending further left into the indent; that overflow is
+    accepted, not designed around
+    (see :data:`config.defaults.LIST_MARKER_FIELD_CHARS`).
+    """
+    field = LIST_MARKER_FIELD_CHARS * char_width_px
+    gap = round(LIST_MARKER_GAP_CHARS * char_width_px)
+    step = field + gap
+    tabs = Pango.TabArray.new(2, True)
+    tabs.set_tab(0, Pango.TabAlign.RIGHT, field)
+    tabs.set_tab(1, Pango.TabAlign.LEFT, step)
+    tag = Gtk.TextTag.new(name.value)
+    tag.set_property("accumulative-margin", True)
+    tag.set_property("left-margin", (depth - 1) * step)
+    tag.set_property("indent", -step)
+    tag.set_property("tabs", tabs)
     return tag
 
 

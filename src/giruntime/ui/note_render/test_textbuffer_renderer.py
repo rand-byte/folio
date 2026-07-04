@@ -15,6 +15,7 @@ from giruntime.ui.note_render.tag_table import (
     admonition_kind_tag_name,
     admonition_label_tag_name,
     build_tag_table,
+    list_item_tag_name,
 )
 from giruntime.ui.note_render.textbuffer_renderer import (
     TextBufferRenderer,
@@ -30,7 +31,12 @@ from giruntime.ui.note_render.textbuffer_renderer import (
 )
 from enums import AdmonitionKind, ListNumberStyle
 from models.parse_error import ParseError
-from config.defaults import MAX_LIST_DEPTH, TABLE_CELL_HPADDING_PX
+from config.defaults import (
+    LIST_MARKER_FIELD_CHARS,
+    LIST_MARKER_GAP_CHARS,
+    MAX_LIST_DEPTH,
+    TABLE_CELL_HPADDING_PX,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -395,11 +401,12 @@ class ListRenderingTests(unittest.TestCase):
         renderer.render_into(src, buffer, note_id="n1")
         text = _full_text(buffer)
         # Numbering is 1., 2., 3. — not the literal '. ' marker from
-        # source. ``find`` returns -1 for missing, so use ``index`` to
-        # assert presence.
-        text.index("1. first")
-        text.index("2. second")
-        text.index("3. third")
+        # source. Each item line is ``\t{marker}\t{text}`` (leading tab
+        # right-aligns the marker, second tab places the text), so assert on
+        # ``"\t1.\tfirst"``. ``index`` raises if absent.
+        text.index("\t1.\tfirst")
+        text.index("\t2.\tsecond")
+        text.index("\t3.\tthird")
 
     def test_blank_separated_ordered_list_numbers_continuously(self) -> None:
         # Blank lines between ordered items are absorbed by the parser into
@@ -409,9 +416,9 @@ class ListRenderingTests(unittest.TestCase):
         renderer, buffer, _ = _build_renderer()
         renderer.render_into(src, buffer, note_id="n1")
         text = _full_text(buffer)
-        text.index("1. first")
-        text.index("2. second")
-        text.index("3. third")
+        text.index("\t1.\tfirst")
+        text.index("\t2.\tsecond")
+        text.index("\t3.\tthird")
 
     def test_list_items_carry_inline_formatting(self) -> None:
         src = "= D\n\n* an *emphatic* point\n"
@@ -430,20 +437,21 @@ class ListRenderingTests(unittest.TestCase):
         self.assertEqual(len(_ORDERED_STYLES), MAX_LIST_DEPTH)
 
     def test_nested_unordered_exact_buffer_text(self) -> None:
-        # Three unordered levels: indent scales by depth (4 spaces per
-        # level) and the glyph changes •/◦/▪ with depth. A trailing
-        # paragraph makes the list's block separator deterministic (the
-        # buffer's final blank line is otherwise trimmed).
+        # Three unordered levels: the glyph changes •/◦/▪ with depth and
+        # each item is ``\t{glyph}\t{text}`` (leading tab + separating tab —
+        # depth and right-alignment are tag geometry now, see the geometry
+        # test below). A trailing paragraph makes the list's block separator
+        # deterministic (the buffer's final blank line is otherwise trimmed).
         src = "= D\n\n* one\n** two\n*** three\n* four\n\nEnd.\n"
         renderer, buffer, _ = _build_renderer()
         renderer.render_into(src, buffer, note_id="n1")
         self.assertEqual(
             _full_text(buffer),
             "D\n"
-            "    •  one\n"
-            "        ◦  two\n"
-            "            ▪  three\n"
-            "    •  four\n"
+            "\t•\tone\n"
+            "\t◦\ttwo\n"
+            "\t▪\tthree\n"
+            "\t•\tfour\n"
             "\n"
             "End.",
         )
@@ -452,17 +460,17 @@ class ListRenderingTests(unittest.TestCase):
         self,
     ) -> None:
         # arabic at level 1, lower-alpha at level 2; each sub-list numbers
-        # from the top.
+        # from the top. Each line is ``\t{marker}\t{text}``, no indent spaces.
         src = "= D\n\n. one\n.. sub-a\n.. sub-b\n. two\n\nEnd.\n"
         renderer, buffer, _ = _build_renderer()
         renderer.render_into(src, buffer, note_id="n1")
         self.assertEqual(
             _full_text(buffer),
             "D\n"
-            "    1. one\n"
-            "        a. sub-a\n"
-            "        b. sub-b\n"
-            "    2. two\n"
+            "\t1.\tone\n"
+            "\ta.\tsub-a\n"
+            "\tb.\tsub-b\n"
+            "\t2.\ttwo\n"
             "\n"
             "End.",
         )
@@ -474,23 +482,97 @@ class ListRenderingTests(unittest.TestCase):
         self.assertEqual(
             _full_text(buffer),
             "D\n"
-            "    1. one\n"
-            "        a. a\n"
-            "            i. i\n"
+            "\t1.\tone\n"
+            "\ta.\ta\n"
+            "\ti.\ti\n"
             "\n"
             "End.",
         )
 
     def test_mixed_nesting_uses_child_list_kind(self) -> None:
         # An ordered sub-list under an unordered item renders with
-        # ordered markers at the deeper indent.
+        # ordered markers at the deeper depth (tag geometry, not indent).
         src = "= D\n\n* parent\n.. step\n\nEnd.\n"
         renderer, buffer, _ = _build_renderer()
         renderer.render_into(src, buffer, note_id="n1")
         self.assertEqual(
             _full_text(buffer),
-            "D\n    •  parent\n        a. step\n\nEnd.",
+            "D\n\t•\tparent\n\ta.\tstep\n\nEnd.",
         )
+
+    def test_list_item_lines_carry_depth_tag(self) -> None:
+        # Each item line (leading tab + marker + tab + text + its newline) is
+        # tagged with the depth's LIST_ITEM_* tag — that tag, not literal
+        # spaces, is what right-aligns the marker and places the text.
+        src = "= D\n\n. one\n.. two\n... three\n\nEnd.\n"
+        renderer, buffer, _ = _build_renderer()
+        renderer.render_into(src, buffer, note_id="n1")
+        text = _full_text(buffer)
+        for depth, needle in ((1, "\t1.\tone"), (2, "\ta.\ttwo"), (3, "\ti.\tthree")):
+            start = text.index(needle)
+            tag_name = list_item_tag_name(depth).value
+            # The whole item line up to (and including) its newline carries
+            # the depth tag.
+            ranges = _ranges_with_tag(buffer, tag_name)
+            covering = [rng for rng in ranges if rng[0] <= start < rng[1]]
+            self.assertEqual(
+                len(covering), 1, f"depth {depth} item not uniquely tagged",
+            )
+            item_start, item_end = covering[0]
+            self.assertEqual(item_start, start)
+            # Range extends through the terminating newline of the item.
+            self.assertEqual(text[item_end - 1], "\n")
+
+    def test_sibling_sublists_share_the_depth_tag(self) -> None:
+        # Right-alignment and cross-list text alignment are properties of the
+        # depth tag: every depth-2 item — in one sub-list and in a *sibling*
+        # sub-list — must carry the same depth-2 tag. Same tag ⇒ same
+        # RIGHT/LEFT stops ⇒ periods align within a list and text aligns
+        # across sibling lists, whatever the markers' widths.
+        src = (
+            "= D\n\n. a\n.. 1\n.. 2\n.. 3\n. b\n.. 1\n.. 2\n\nEnd.\n"
+        )
+        renderer, buffer, _ = _build_renderer()
+        renderer.render_into(src, buffer, note_id="n1")
+        text = _full_text(buffer)
+        depth2_tag = list_item_tag_name(2).value
+        ranges = _ranges_with_tag(buffer, depth2_tag)
+        # Every depth-2 item (three under 'a', two under 'b') carries it.
+        for needle in ("\ta.\t1", "\tb.\t2", "\tc.\t3", "\ta.\t1", "\tb.\t2"):
+            start = text.index(needle)
+            self.assertTrue(
+                any(lo <= start < hi for lo, hi in ranges),
+                f"{needle!r} not under the depth-2 tag",
+            )
+
+    def test_list_item_tag_geometry_is_right_aligned(self) -> None:
+        # The per-depth tag right-aligns the marker and hangs wrapped lines:
+        #   left-margin = (depth-1) * STEP   (accumulative)
+        #   tabs        = [ RIGHT @ FIELD , LEFT @ FIELD+GAP ]
+        #   indent      = -(FIELD + GAP)
+        # with FIELD = LIST_MARKER_FIELD_CHARS * char_width_px,
+        #      GAP   = round(LIST_MARKER_GAP_CHARS * char_width_px),
+        #      STEP  = FIELD + GAP.
+        char_width_px = 9
+        table = build_tag_table(char_width_px=char_width_px)
+        field = LIST_MARKER_FIELD_CHARS * char_width_px
+        gap = round(LIST_MARKER_GAP_CHARS * char_width_px)
+        step = field + gap
+        for depth in range(1, MAX_LIST_DEPTH + 1):
+            tag = table.lookup(list_item_tag_name(depth).value)
+            self.assertIsNotNone(tag, f"no tag for depth {depth}")
+            self.assertTrue(tag.get_property("accumulative-margin"))
+            self.assertEqual(tag.get_property("left-margin"), (depth - 1) * step)
+            self.assertEqual(tag.get_property("indent"), -step)
+            tabs = tag.get_property("tabs")
+            self.assertIsNotNone(tabs)
+            self.assertEqual(tabs.get_size(), 2)
+            right_align, right_loc = tabs.get_tab(0)
+            left_align, left_loc = tabs.get_tab(1)
+            self.assertEqual(right_align, Pango.TabAlign.RIGHT)
+            self.assertEqual(right_loc, field)
+            self.assertEqual(left_align, Pango.TabAlign.LEFT)
+            self.assertEqual(left_loc, step)
 
 
 class FormatOrdinalTests(unittest.TestCase):
