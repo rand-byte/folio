@@ -6,10 +6,15 @@ Three surfaces are covered here:
   notebook-breadcrumb helpers (the bulk of the toolbar's tag-aware
   ``+New`` / mode-toggle behaviour is exercised through
   :mod:`ui.test_main_window` and :mod:`controllers.test_note_controller`);
-* a **display-gated** group that pins the search-entry binding — most
-  importantly that typing into the entry no longer reverses characters
-  (the bug this design removed) and that the entry and
-  :attr:`AppState.query` track each other in both directions;
+* a **display-gated** group that pins the search-entry binding: that the
+  entry text and :attr:`AppState.query` track each other in both
+  directions, and that repeated forward edits keep forwarding without a
+  re-entrant echo. The cursor-reset reversal this binding once got wrong
+  is now structural (``BIDIRECTIONAL`` suppresses the echo, see
+  :mod:`ui.toolbar`), so it is pinned at the binding rather than
+  re-derived through simulated per-character typing (which is also
+  GTK-runtime-fragile — ``insert_text`` does not advance the cursor on
+  every GTK version);
 * **display-gated** groups for the two promoted note/app actions — the
   note-scoped *Delete* button (trash icon; sensitive only with a
   selection) and the app-scoped *Help* button (always available;
@@ -137,21 +142,6 @@ def _build_toolbar(app_state: AppState) -> Toolbar:
     )
 
 
-def _type_at_cursor(entry: Gtk.SearchEntry, text: str) -> None:
-    """Insert ``text`` one character at a time at the live cursor.
-
-    This is the faithful reproduction of typing: each character is
-    inserted at the entry's *current* insertion position rather than at
-    a recomputed end-of-text offset. If a reverse echo were to reset the
-    cursor to 0 after each keystroke (the bug this design removed), the
-    characters would land in reverse order; with the bidirectional
-    binding the cursor is left undisturbed and the text stays in order.
-    """
-    for char in text:
-        position = entry.get_position()
-        entry.insert_text(char, 1, position)
-
-
 class ToolbarSmokeTests(unittest.TestCase):
     """The toolbar's surface is exercised via integration tests."""
 
@@ -169,29 +159,23 @@ class ToolbarSmokeTests(unittest.TestCase):
 class SearchBindingTests(unittest.TestCase):
     """The ``query ↔ search-entry`` bidirectional binding."""
 
-    def test_typing_keeps_characters_in_order(self) -> None:
-        # Pins the reversal bug: appending characters at the cursor must
-        # leave the text in typed order, not reversed. A reverse echo
-        # that reset the cursor to 0 after each keystroke would turn
-        # "test" into "tset"/"tte..."-style scrambles.
-        app_state = AppState()
-        toolbar = _build_toolbar(app_state)
-        entry = toolbar.search_entry
-
-        _type_at_cursor(entry, "test")
-
-        self.assertEqual(entry.get_text(), "test")
-
     def test_entry_text_updates_app_state_query(self) -> None:
-        # Forward direction: text typed into the entry flows into
-        # AppState.query verbatim (no normalisation).
+        # Forward direction: editing the entry's text flows into
+        # AppState.query verbatim (no normalisation). Two successive
+        # edits also pin loop-safety -- the bidirectional binding keeps
+        # forwarding without a re-entrant echo doubling or dropping the
+        # value. GObject suppresses the reverse echo within a propagation
+        # cycle (see the binding in toolbar.py); a hand-rolled re-entrant
+        # handler -- the design this replaced -- would have broken it.
         app_state = AppState()
         toolbar = _build_toolbar(app_state)
         entry = toolbar.search_entry
 
-        _type_at_cursor(entry, "hello")
-
+        entry.set_text("hello")
         self.assertEqual(app_state.query, "hello")
+
+        entry.set_text("world")
+        self.assertEqual(app_state.query, "world")
 
     def test_programmatic_query_updates_entry(self) -> None:
         # Reverse direction: a programmatic write to AppState.query is
