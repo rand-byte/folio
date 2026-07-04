@@ -376,7 +376,7 @@ queried only once.
 
 
 def _message_for(kind: ParseErrorKind, line: int) -> str:
-    # pylint: disable=too-many-return-statements,too-many-branches
+    # pylint: disable=too-many-return-statements
     # The ``match`` is intentionally exhaustive over
     # :class:`ParseErrorKind` — every member produces a distinct
     # user-facing message, so the number of cases equals the size of
