@@ -371,33 +371,51 @@ class HelpWindowTests(unittest.TestCase):
 class HelpActionTests(unittest.TestCase):
     """The app registers ``help`` (F1) and reuses one help window.
 
-    A ``NotesApplication`` is constructed but **never registered**: the
-    process already has one registered ``GtkApplication`` (the shared
-    test app), and a second *registered* one would crash. Construction
-    and the action/reuse seams need no registration — only
-    :meth:`do_activate` (untested here) opens the database.
+    These drive the process's single registered ``NotesApplication`` — the
+    shared ``_test_application`` — because the :class:`HelpWindow` that
+    :meth:`NotesApplication._ensure_help_window` builds is a
+    ``Gtk.ApplicationWindow``, and such a window may only be added to a
+    *registered* application (one whose ``startup`` has fired). GTK permits
+    exactly one registered ``GtkApplication`` per process, so that owner has
+    to be the shared instance; a fresh, unregistered ``NotesApplication``
+    would make GTK warn and silently drop the window instead of owning it.
+
+    The shared app is process-lived, so each test clears the
+    ``_help_window`` cache first and destroys any window it builds, keeping
+    the build-once/reuse observation isolated from its neighbours.
     """
 
-    def _build_app(self) -> NotesApplication:
-        return NotesApplication()
+    app: NotesApplication
+
+    def setUp(self) -> None:
+        self.app = _test_application()
+        self.app._help_window = None
+        self.addCleanup(self._discard_help_window)
+
+    def _discard_help_window(self) -> None:
+        """Destroy any help window this test built and clear the cache.
+
+        The shared application outlives the test; a window left cached
+        (or destroyed but still referenced) would leak into the next one,
+        so this restores the pre-test empty-cache state.
+        """
+        window = self.app._help_window
+        if window is not None:
+            window.destroy()
+            self.app._help_window = None
 
     def test_install_help_action_registers_action_and_accel(self) -> None:
-        app = self._build_app()
-        app._install_help_action()
-        self.assertIsNotNone(app.lookup_action("help"))
-        self.assertIn("F1", app.get_accels_for_action("app.help"))
+        self.app._install_help_action()
+        self.assertIsNotNone(self.app.lookup_action("help"))
+        self.assertIn("F1", self.app.get_accels_for_action("app.help"))
 
     def test_ensure_help_window_builds_once_and_reuses(self) -> None:
-        app = self._build_app()
-        first = app._ensure_help_window()
-        self.addCleanup(first.destroy)
-        second = app._ensure_help_window()
+        first = self.app._ensure_help_window()
+        second = self.app._ensure_help_window()
         self.assertIs(first, second)
 
     def test_ensure_help_window_renders_the_buffer(self) -> None:
-        app = self._build_app()
-        window = app._ensure_help_window()
-        self.addCleanup(window.destroy)
+        window = self.app._ensure_help_window()
         self.assertEqual(set(window.section_marks), set(HelpSection))
         self.assertNotEqual(window.rendered_text.strip(), "")
 

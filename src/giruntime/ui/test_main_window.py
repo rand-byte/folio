@@ -18,6 +18,7 @@ from models.session_state import DEFAULT_SESSION_STATE, SessionState
 from giruntime.controllers.app_state import AppState
 from giruntime.controllers.note_controller import NoteController
 from giruntime.controllers.note_list_store import NoteListStore
+from giruntime.ui.application import NotesApplication
 from giruntime.ui.main_window import (
     MainWindow,
     _ARTICLE_SIDE_SLACK_PX,
@@ -68,28 +69,52 @@ def _pump_main_loop() -> None:
             context.iteration(False)
 
 
+_TEST_APPLICATION_ID: str = "org.folio.Folio.test"
+"""Application id the shared test app registers under.
+
+Deliberately distinct from production's ``org.folio.Folio`` so the test
+app never connects — as a single-instance remote — to a real ``folio``
+already running on the developer's session bus. A remote registration
+would not emit ``startup`` locally, which is exactly the state that
+trips the window-add warning this fixture exists to avoid.
+"""
+
+
 @cache
-def _test_application() -> Gtk.Application:
-    """The single registered :class:`Gtk.Application` shared by every test.
+def _test_application() -> NotesApplication:
+    """The single registered :class:`NotesApplication` shared by every test.
 
     GTK supports **one** registered ``GtkApplication`` per process: the
     first to register becomes ``g_application_get_default()`` and installs
     process-global state, and a second *registered* ``GtkApplication`` is
     unsupported (it crashes). So the suite must not build a fresh
     application per test — it builds one, registers it once, and reuses it
-    for every window. ``MainWindow`` is a ``Gtk.ApplicationWindow`` and
-    several windows may share one application, so reuse is fine.
+    for every window. ``MainWindow`` and ``HelpWindow`` are
+    ``Gtk.ApplicationWindow`` s, and several windows may share one
+    application, so reuse is fine.
 
-    Registering (once) before any window is added also suppresses GTK's
-    "New application windows must be added after the GApplication::startup
-    signal" warning. ``@cache`` makes construction lazy — it happens on the
-    first call, i.e. only inside a display-gated test — and keeps the one
-    instance alive for the whole process.
+    It is a real :class:`NotesApplication` rather than a bare
+    ``Gtk.Application`` so the display-gated help tests can drive the
+    app-scoped help seams (:meth:`NotesApplication._ensure_help_window`,
+    :meth:`NotesApplication._install_help_action`) against a *registered*
+    owner. A ``Gtk.ApplicationWindow`` may only be added to an application
+    whose ``startup`` has fired — which registration is what does — so the
+    help window, like every ``MainWindow`` here, needs a registered owner;
+    an unregistered one both warns and silently drops the window. The id
+    and flags are reset to the isolated test values *before* registering
+    (they are read-write until then). Registration alone does **not** open
+    the database — that is :meth:`do_activate`'s job (via
+    ``_initialise_runtime``), and the app is never activated here.
+
+    Registering (once) before any window is added is also what suppresses
+    GTK's "New application windows must be added after the
+    GApplication::startup signal" warning. ``@cache`` makes construction
+    lazy — it happens on the first call, i.e. only inside a display-gated
+    test — and keeps the one instance alive for the whole process.
     """
-    application = Gtk.Application.new(
-        "org.folio.Folio.test",
-        Gio.ApplicationFlags.DEFAULT_FLAGS,
-    )
+    application = NotesApplication()
+    application.set_application_id(_TEST_APPLICATION_ID)
+    application.set_flags(Gio.ApplicationFlags.DEFAULT_FLAGS)
     application.register(None)
     return application
 
