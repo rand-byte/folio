@@ -16,10 +16,17 @@ Principles & invariants
     *New* button (its own border, a gap between them) rather than
     linked, so the pair does not read as a single split/dropdown
     button;
-  * a global search entry that mirrors :attr:`AppState.query`
-    bidirectionally;
-  * an empty centre title widget (no breadcrumb — the tag-based
-    library has no hierarchy to surface);
+  * a *Search* :class:`Gtk.ToggleButton` after *Delete* — a raised
+    icon button styled like its neighbours (never ``flat``, so it
+    reads as a button and not a glyph). Its pressed state mirrors
+    whether the centre search is open, giving search an explicit,
+    discoverable close affordance in addition to :kbd:`Escape`;
+  * a **two-page centre stack** as the title widget, with pages named
+    by :class:`enums.HeaderCentrePage`: ``TITLE`` shows the selected
+    note's title (ellipsized; empty when no note is selected) and
+    ``SEARCH`` shows the global search entry that mirrors
+    :attr:`AppState.query` bidirectionally. The swap is a quick
+    crossfade;
   * a View / Source segmented toggle on the right that mirrors
     :attr:`AppState.view_mode` bidirectionally;
   * a *Help* button on the right (icon + ``Syntax`` label) that opens
@@ -28,6 +35,38 @@ Principles & invariants
 
   The toolbar sits in the window via :meth:`Gtk.Window.set_titlebar`
   on :class:`MainWindow`.
+
+* **The search toggle's handler is the single page switcher.** Active
+  swaps the stack to ``SEARCH`` and focuses the entry; inactive clears
+  the entry (which clears :attr:`AppState.query` through the binding)
+  and swaps back to ``TITLE``. The entry's ``stop-search`` signal
+  (:kbd:`Escape`) unpresses the toggle programmatically; that
+  writeback, like the View / Source one, is fenced by the shared
+  ``_suppress_signal_writeback`` guard.
+
+* **A non-empty query is never hidden behind the title.** Collapsing
+  always clears the query first, and any write that makes ``query``
+  non-empty while collapsed (the construction-time ``SYNC_CREATE``
+  seed or a later programmatic write) expands the search. The two
+  rules compose: there is no state where the note list is filtered
+  and the header shows only a title.
+
+* **The expanded entry spans the whole middle slot.**
+  :class:`Gtk.HeaderBar` grants its title widget up to the widget's
+  *natural* width, capped by the space between the packed button
+  groups — expand flags are ignored there. So the entry requests a
+  small minimum (:data:`_SEARCH_ENTRY_MIN_WIDTH_CHARS`, keeping the
+  window freely shrinkable) and a deliberately huge natural size
+  (:data:`_SEARCH_ENTRY_NATURAL_WIDTH_CHARS`); the cap then makes its
+  left edge land one toolbar gap from the search toggle at any window
+  width.
+
+* **The title label mirrors the selected note.** It refreshes on
+  ``AppState:notify::selected-note-id`` and on the note store's
+  ``items-changed`` (the same channel every pane observes, so an
+  edited title updates live), showing the empty string when no note
+  is selected. It is ellipsized with a width cap so a long title can
+  never push the packed boxes around.
 
 * There are **no menu buttons**. An earlier design split actions across
   a note-scoped *More* popover (Duplicate / Delete) and an app-scoped
@@ -86,7 +125,9 @@ Principles & invariants
   the toolbar is in the window's hierarchy.
 
 * GTK 4 currency: :class:`Gtk.HeaderBar`, :class:`Gtk.SearchEntry`,
-  :class:`Gtk.Button`, :meth:`Gtk.Button.set_icon_name`,
+  :class:`Gtk.Stack`, :class:`Gtk.Button`,
+  :meth:`Gtk.Button.set_icon_name`, :meth:`Gtk.Editable.set_width_chars`,
+  :meth:`Gtk.Editable.set_max_width_chars`,
   :meth:`Gtk.Actionable.set_action_name`,
   :meth:`Gtk.ToggleButton.set_group`, :meth:`Gtk.Widget.get_root`.
 """
@@ -95,9 +136,9 @@ from __future__ import annotations
 
 from typing import Final
 
-from gi.repository import GObject, Gtk
+from gi.repository import GObject, Gtk, Pango
 
-from enums import ViewMode
+from enums import HeaderCentrePage, ViewMode
 from giruntime.controllers.app_state import AppState
 from giruntime.controllers.note_controller import NoteController, make_initial_source
 from giruntime.controllers.note_list_store import NoteListStore
@@ -120,6 +161,41 @@ _DELETE_BUTTON_TOOLTIP: Final[str] = "Delete note"
 _DELETE_BUTTON_ICON: Final[str] = "user-trash-symbolic"
 
 _SEARCH_PLACEHOLDER: Final[str] = "Search notes\u2026"
+
+_SEARCH_TOGGLE_TOOLTIP: Final[str] = "Search notes"
+_SEARCH_TOGGLE_ICON: Final[str] = "system-search-symbolic"
+
+_SEARCH_ENTRY_MIN_WIDTH_CHARS: Final[int] = 16
+"""Minimum width request of the search entry — kept small so the entry
+never dictates the window's minimum width."""
+
+_SEARCH_ENTRY_NATURAL_WIDTH_CHARS: Final[int] = 512
+"""Natural width request of the search entry, deliberately far larger
+than any realistic header bar. :class:`Gtk.HeaderBar` grants its title
+widget up to natural width, capped by the space between the packed
+button groups (expand flags are ignored for the title widget), so this
+is what makes the expanded entry span the whole middle slot at any
+window width."""
+
+_TITLE_MAX_WIDTH_CHARS: Final[int] = 40
+"""Width cap of the centre title label. Combined with end-ellipsizing
+this keeps a long note title from pushing the packed boxes around."""
+
+_TITLE_CSS_CLASS: Final[str] = "title"
+"""GTK style class giving the centre label the standard header-bar
+title look (bold). Standard Adwaita style class — no project CSS rule
+backs it."""
+
+_NO_NOTE_TITLE: Final[str] = ""
+"""Centre title shown when no note is selected — deliberately empty, as
+the old empty title widget was: the tag-based library has nothing to
+surface there."""
+
+_CENTRE_TRANSITION_DURATION_MS: Final[int] = 250
+"""Duration of the title ↔ search crossfade — long enough to register,
+short enough to never delay typing (the entry accepts keystrokes while
+the fade runs). GTK's global ``gtk-enable-animations`` setting turns it
+into an instant swap on reduced-motion setups."""
 
 _MODE_VIEW_LABEL: Final[str] = "View"
 _MODE_SOURCE_LABEL: Final[str] = "Source"
@@ -167,6 +243,9 @@ class Toolbar(  # pylint: disable=too-many-instance-attributes
     _confirm_dialog_presenter: ConfirmDialogPresenter
 
     _search_entry: Gtk.SearchEntry
+    _search_toggle: Gtk.ToggleButton
+    _centre_stack: Gtk.Stack
+    _title_label: Gtk.Label
     _query_binding: GObject.Binding
     _view_button: Gtk.ToggleButton
     _source_button: Gtk.ToggleButton
@@ -192,27 +271,31 @@ class Toolbar(  # pylint: disable=too-many-instance-attributes
         self._confirm_dialog_presenter = confirm_dialog_presenter
         self._suppress_signal_writeback = False
 
-        # ---------- left side: New + Delete + search entry ----------
+        # ---------- left side: New + Delete + Search toggle ----------
         # New and Delete are the two note-lifecycle actions, kept
         # adjacent but as separate buttons (not a linked pair) so they
-        # do not read as one split button.
+        # do not read as one split button. The Search toggle joins them
+        # as a third raised button; its pressed state mirrors whether
+        # the centre search is open.
         new_button = self._build_new_button()
         self._delete_button = self._build_delete_button()
-        self._search_entry = self._build_search_entry()
+        self._search_toggle = self._build_search_toggle()
         left_box = Gtk.Box.new(
             Gtk.Orientation.HORIZONTAL,
             _TOOLBAR_INNER_SPACING_PX,
         )
         left_box.append(new_button)
         left_box.append(self._delete_button)
-        left_box.append(self._search_entry)
+        left_box.append(self._search_toggle)
         self.pack_start(left_box)
 
-        # ---------- centre: intentionally empty ----------
-        # No breadcrumb in the tag-based library. An empty label is set
-        # as the title widget so GTK does not auto-fill the centre slot
-        # with the window title (which would duplicate the OS title bar).
-        self.set_title_widget(Gtk.Label.new(""))
+        # ---------- centre: title ↔ search stack ----------
+        # The centre swaps between the selected note's title and the
+        # global search entry. Setting the stack as the title widget
+        # also keeps GTK from auto-filling the centre slot with the
+        # window title (which would duplicate the OS title bar).
+        self._centre_stack = self._build_centre_stack()
+        self.set_title_widget(self._centre_stack)
 
         # ---------- right side: View/Source segmented + Help ----------
         self._view_button, self._source_button = self._build_mode_toggle()
@@ -256,11 +339,25 @@ class Toolbar(  # pylint: disable=too-many-instance-attributes
             "notify::view-mode",
             self._on_app_state_view_mode_changed,
         )
+        # A query write while the search is collapsed (programmatic —
+        # the entry itself is only editable while expanded) must never
+        # leave a hidden filter behind the title.
+        self._app_state.connect("notify::query", self._on_query_changed)
+        # An edited note title arrives as items-changed, the same
+        # channel every other pane observes.
+        self._note_store.connect(
+            "items-changed",
+            self._on_store_items_changed,
+        )
 
         # ---------- initial state ----------
-        # The search entry is seeded by the binding's SYNC_CREATE above.
+        # The search entry is seeded by the binding's SYNC_CREATE above;
+        # if that seed was non-empty, the search must start expanded
+        # (never a hidden filter).
         self._refresh_delete_sensitivity()
         self._sync_mode_toggle_from_app_state()
+        self._refresh_title()
+        self._ensure_search_visible_if_query()
 
     # ------------------------------------------------------------------
     # Construction helpers — one method per child widget
@@ -293,9 +390,54 @@ class Toolbar(  # pylint: disable=too-many-instance-attributes
         button.connect("clicked", self._on_delete_clicked)
         return button
 
+    def _build_search_toggle(self) -> Gtk.ToggleButton:
+        """Build the raised search toggle in the note-actions group.
+
+        Styled like its *Delete* neighbour (icon-only, tooltip-labelled,
+        never ``flat``) so it reads as a real button. Being a toggle
+        gives search an explicit close affordance — click again — in
+        addition to :kbd:`Escape` in the entry.
+        """
+        toggle = Gtk.ToggleButton.new()
+        toggle.set_icon_name(_SEARCH_TOGGLE_ICON)
+        toggle.set_tooltip_text(_SEARCH_TOGGLE_TOOLTIP)
+        toggle.connect("toggled", self._on_search_toggled)
+        return toggle
+
+    def _build_centre_stack(self) -> Gtk.Stack:
+        """Build the two-page title ↔ search centre stack.
+
+        Pages are named by :class:`HeaderCentrePage`. The transition is
+        a quick crossfade — non-directional, reading as "same place,
+        new mode" (a slide would imply spatial navigation, which a mode
+        swap is not).
+        """
+        stack = Gtk.Stack.new()
+        stack.set_transition_type(Gtk.StackTransitionType.CROSSFADE)
+        stack.set_transition_duration(_CENTRE_TRANSITION_DURATION_MS)
+
+        self._title_label = Gtk.Label.new(_NO_NOTE_TITLE)
+        self._title_label.add_css_class(_TITLE_CSS_CLASS)
+        self._title_label.set_max_width_chars(_TITLE_MAX_WIDTH_CHARS)
+        self._title_label.set_ellipsize(Pango.EllipsizeMode.END)
+        stack.add_named(self._title_label, HeaderCentrePage.TITLE)
+
+        self._search_entry = self._build_search_entry()
+        stack.add_named(self._search_entry, HeaderCentrePage.SEARCH)
+
+        stack.set_visible_child_name(HeaderCentrePage.TITLE)
+        return stack
+
     def _build_search_entry(self) -> Gtk.SearchEntry:
         entry = Gtk.SearchEntry.new()
         entry.set_placeholder_text(_SEARCH_PLACEHOLDER)
+        # Small minimum + huge natural: the header bar caps the natural
+        # size to the space between the packed button groups, which is
+        # what makes the expanded entry fill the whole middle slot (see
+        # the module invariants).
+        entry.set_width_chars(_SEARCH_ENTRY_MIN_WIDTH_CHARS)
+        entry.set_max_width_chars(_SEARCH_ENTRY_NATURAL_WIDTH_CHARS)
+        entry.connect("stop-search", self._on_stop_search)
         return entry
 
     def _build_mode_toggle(
@@ -353,6 +495,24 @@ class Toolbar(  # pylint: disable=too-many-instance-attributes
         if button.get_active():
             self._app_state.set_view_mode(ViewMode.EDIT)
 
+    def _on_search_toggled(self, button: Gtk.ToggleButton) -> None:
+        """The single page switcher — driven by the toggle's state."""
+        if self._suppress_signal_writeback:
+            return
+        if button.get_active():
+            self._expand_search()
+        else:
+            self._collapse_search()
+
+    def _on_stop_search(self, _entry: Gtk.SearchEntry) -> None:
+        """:kbd:`Escape` in the entry: unpress the toggle, collapse.
+
+        The programmatic ``set_active(False)`` is fenced so the toggle
+        handler does not fire a second, redundant collapse.
+        """
+        self._set_search_toggle_active(False)
+        self._collapse_search()
+
     def _on_delete_clicked(self, _button: Gtk.Button) -> None:
         note_id = self._app_state.selected_note_id
         if note_id is None:
@@ -386,6 +546,23 @@ class Toolbar(  # pylint: disable=too-many-instance-attributes
         _pspec: GObject.ParamSpec,
     ) -> None:
         self._refresh_delete_sensitivity()
+        self._refresh_title()
+
+    def _on_query_changed(
+        self,
+        _state: AppState,
+        _pspec: GObject.ParamSpec,
+    ) -> None:
+        self._ensure_search_visible_if_query()
+
+    def _on_store_items_changed(
+        self,
+        _store: NoteListStore,
+        _position: int,
+        _removed: int,
+        _added: int,
+    ) -> None:
+        self._refresh_title()
 
     def _on_app_state_view_mode_changed(
         self,
@@ -402,6 +579,58 @@ class Toolbar(  # pylint: disable=too-many-instance-attributes
         self._delete_button.set_sensitive(
             self._app_state.selected_note_id is not None
         )
+
+    def _refresh_title(self) -> None:
+        """Mirror the selected note's title into the centre label."""
+        self._title_label.set_text(self._selected_note_title())
+
+    def _selected_note_title(self) -> str:
+        note_id = self._app_state.selected_note_id
+        if note_id is None:
+            return _NO_NOTE_TITLE
+        try:
+            return self._note_store.get_note(note_id).title
+        except KeyError:
+            # The selected id can transiently point at a note the store
+            # no longer holds (deletion races the selection refresh);
+            # the note list auto-corrects the selection right after.
+            return _NO_NOTE_TITLE
+
+    def _expand_search(self) -> None:
+        """Swap the centre to the search entry and focus it."""
+        self._centre_stack.set_visible_child_name(HeaderCentrePage.SEARCH)
+        self._search_entry.grab_focus()
+
+    def _collapse_search(self) -> None:
+        """Clear the query and swap the centre back to the title.
+
+        Clearing goes through the entry so the bidirectional binding
+        propagates the empty string into :attr:`AppState.query` — the
+        note list un-filters exactly as if the user had cleared the
+        box. This is what keeps a collapsed search from hiding a live
+        filter.
+        """
+        self._search_entry.set_text("")
+        self._centre_stack.set_visible_child_name(HeaderCentrePage.TITLE)
+
+    def _ensure_search_visible_if_query(self) -> None:
+        """Expand the search when a non-empty query would be hidden.
+
+        Covers the construction-time ``SYNC_CREATE`` seed and any later
+        programmatic :attr:`AppState.query` write. Never collapses —
+        collapsing is owned by the toggle / :kbd:`Escape` paths, which
+        clear the query first, so this cannot loop.
+        """
+        if self._app_state.query and not self._search_toggle.get_active():
+            self._set_search_toggle_active(True)
+            self._expand_search()
+
+    def _set_search_toggle_active(self, active: bool) -> None:
+        self._suppress_signal_writeback = True
+        try:
+            self._search_toggle.set_active(active)
+        finally:
+            self._suppress_signal_writeback = False
 
     def _sync_mode_toggle_from_app_state(self) -> None:
         self._suppress_signal_writeback = True
@@ -427,6 +656,21 @@ class Toolbar(  # pylint: disable=too-many-instance-attributes
     @property
     def search_entry(self) -> Gtk.SearchEntry:
         return self._search_entry
+
+    @property
+    def search_toggle(self) -> Gtk.ToggleButton:
+        return self._search_toggle
+
+    @property
+    def title_label(self) -> Gtk.Label:
+        return self._title_label
+
+    @property
+    def centre_page(self) -> HeaderCentrePage:
+        """The currently visible page of the centre stack."""
+        return HeaderCentrePage(
+            self._centre_stack.get_visible_child_name()
+        )
 
     @property
     def view_button(self) -> Gtk.ToggleButton:

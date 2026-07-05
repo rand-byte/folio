@@ -15,6 +15,14 @@ Three surfaces are covered here:
   re-derived through simulated per-character typing (which is also
   GTK-runtime-fragile — ``insert_text`` does not advance the cursor on
   every GTK version);
+* **display-gated** groups for the collapsible centre search and the
+  centre title: the search toggle is the single page switcher
+  (pressed → search page + focused entry; unpressed or ``stop-search``
+  → query cleared + title page + toggle unpressed), a non-empty query
+  is never hidden behind the title (seeded and programmatic writes
+  expand the search), and the title label mirrors the selected note —
+  following ``selected-note-id`` and refreshing on the store's
+  ``items-changed`` when a title is edited — with ellipsizing pinned;
 * **display-gated** groups for the two promoted note/app actions — the
   note-scoped *Delete* button (trash icon; sensitive only with a
   selection) and the app-scoped *Help* button (always available;
@@ -29,11 +37,13 @@ run without a GDK display skips rather than fails.
 from __future__ import annotations
 
 import unittest
+from dataclasses import replace
 from datetime import UTC, datetime
 from pathlib import Path
 
-from gi.repository import Gdk, Gtk
+from gi.repository import Gdk, Gtk, Pango
 
+from enums import HeaderCentrePage
 from giruntime.controllers.app_state import AppState
 from giruntime.controllers.note_controller import NoteController
 from giruntime.controllers.note_list_store import NoteListStore
@@ -59,12 +69,16 @@ def _display_available() -> bool:
 
 
 class _FakeNoteRepository:
-    """A repository the binding tests never read from.
+    """A repository the toolbar tests mostly never read from.
 
-    The toolbar's search binding does not touch the repository; the
-    only repository call the toolbar makes is :meth:`get` from the
-    delete path, which these tests do not exercise. Every method raises
-    so an inadvertent call surfaces as a test bug.
+    The toolbar's search binding does not touch the repository. The
+    calls the toolbar's behaviour can reach are :meth:`get` /
+    :meth:`list_all` (title tracking off the store) and — via
+    ``NoteListStore.update`` in the centre-title refresh test —
+    :meth:`update_source`, which stands in for the real repository
+    with the crudest title derivation possible (title = first line).
+    Every other method raises so an inadvertent call surfaces as a
+    test bug.
     """
 
     notes: dict[str, Note]
@@ -89,11 +103,18 @@ class _FakeNoteRepository:
 
     def update_source(
         self,
-        _note_id: str,
-        _source: str,
-        _modified_at: datetime,
+        note_id: str,
+        source: str,
+        modified_at: datetime,
     ) -> Note:
-        raise NotImplementedError
+        updated = replace(
+            self.notes[note_id],
+            source=source,
+            title=source.splitlines()[0],
+            modified_at=modified_at,
+        )
+        self.notes[note_id] = updated
+        return updated
 
     def delete(self, _note_id: str) -> None:
         raise NotImplementedError
@@ -121,9 +142,15 @@ class _FakeAttachmentStore:
         raise NotImplementedError
 
 
-def _build_toolbar(app_state: AppState) -> Toolbar:
-    """Construct a :class:`Toolbar` wired to fake collaborators."""
-    repository = _FakeNoteRepository()
+def _build_toolbar_and_store(
+    app_state: AppState,
+    repository: _FakeNoteRepository,
+) -> tuple[Toolbar, NoteListStore]:
+    """Construct a :class:`Toolbar` plus the store it observes.
+
+    ``repository`` may be pre-populated with notes; the store loads
+    them, so title-tracking tests can select and edit real rows.
+    """
     store = NoteListStore(
         repository=repository,
         clock=lambda: _FIXED_NOW,
@@ -135,11 +162,21 @@ def _build_toolbar(app_state: AppState) -> Toolbar:
         attachments=_FakeAttachmentStore(),
         app_state=app_state,
     )
-    return Toolbar(
+    toolbar = Toolbar(
         note_store=store,
         note_controller=controller,
         app_state=app_state,
     )
+    return toolbar, store
+
+
+def _build_toolbar(app_state: AppState) -> Toolbar:
+    """Construct a :class:`Toolbar` wired to fake collaborators."""
+    toolbar, _store = _build_toolbar_and_store(
+        app_state,
+        _FakeNoteRepository(),
+    )
+    return toolbar
 
 
 class ToolbarSmokeTests(unittest.TestCase):
@@ -198,6 +235,146 @@ class SearchBindingTests(unittest.TestCase):
         toolbar = _build_toolbar(app_state)
 
         self.assertEqual(toolbar.search_entry.get_text(), "seed")
+
+
+def _make_note(note_id: str, title: str) -> Note:
+    """A minimal well-formed note for title-tracking fixtures."""
+    return Note(
+        id=note_id,
+        title=title,
+        source=title,
+        snippet="",
+        tags=(),
+        created_at=_FIXED_NOW,
+        modified_at=_FIXED_NOW,
+    )
+
+
+@unittest.skipUnless(_display_available(), "no GDK display")
+class HeaderSearchTests(unittest.TestCase):
+    """The collapsible centre search driven by the toggle."""
+
+    def test_default_state_is_title_with_toggle_unpressed(self) -> None:
+        toolbar = _build_toolbar(AppState())
+        self.assertEqual(toolbar.centre_page, HeaderCentrePage.TITLE)
+        self.assertFalse(toolbar.search_toggle.get_active())
+
+    def test_pressing_toggle_shows_search_page(self) -> None:
+        toolbar = _build_toolbar(AppState())
+        toolbar.search_toggle.set_active(True)
+        self.assertEqual(toolbar.centre_page, HeaderCentrePage.SEARCH)
+
+    def test_unpressing_toggle_clears_query_and_shows_title(self) -> None:
+        # Collapsing must clear the query through the binding — a
+        # collapsed search never hides a live filter behind the title.
+        app_state = AppState()
+        toolbar = _build_toolbar(app_state)
+        toolbar.search_toggle.set_active(True)
+        toolbar.search_entry.set_text("needle")
+        self.assertEqual(app_state.query, "needle")
+
+        toolbar.search_toggle.set_active(False)
+
+        self.assertEqual(toolbar.centre_page, HeaderCentrePage.TITLE)
+        self.assertEqual(app_state.query, "")
+        self.assertEqual(toolbar.search_entry.get_text(), "")
+
+    def test_stop_search_unpresses_toggle_and_collapses(self) -> None:
+        # Escape reaches the toolbar as the entry's ``stop-search``
+        # signal; it must unpress the toggle (its state mirrors the
+        # search visibility) and clear the query like any collapse.
+        app_state = AppState()
+        toolbar = _build_toolbar(app_state)
+        toolbar.search_toggle.set_active(True)
+        toolbar.search_entry.set_text("needle")
+
+        toolbar.search_entry.emit("stop-search")
+
+        self.assertFalse(toolbar.search_toggle.get_active())
+        self.assertEqual(toolbar.centre_page, HeaderCentrePage.TITLE)
+        self.assertEqual(app_state.query, "")
+
+    def test_seeded_query_starts_expanded(self) -> None:
+        # The SYNC_CREATE seed copies a pre-populated query into the
+        # entry at construction; the search must then start expanded,
+        # never as a hidden filter behind the title.
+        app_state = AppState()
+        app_state.props.query = "seed"
+        toolbar = _build_toolbar(app_state)
+
+        self.assertEqual(toolbar.centre_page, HeaderCentrePage.SEARCH)
+        self.assertTrue(toolbar.search_toggle.get_active())
+
+    def test_programmatic_query_write_expands_search(self) -> None:
+        # Same invariant for a post-construction programmatic write.
+        app_state = AppState()
+        toolbar = _build_toolbar(app_state)
+        self.assertEqual(toolbar.centre_page, HeaderCentrePage.TITLE)
+
+        app_state.props.query = "from-state"
+
+        self.assertEqual(toolbar.centre_page, HeaderCentrePage.SEARCH)
+        self.assertTrue(toolbar.search_toggle.get_active())
+
+    def test_toggle_uses_search_icon_and_is_not_flat(self) -> None:
+        # The toggle sits with the note-action buttons and must read
+        # as one of them: a raised (never ``flat``) search-icon button.
+        toolbar = _build_toolbar(AppState())
+        self.assertEqual(
+            toolbar.search_toggle.get_icon_name(),
+            "system-search-symbolic",
+        )
+        self.assertFalse(toolbar.search_toggle.has_css_class("flat"))
+
+
+@unittest.skipUnless(_display_available(), "no GDK display")
+class CentreTitleTests(unittest.TestCase):
+    """The centre title label mirroring the selected note."""
+
+    def test_title_is_empty_without_selection(self) -> None:
+        toolbar = _build_toolbar(AppState())
+        self.assertEqual(toolbar.title_label.get_text(), "")
+
+    def test_title_follows_selected_note(self) -> None:
+        repository = _FakeNoteRepository()
+        repository.notes["n1"] = _make_note("n1", "First note")
+        repository.notes["n2"] = _make_note("n2", "Second note")
+        app_state = AppState()
+        toolbar, _store = _build_toolbar_and_store(app_state, repository)
+
+        app_state.set_selected_note_id("n1")
+        self.assertEqual(toolbar.title_label.get_text(), "First note")
+
+        app_state.set_selected_note_id("n2")
+        self.assertEqual(toolbar.title_label.get_text(), "Second note")
+
+        app_state.set_selected_note_id(None)
+        self.assertEqual(toolbar.title_label.get_text(), "")
+
+    def test_title_refreshes_when_note_is_edited(self) -> None:
+        # An edited title arrives through the store's ``items-changed``
+        # (the selection does not change), the same channel every other
+        # pane observes.
+        repository = _FakeNoteRepository()
+        repository.notes["n1"] = _make_note("n1", "Old title")
+        app_state = AppState()
+        toolbar, store = _build_toolbar_and_store(app_state, repository)
+        app_state.set_selected_note_id("n1")
+        self.assertEqual(toolbar.title_label.get_text(), "Old title")
+
+        store.update("n1", "New title\nbody")
+
+        self.assertEqual(toolbar.title_label.get_text(), "New title")
+
+    def test_title_label_is_ellipsized_with_width_cap(self) -> None:
+        # A long note title must never push the packed button groups
+        # around: the label is end-ellipsized and width-capped.
+        toolbar = _build_toolbar(AppState())
+        self.assertEqual(
+            toolbar.title_label.get_ellipsize(),
+            Pango.EllipsizeMode.END,
+        )
+        self.assertGreater(toolbar.title_label.get_max_width_chars(), 0)
 
 
 @unittest.skipUnless(_display_available(), "no GDK display")

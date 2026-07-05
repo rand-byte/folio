@@ -31,6 +31,20 @@ class ViewMode(StrEnum):
     EDIT = auto()
 
 
+class HeaderCentrePage(StrEnum):
+    """Named pages of the header bar's centre stack.
+
+    The toolbar's centre is a two-page :class:`Gtk.Stack` — the current
+    note's title, or the expanded search entry. Stack children are
+    addressed by name in :meth:`Gtk.Stack.set_visible_child_name`, so
+    each page gets a stable member here rather than a string literal at
+    the call sites. In-memory only, never persisted.
+    """
+
+    TITLE = auto()
+    SEARCH = auto()
+
+
 class NoteSortKey(StrEnum):
     """Sort keys exposed by the note-list dropdown."""
 

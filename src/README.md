@@ -112,6 +112,7 @@ for the rules; open its `test_*.py` sibling for the behaviour it must keep.
 | Tune article column margins | `config/defaults.py` (the `ARTICLE_*` multipliers) | none — `note_view.py` reads them once at `NoteView.__init__` |
 | Change rendered-view layout / scrolling | `giruntime/ui/note_view.py` `ArticleContainer` (a `Gtk.Widget` + `Gtk.Scrollable`) | `test_note_view.py` `ArticleContainer*` tests |
 | Change the under-title metadata line | `giruntime/ui/note_view.py` (`_insert_metadata_after_title`) + `note_render/tag_table.py` (`TagName.METADATA`); dates in `giruntime/ui/_dates.py` | `test_note_view.py`, `test_textbuffer_renderer.py` |
+| Change the header-bar title / collapsible search | `giruntime/ui/toolbar.py` (centre stack, search toggle, title tracking); page names in `enums.py` `HeaderCentrePage` | `test_toolbar.py` `HeaderSearchTests` / `CentreTitleTests` |
 | Change application chrome / CSS | `giruntime/ui/css/app.css` | none — the zipapp archives `src/` directly, so new assets ship automatically |
 | Change the application icon | `giruntime/ui/icons/scalable/apps/org.folio.Folio.svg` (the file name **is** the icon name) | `folio.gresource.xml` + `Makefile` only if adding/renaming a size variant |
 | Change the initial window size | `giruntime/ui/main_window.py` (used only when no size was restored) | `test_main_window.py`, `test_note_view.py` column-width tests |
@@ -262,7 +263,7 @@ with fake controllers/repositories.
 - **`note_view.py`** — read pane. `ArticleContainer` (a `Gtk.Widget` + `Gtk.Scrollable`) enforces the fixed-width column and owns scrolling; `ArticleTextView` paints the sheet + washes. Exposes the shared `build_article_surface()` and `make_cell_width_measurer()`. Renders from the in-memory store; parse errors render in-surface.
 - **`note_editor.py`** — source pane (`GtkSource.View`) with the `AttachmentsPanel` embedded below it. Debounced autosave routes through `NoteController.update_source`. Loads grammar via `_gresource.resource_path(...)`.
 - **`attachments_panel.py`** — per-note attachment management (header, add-file, one card per attachment). Add/remove route through `NoteController`; inserts nothing into the note body.
-- **`toolbar.py`** — top `Gtk.HeaderBar`: *New*, search entry bound to `AppState:query`, View/Source toggle, *Delete*, and a *Help* button targeting `app.help`.
+- **`toolbar.py`** — top `Gtk.HeaderBar`: *New*, *Delete*, a search toggle expanding a collapsible centre search (title ↔ full-width entry stack, pages named by `enums.HeaderCentrePage`; the entry is bound to `AppState:query`), the selected note's title in the centre, a View/Source toggle, and a *Help* button targeting `app.help`.
 - **`dialogs.py`** — shared modal dialogs (confirm-delete only). Production wires `Gtk.AlertDialog`; tests drive callbacks synchronously.
 - **`link_handler.py`** — `LinkHandler.install(...)` wiring motion/click controllers; URIs launched via an injected launcher, allowlisted by `enums.LinkScheme`.
 - **`_file_picker.py`** — the `FileDialogOpener` callable wrapping `Gtk.FileDialog.open` (offers all files; the size cap in `AttachmentStore` is the gate).
