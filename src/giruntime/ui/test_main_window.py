@@ -69,12 +69,12 @@ def _pump_main_loop() -> None:
             context.iteration(False)
 
 
-_TEST_APPLICATION_ID: str = "org.folio.Folio.test"
+_TEST_APPLICATION_ID: str = "io.github.rand_byte.Folio.test"
 """Application id the shared test app registers under.
 
-Deliberately distinct from production's ``org.folio.Folio`` so the test
-app never connects — as a single-instance remote — to a real ``folio``
-already running on the developer's session bus. A remote registration
+Deliberately distinct from production's ``io.github.rand_byte.Folio`` so
+the test app never connects — as a single-instance remote — to a real
+``folio`` already running on the developer's session bus. A remote registration
 would not emit ``startup`` locally, which is exactly the state that
 trips the window-add warning this fixture exists to avoid.
 """

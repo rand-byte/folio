@@ -1,0 +1,66 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<component type="desktop-application">
+  <id>io.github.rand_byte.Folio</id>
+
+  <name>Folio</name>
+  <summary>AsciiDoc note-taking application</summary>
+
+  <metadata_license>CC0-1.0</metadata_license>
+  <project_license>GPL-3.0-only</project_license>
+
+  <developer id="io.github.rand_byte">
+    <name>rand-byte</name>
+  </developer>
+
+  <description>
+    <p>
+      Folio is a native GTK 4 note-taking application for GNOME. Notes are
+      written in a strict subset of AsciiDoc and rendered live into a clean,
+      readable page; malformed markup reports a precise error instead of
+      rendering silently wrong.
+    </p>
+    <p>
+      The whole library is a single SQLite database under the XDG data
+      directory — no account, no cloud, no telemetry.
+    </p>
+    <p>Features:</p>
+    <ul>
+      <li>Source and rendered views of every note, toggled from the toolbar</li>
+      <li>Headings, lists, tables, code blocks, quotes, callouts, links and images</li>
+      <li>Tag-based organisation with multi-tag (AND) filtering and live search</li>
+      <li>Per-note file attachments</li>
+      <li>Continuous autosave</li>
+    </ul>
+  </description>
+
+  <launchable type="desktop-id">io.github.rand_byte.Folio.desktop</launchable>
+
+  <provides>
+    <binary>folio</binary>
+  </provides>
+
+  <categories>
+    <category>Office</category>
+    <category>Utility</category>
+    <category>TextEditor</category>
+  </categories>
+
+  <keywords>
+    <keyword>notes</keyword>
+    <keyword>asciidoc</keyword>
+    <keyword>editor</keyword>
+  </keywords>
+
+  <url type="homepage">https://github.com/rand-byte/folio</url>
+  <url type="bugtracker">https://github.com/rand-byte/folio/issues</url>
+
+  <content_rating type="oars-1.1"/>
+
+  <releases>
+    <release version="0.9.2rc1" type="development" date="2026-07-11">
+      <description>
+        <p>Release candidate.</p>
+      </description>
+    </release>
+  </releases>
+</component>

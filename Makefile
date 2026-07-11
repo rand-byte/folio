@@ -1,6 +1,6 @@
 .PHONY: all validate test type lint clean resource pyz
 
-PY_SRC := build_pyz.py $(shell find src -type f -name "*.py" ! -name "test_*")
+PY_SRC := build_pyz.py build-aux/install_python_tree.py $(shell find src -type f -name "*.py" ! -name "test_*")
 PY_TST := $(shell find src -type f -name "test_*.py")
 
 # Distribution + generated-artifact paths. ``folio.gresource`` is a
@@ -11,7 +11,7 @@ PYZ       := folio.pyz
 GRES      := src/giruntime/ui/folio.gresource
 GRES_XML  := src/giruntime/ui/folio.gresource.xml
 GRES_SRC  := src/giruntime/ui/language_spec.lang
-GRES_ICON := src/giruntime/ui/icons/scalable/apps/org.folio.Folio.svg
+GRES_ICON := src/giruntime/ui/icons/scalable/apps/io.github.rand_byte.Folio.svg
 SHEBANG   := /usr/bin/env python3
 
 # compile grammar + icon -> GResource (sourcedir = where the manifest's <file> resolves)

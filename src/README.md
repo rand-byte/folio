@@ -114,7 +114,7 @@ for the rules; open its `test_*.py` sibling for the behaviour it must keep.
 | Change the under-title metadata line | `giruntime/ui/note_view.py` (`_insert_metadata_after_title`) + `note_render/tag_table.py` (`TagName.METADATA`); dates in `giruntime/ui/_dates.py` | `test_note_view.py`, `test_textbuffer_renderer.py` |
 | Change the header-bar title / collapsible search | `giruntime/ui/toolbar.py` (centre stack, search toggle, title tracking); page names in `enums.py` `HeaderCentrePage` | `test_toolbar.py` `HeaderSearchTests` / `CentreTitleTests` |
 | Change application chrome / CSS | `giruntime/ui/css/app.css` | none — the zipapp archives `src/` directly, so new assets ship automatically |
-| Change the application icon | `giruntime/ui/icons/scalable/apps/org.folio.Folio.svg` (the file name **is** the icon name) | `folio.gresource.xml` + `Makefile` only if adding/renaming a size variant |
+| Change the application icon | `giruntime/ui/icons/scalable/apps/io.github.rand_byte.Folio.svg` (the file name **is** the icon name, and the icon name **is** the app id) | `folio.gresource.xml` + `Makefile` only if adding/renaming a size variant; `meson.build` installs this same file to `hicolor` for the dock/menu (§7) |
 | Change the initial window size | `giruntime/ui/main_window.py` (used only when no size was restored) | `test_main_window.py`, `test_note_view.py` column-width tests |
 | Change restored session state | `models/session_state.py` → `storage/session_state_store.py` (bump `_SCHEMA_VERSION`) → `giruntime/ui/application.py` → `main_window.py`. No window-position restore (GTK 4 has no API). | `storage/test_session_state_store.py`; `test_application.py`; `test_main_window.py` |
 | Change source-editor syntax highlight | `giruntime/ui/language_spec.lang` | rebuild the resource (`./run` / `make resource` do this); the `.xml` manifest only if adding/renaming grammar files |
@@ -324,10 +324,16 @@ not to silently drop the invariant.
 `folio` ships as a **zipapp** — a single `folio.pyz` run with `python folio.pyz`.
 There is no wheel and no `[build-system]`; `pyproject.toml` carries only project
 metadata and tool config. `build_pyz.py` archives the `src/` tree directly,
-filtering out `__pycache__`, `test_*.py`, and the grammar *sources*
-(`language_spec.lang`, `folio.gresource.xml`). Everything else — `css/*.css`,
-the compiled `folio.gresource`, and the `system_docs/*` files — rides along.
+filtering out `__pycache__`, `test_*.py`, the grammar *sources*
+(`language_spec.lang`, `folio.gresource.xml`), and developer documentation
+(`*.md` — i.e. this file). Everything else — `css/*.css`, the compiled
+`folio.gresource`, and the `system_docs/*` files — rides along.
 `src/__main__.py` lands at the archive root and is the implicit entry point.
+
+`build_pyz._included` is the **single definition of "what ships"** — the `.deb`
+imports the same predicate (see below), so the two channels cannot drift. Note
+the asymmetry it encodes: `*.md` is *documentation* and never ships, while
+`system_docs/*.adoc` is *content the app reads* and always does.
 
 **Build dependency: `glib-compile-resources`** (ships with the GLib dev tooling).
 It compiles `giruntime/ui/folio.gresource.xml` + `language_spec.lang` (+ the icon)
@@ -348,4 +354,80 @@ bundle (exactly once per process) as a side effect. A missing resource is a hard
 `FileNotFoundError` — the fix is always to build it (`./run` / `make`).
 
 **Generated / gitignored artifacts:** `giruntime/ui/folio.gresource` and
-`folio.pyz`. `make clean` removes both.
+`folio.pyz`. `make clean` removes both. Compiled bundles are gitignored by
+*pattern* (`*.gresource`), not by path: a hardcoded path is what let a stale
+`src/ui/folio.gresource` survive the `src/ui` → `src/giruntime/ui` move and get
+committed.
+
+### The Debian package (`.deb`) — a second, parallel route
+
+The zipapp above is unchanged and still the dev/release path. Alongside it, an
+**upstream Meson build** produces an archive-quality `folio_<version>_all.deb`.
+The two paths share their inputs and never interfere:
+
+| | zipapp | `.deb` |
+| --- | --- | --- |
+| Driver | `make pyz` → `build_pyz.py` | `meson` + `ninja` (debhelper drives them) |
+| GResource | `make resource` builds it in-tree | `gnome.compile_resources` builds it in the build dir |
+| "What ships" | `build_pyz._included` (no `test_*.py`, no `*.md`, no grammar sources) | **the same** `build_pyz._included` |
+| Result | `folio.pyz` (`src/` at the archive root) | `/usr/share/folio/` (`src/` as a private `sys.path` root) |
+
+- **Private directory, not `dist-packages`.** The app installs its whole tree
+  into `/usr/share/folio` and `/usr/bin/folio` runs *that directory* as
+  `__main__` (`runpy.run_path`) — the same mechanism as `python folio.pyz`. This
+  is what preserves the package-less `src/` import model (§4): the generic
+  top-level names (`config`, `models`, `search`, `storage`, …) never enter the
+  shared Python library namespace, and the in-package data files
+  (`folio.gresource`, `css/app.css`, `system_docs/*`) keep the committed relative
+  paths `importlib.resources` resolves.
+- **One definition of "what ships".** `build-aux/install_python_tree.py` (the
+  Meson install script) imports `build_pyz._included` rather than restating the
+  exclusion rules, so the `.deb` and the zipapp carry the same files. It adds one
+  exclusion of its own: compiled `*.gresource` bundles are build *outputs* — Meson
+  installs the one it compiled, so a source-tree copy is never installed over it.
+- **`debian/rules` must say `--buildsystem=meson`.** Auto-detection would pick
+  `makefile` (debhelper looks for a `Makefile` before a `meson.build`, and this
+  repo keeps its dev `Makefile` at the root), which silently builds an **empty
+  package**. `--with python3` is only post-processing: `dh_python3` byte-compiles
+  the private dir and fills `${python3:Depends}`.
+- **Desktop integration** ships with the package: `data/*.desktop`,
+  `data/*.metainfo.xml`, and the app icon installed into `hicolor`. All three are
+  named for the app id.
+
+**App id: `io.github.rand_byte.Folio`** — one string is the `GtkApplication`
+application-id (`giruntime/ui/application.py`), the icon *file* name, the
+`.desktop` basename and the AppStream `<id>`, so the dock icon and the in-window
+icon resolve through the same name. The **GResource prefixes are a separate
+namespace** and deliberately still read `/org/folio/…` (`enums.GResourceSubtree`
++ the manifest): they are internal mount points, not the app id.
+
+**Build/verify the package** (Debian 13 *trixie* or newer — `requires-python >=
+3.13`):
+
+```sh
+# 3.0 (quilt) needs an orig tarball named for the *Debian upstream* version:
+git archive --prefix=folio-0.9.2~rc1/ -o ../folio_0.9.2~rc1.orig.tar.gz HEAD
+dpkg-buildpackage -us -uc -b
+lintian -i -I ../folio_*_all.deb
+```
+
+**Versioning — one release, three dialects.** `pyproject.toml` holds the
+upstream version and everything else mirrors it. Pre-releases are where the
+dialects diverge, so the mapping matters:
+
+| Where | 0.9.2 release candidate | Final 0.9.2 |
+| --- | --- | --- |
+| `pyproject.toml`, `meson.build`, AppStream `<release>` | `0.9.2rc1` (PEP 440) | `0.9.2` |
+| git tag | `v0.9.2-rc1` | `v0.9.2` |
+| `debian/changelog`, orig tarball | `0.9.2~rc1-1` | `0.9.2-1` |
+
+The **tilde is not cosmetic**: `~` is the only character that sorts *before* the
+empty string in dpkg's comparison, so `0.9.2~rc1` < `0.9.2`, which is what makes
+the RC upgradable to the final release. Spelling it `0.9.2-rc1` instead would
+sort *after* `0.9.2` and apt would never offer the upgrade. AppStream marks the
+same release `type="development"`. The trailing `-1` is the *Debian revision*
+(packaging-only changes bump it: `-2`, `-3`, …), independent of upstream.
+
+Files: `meson.build`, `folio.in` (launcher template),
+`build-aux/install_python_tree.py`, `data/`, `debian/`. None of them live inside
+`src/` — `src/` is installed wholesale.

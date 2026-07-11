@@ -1,3 +1,16 @@
 Notes.geany
-src/giruntime/ui/folio.gresource
+# Compiled GResource bundles are build outputs — ignored by pattern, not by
+# one hardcoded path (a hardcoded path is how a stale src/ui/folio.gresource
+# survived the src/ui -> src/giruntime/ui move and got committed).
+*.gresource
 folio.pyz
+
+__pycache__/
+
+# Meson / Debian build artifacts
+build/
+debian/.debhelper/
+debian/files
+debian/folio/
+debian/*.substvars
+debian/debhelper-build-stamp

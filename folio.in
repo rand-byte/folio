@@ -1,0 +1,21 @@
+#!/usr/bin/python3
+"""Installed launcher for folio (Meson template; ``@pkgdatadir@`` substituted).
+
+Principles & invariants
+-----------------------
+* The launcher carries **no application logic**. It selects the interpreter and
+  the install directory; everything else is ``src/__main__.py``, unchanged.
+* Running the install *directory* as ``__main__`` is the same mechanism the
+  zipapp uses (``python folio.pyz``): the directory becomes ``sys.path[0]`` and
+  its ``__main__.py`` runs, so the package-less ``src/`` import model (bare
+  ``import config`` / ``import enums`` / …) resolves identically from
+  ``/usr/share/folio``.
+* ``src/__main__.py`` ends in ``raise SystemExit(main())``, so the process exit
+  code propagates out of :func:`runpy.run_path` untouched — no duplicated entry
+  sequence, no swallowed status.
+* The shebang is the interpreter path (not ``/usr/bin/env python3``), per Debian
+  policy for installed scripts.
+"""
+import runpy
+
+runpy.run_path('@pkgdatadir@', run_name='__main__')

@@ -128,7 +128,7 @@ from storage.note_repository import NoteRepository
 from storage.session_state_store import SessionStateStore
 
 
-_APPLICATION_ID: str = "org.folio.Folio"
+_APPLICATION_ID: str = "io.github.rand_byte.Folio"
 """Reverse-DNS-shaped identifier registered with the session bus.
 
 GTK uses this to enforce single-instance behaviour and to name the

@@ -4,6 +4,6 @@
     <file>language_spec.lang</file>
   </gresource>
   <gresource prefix="/org/folio/icons">
-    <file alias="scalable/apps/org.folio.Folio.svg">icons/scalable/apps/org.folio.Folio.svg</file>
+    <file alias="scalable/apps/io.github.rand_byte.Folio.svg">icons/scalable/apps/io.github.rand_byte.Folio.svg</file>
   </gresource>
 </gresources>

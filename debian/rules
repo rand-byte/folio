@@ -1,0 +1,23 @@
+#!/usr/bin/make -f
+
+export DEB_BUILD_MAINT_OPTIONS = hardening=+all
+
+# Meson is the build system: debhelper runs meson + ninja + `meson install`
+# into the staging dir, so there is no debian/*.install file-copying.
+#
+# --buildsystem=meson is REQUIRED, not decorative. Auto-detection would pick
+# `makefile` -- the repo keeps its dev `Makefile` at the root (type/lint/test/
+# pyz), and debhelper checks for a Makefile before it checks for meson.build,
+# so an auto-detected build silently produces an EMPTY package.
+#
+# The python3 addon only post-processes the already-installed tree: dh_python3
+# scans the private /usr/share/folio directory by default, byte-compiles it via
+# generated maintainer scripts, and fills ${python3:Depends}.
+%:
+	dh $@ --buildsystem=meson --with python3
+
+# The UI tests need a headless Wayland compositor (weston) plus a display and
+# only *skip* without one (src/README.md §5), so a build-time run would prove
+# nothing about the widgets; `make test` is where they are gated instead.
+override_dh_auto_test:
+	:

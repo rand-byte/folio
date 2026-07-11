@@ -1,0 +1,32 @@
+.TH FOLIO 1 "2026-07-11" "folio 0.9.2rc1" "User Commands"
+.SH NAME
+folio \- AsciiDoc note-taking application
+.SH SYNOPSIS
+.B folio
+.SH DESCRIPTION
+.B folio
+is a GTK 4 note-taking application. Notes are written in a strict subset of
+AsciiDoc and rendered live into a readable page; malformed markup reports a
+precise error rather than rendering silently wrong.
+.PP
+Notes are organised with tags rather than folders, filtered live by a search
+box, and saved continuously as you type. Each note can carry file attachments.
+.PP
+The command takes no options and no arguments; the whole application is driven
+from its window. Press
+.B F1
+in the application for the built-in markup reference.
+.SH FILES
+.TP
+.I ~/.local/share/folio/notes.db
+The note library: a single SQLite database holding every note, tag and
+attachment. It is created on first launch, together with a seed welcome note.
+Honours
+.BR $XDG_DATA_HOME .
+.TP
+.I ~/.local/share/folio/session.json
+Restored window and selection state.
+.SH SEE ALSO
+The project homepage,
+.UR https://github.com/rand-byte/folio
+.UE .

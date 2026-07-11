@@ -1,0 +1,28 @@
+Source: folio
+Section: editors
+Priority: optional
+Maintainer: rand-byte <57550155+rand-byte@users.noreply.github.com>
+Build-Depends:
+ debhelper-compat (= 13),
+ dh-python,
+ meson,
+ python3 (>= 3.13),
+ libglib2.0-dev,
+ libglib2.0-dev-bin,
+Standards-Version: 4.7.2
+Homepage: https://github.com/rand-byte/folio
+Rules-Requires-Root: no
+
+Package: folio
+Architecture: all
+Depends:
+ ${misc:Depends},
+ ${python3:Depends},
+ python3 (>= 3.13),
+ python3-gi (>= 3.50),
+ gir1.2-gtk-4.0,
+ gir1.2-gtksource-5 (>= 5.4),
+Description: AsciiDoc note-taking application
+ folio is a GTK 4 note-taking application. Notes are written in a strict
+ subset of AsciiDoc and rendered live; the library is stored in a per-user
+ SQLite database under the XDG data directory.

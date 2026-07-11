@@ -34,7 +34,7 @@ class ResourcePathTests(unittest.TestCase):
         _gresource.resource_path(GResourceSubtree.ICONS)
 
         found, _size, _flags = Gio.resources_get_info(
-            "/org/folio/icons/scalable/apps/org.folio.Folio.svg",
+            "/org/folio/icons/scalable/apps/io.github.rand_byte.Folio.svg",
             Gio.ResourceLookupFlags.NONE,
         )
         self.assertTrue(found)
