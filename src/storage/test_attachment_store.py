@@ -21,7 +21,7 @@ from config.defaults import (
     MAX_ATTACHMENT_BYTES,
     SEED_WELCOME_NOTE_ID,
 )
-from enums import AttachmentRejectionReason
+from enums import AttachmentExportFailureReason, AttachmentRejectionReason
 from models.note import Note
 from storage.attachment_store import (
     AttachmentStore,
@@ -30,7 +30,7 @@ from storage.attachment_store import (
 from storage.database import Database
 from storage.migrations import apply_pending
 from storage.note_repository import NoteRepository
-from storage.protocols import AttachmentRejected
+from storage.protocols import AttachmentExportFailed, AttachmentRejected
 
 
 _FIXED_NOW: datetime = datetime(2026, 4, 28, 12, 0, 0, tzinfo=UTC)
@@ -735,6 +735,73 @@ class ForeignKeyEnforcementTests(unittest.TestCase):
         path = self.files.write("a.png", _PNG_1X1)
         with self.assertRaises(sqlite3.IntegrityError):
             self.store.add_for_note("note-does-not-exist", path)
+
+
+class ExportToTests(unittest.TestCase):
+    """``export_to`` — the outbound mirror of ``add_for_note``."""
+
+    db: Database
+    files: _TempFileFactory
+    store: AttachmentStore
+
+    def setUp(self) -> None:
+        self.db = _build_database_with_note()
+        self.files = _TempFileFactory()
+        self.store = AttachmentStore(self.db, id_factory=_IdSequence())
+
+    def tearDown(self) -> None:
+        self.files.close()
+        self.db.close()
+
+    def _add(self, name: str = "photo.png", data: bytes = _PNG_1X1) -> str:
+        path = self.files.write(name, data)
+        return self.store.add_for_note("note-1", path).id
+
+    def test_written_file_is_byte_identical(self) -> None:
+        attachment_id = self._add()
+        destination = self.files.root / "out.png"
+        self.store.export_to(attachment_id, destination)
+        self.assertEqual(destination.read_bytes(), _PNG_1X1)
+
+    def test_export_signature_returns_no_bytes(self) -> None:
+        # The metadata/bytes split: only ``get_bytes`` hands a caller
+        # bytes, so the export's annotated return type must be None —
+        # mypy rejects assigning its result, and at runtime the write is
+        # the only observable effect.
+        annotations = AttachmentStore.export_to.__annotations__
+        self.assertEqual(annotations["return"], "None")
+
+    def test_existing_destination_is_overwritten(self) -> None:
+        attachment_id = self._add()
+        destination = self.files.write("out.png", b"stale")
+        self.store.export_to(attachment_id, destination)
+        self.assertEqual(destination.read_bytes(), _PNG_1X1)
+
+    def test_unknown_attachment_raises_with_its_reason(self) -> None:
+        with self.assertRaises(AttachmentExportFailed) as ctx:
+            self.store.export_to("att-nope", self.files.root / "out.png")
+        self.assertEqual(
+            ctx.exception.reason,
+            AttachmentExportFailureReason.UNKNOWN_ATTACHMENT,
+        )
+
+    def test_unknown_attachment_writes_nothing(self) -> None:
+        destination = self.files.root / "out.png"
+        with self.assertRaises(AttachmentExportFailed):
+            self.store.export_to("att-nope", destination)
+        self.assertFalse(destination.exists())
+
+    def test_unwritable_destination_raises_with_its_reason(self) -> None:
+        attachment_id = self._add()
+        # A directory that does not exist — the write raises OSError,
+        # which the store translates rather than letting escape.
+        destination = self.files.root / "missing-dir" / "out.png"
+        with self.assertRaises(AttachmentExportFailed) as ctx:
+            self.store.export_to(attachment_id, destination)
+        self.assertEqual(
+            ctx.exception.reason,
+            AttachmentExportFailureReason.DESTINATION_UNWRITABLE,
+        )
 
 
 if __name__ == "__main__":

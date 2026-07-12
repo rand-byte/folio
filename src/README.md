@@ -130,7 +130,10 @@ for the rules; open its `test_*.py` sibling for the behaviour it must keep.
 | Change selection / view-mode plumbing | `giruntime/controllers/app_state.py` (a GObject property + rule-bearing mutator). `MainWindow._on_view_mode_changed` is the single view-mode orchestrator. | every UI widget that subscribes via `notify::<prop>` |
 | Add a new dialog | `giruntime/ui/dialogs.py` | its opener |
 | Change link/URL handling | `giruntime/ui/link_handler.py`; allowlist in `enums.LinkScheme` | `asciidoc/inline_parser.py` for scheme validation |
-| Change attachment rules | `storage/attachment_store.py`; size cap in `config/defaults.MAX_ATTACHMENT_BYTES` | `giruntime/controllers/note_controller.py` for toast wiring |
+| Change click handling for *anything* clickable | `giruntime/ui/link_handler.py` — it dispatches the renderer's closed `ActivationTarget` union (`UrlTarget` → launcher, `AttachmentTarget` → the injected `AttachmentActivator`) with `assert_never`, so a third activatable thing is a type error until every consumer handles it | `note_render/textbuffer_renderer.py` (`target_for_tags`); `note_view.py` / `help_window.py` (the activators) |
+| Change attachment rules | `storage/attachment_store.py`; size cap in `config/defaults.MAX_ATTACHMENT_BYTES`; export (`export_to`) is the outbound mirror of `add_for_note` | `giruntime/controllers/note_controller.py` for toast wiring (`attachment-rejected` / `attachment-export-failed`) |
+| Change the `attachment:` save link | `asciidoc/inline_parser.py` (the macro) → `note_render/textbuffer_renderer.py` (`_emit_activatable`) → `link_handler.py` (dispatch) → `note_view.py` `_activate_attachment` (resolve → save dialog → `NoteController.export_attachment`) | `_file_picker.py` (`FileSaveDialogOpener`); `help_window.py` (its demo activator) |
+| Change the `attachments::[]` table | `asciidoc/parser.py` `_parse_attachment_table` (the `cols` attrlist) + `enums.AttachmentTableColumn` → `note_render/attachment_table.py` (the pure AST → AST expansion: header labels, cell builders, the empty-list paragraph) | nothing in the renderer: the expansion produces an ordinary `Table`, so `_emit_table` is reused by construction |
 | Change the attachments panel | `giruntime/ui/attachments_panel.py`; size formatting in `_filesize.py`; picker in `_file_picker.py` | `note_controller.py` (`attachments-changed`); `note_list.py` (📎 badge) |
 | Edit the help reference text | `system_docs/help.adoc` (must stay inside the supported subset; §7 coverage test requires every node kind to appear) | `enums.py` (`HelpSection`) if buckets change; `test_help_window.py` |
 | Add a bundled system document | `enums.py` (`SystemDocument` member) → drop the file under `system_docs/` → read via `system_docs.load_text` / `load_bytes` | its consumer (`migrations.py` seed / `help_window.py`); `system_docs/test___init__.py` |
@@ -169,7 +172,7 @@ gi-free via `importlib.resources` — **not** gresource content. Read by both
 - **`__init__.py`** — the shared loader keyed by the `SystemDocument` enum: `load_text(...) -> str`, `load_bytes(...) -> bytes`.
 - **`welcome.adoc`** — seed welcome note source (v1 seeds it; a golden test pins its exact bytes).
 - **`help.adoc`** — the help reference, authored in the supported subset (tested to parse clean and to exercise every node kind).
-- **`help-demo.png`** — demo image served to the help's `image::` example.
+- **`help-demo.png`** — demo image served to the help's `image::` example, and (via `HelpWindow`'s static demo attachment list) to its `attachment:` / `attachments::[]` examples.
 
 ### `models/` — frozen dataclasses
 
@@ -194,7 +197,7 @@ A **pure** format library: GTK-free and storage-free, importing only `enums` /
 `protocols.py` is the typing surface every higher layer imports; concrete
 classes are siblings.
 
-- **`protocols.py`** — repository / attachment-store / session-state / renderer protocols, plus the `AttachmentRejected` exception and resolver aliases. Pure typing — no `sqlite3` or `gi` at runtime.
+- **`protocols.py`** — repository / attachment-store / session-state / renderer protocols, plus the `AttachmentRejected` / `AttachmentExportFailed` exceptions and resolver aliases (`ImageBytesResolver`, `AttachmentListResolver`, …). Pure typing — no `sqlite3` or `gi` at runtime.
 - **`database.py`** — owns the single `sqlite3.Connection` (`autocommit=True`, `foreign_keys=ON`, composable `transaction()` via savepoints).
 - **`migrations.py`** — all schema statements in an append-only `ALL_MIGRATIONS`; `apply_pending()` is idempotent. See the live schema below.
 - **`note_repository.py`** — SQLite-backed repository and **single owner of the `source → cached state` mapping**: `insert` / `update_source` derive title/snippet/tags, write the cached columns and `note_tags`, and return the persisted derived `Note`.
@@ -269,8 +272,8 @@ with fake controllers/repositories.
 - **`attachments_panel.py`** — per-note attachment management (header, add-file, one card per attachment). Add/remove route through `NoteController`; inserts nothing into the note body.
 - **`toolbar.py`** — top `Gtk.HeaderBar`: *New*, *Delete*, a search toggle expanding a collapsible centre search (title ↔ full-width entry stack, pages named by `enums.HeaderCentrePage`; the entry is bound to `AppState:query`), the selected note's title in the centre, a View/Source toggle, and a *Help* button targeting `app.help`.
 - **`dialogs.py`** — shared modal dialogs (confirm-delete only). Production wires `Gtk.AlertDialog`; tests drive callbacks synchronously.
-- **`link_handler.py`** — `LinkHandler.install(...)` wiring motion/click controllers; URIs launched via an injected launcher, allowlisted by `enums.LinkScheme`.
-- **`_file_picker.py`** — the `FileDialogOpener` callable wrapping `Gtk.FileDialog.open` (offers all files; the size cap in `AttachmentStore` is the gate).
+- **`link_handler.py`** — `LinkHandler.install(...)` wiring motion/click controllers. Resolves a click to the renderer's closed `ActivationTarget` union and dispatches it: a `UrlTarget` to an injected launcher (allowlisted by `enums.LinkScheme`), an `AttachmentTarget` to an injected `AttachmentActivator`. Installed by both `note_view.py` and `help_window.py`.
+- **`_file_picker.py`** — the two file-dialog openers: `FileDialogOpener` wrapping `Gtk.FileDialog.open` (attach a file; offers all files, the size cap in `AttachmentStore` is the gate) and `FileSaveDialogOpener` wrapping `set_initial_name` + `save` (save an attachment back out). Both collapse cancel / backend error / non-local URI to `None`.
 - **`_filesize.py`** — shared human-readable byte-size formatting (binary convention). Pure.
 - **`_dates.py`** — shared locale-independent date formatting (`format_date_short` / `format_date_long`). Pure.
 - **`_gresource.py`** — `resource_path(GResourceSubtree) -> str`, the only way to obtain a path into the compiled `folio.gresource`; registers the bundle idempotently as a side effect. A missing bundle raises `FileNotFoundError`.
@@ -284,7 +287,8 @@ The GTK rendering of a parsed document. These are the only consumers that need
 `gi` + `storage.protocols`, so they live here and keep `asciidoc` pure.
 
 - **`tag_table.py`** — builds the shared `Gtk.TextTagTable`. **Every visual style lives here, exactly once** (inline, heading, block-level, table, metadata, list geometry, error-notice, and the note-sheet colour). Block tags carry text position only; tints are painted by `ArticleTextView` from the `WashSpec`s this module exposes.
-- **`textbuffer_renderer.py`** — `TextBufferRenderer.render_into(document, buffer, ...)`. Rebuilds the buffer each call; **no construct escapes to a widget** (tables, images, admonitions, blockquotes, code blocks are all native buffer content). Image bytes flow through an injected `ImageBytesResolver`; an optional `post_title_hook` lets `NoteView` insert the metadata line.
+- **`textbuffer_renderer.py`** — `TextBufferRenderer.render_into(document, buffer, ...)`. Rebuilds the buffer each call; **no construct escapes to a widget** (tables, images, admonitions, blockquotes, code blocks are all native buffer content). Image bytes flow through an injected `ImageBytesResolver`, the current note's attachment metadata through an injected `AttachmentListResolver`; an optional `post_title_hook` lets `NoteView` insert the metadata line. Clickable ranges carry an anonymous per-link tag mapped to an `ActivationTarget` (`UrlTarget | AttachmentTarget`), recovered by `target_for_tags` — one styling tag (`TagName.LINK`), one lookup, one dispatch.
+- **`attachment_table.py`** — `expand_attachment_tables(document, attachments)`: the pure AST → AST transform that replaces every `AttachmentTable` node (`attachments::[]`) with an ordinary `Table` — header labels, one row per attachment, the name cell an `AttachmentLink` — or, for a note with no attachments, an italic *"No attachments."* paragraph. Called by `render_into` before the emit walk, so the generated table reuses `_emit_table`'s column geometry by construction. No GTK, no storage: unit-testable with no display.
 
 ---
 

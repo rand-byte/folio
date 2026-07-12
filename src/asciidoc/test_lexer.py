@@ -13,6 +13,7 @@ import unittest
 from asciidoc.lexer import (
     AdmonitionDirectiveToken,
     AdmonitionFenceToken,
+    AttachmentTableMacroToken,
     AttributeEntryToken,
     BlankToken,
     CodeDirectiveToken,
@@ -926,6 +927,46 @@ class SourceLinesHelperTests(unittest.TestCase):
 
     def test_empty(self) -> None:
         self.assertEqual(source_lines(""), [])
+
+
+class AttachmentTableMacroTokenizationTests(unittest.TestCase):
+    """``attachments::[…]`` lexes to its own line-level token."""
+
+    def test_bare_macro_is_an_attachment_table_macro_token(self) -> None:
+        (token,) = tokenize("attachments::[]")
+        self.assertIsInstance(token, AttachmentTableMacroToken)
+
+    def test_raw_is_everything_after_the_prefix(self) -> None:
+        (token,) = tokenize('attachments::[cols="name,size"]')
+        assert isinstance(token, AttachmentTableMacroToken)
+        self.assertEqual(token.raw, '[cols="name,size"]')
+
+    def test_token_kind_is_attachment_table_macro(self) -> None:
+        (token,) = tokenize("attachments::[]")
+        self.assertEqual(token.kind, TokenKind.ATTACHMENT_TABLE_MACRO)
+
+    def test_lexer_is_permissive_about_malformed_attributes(self) -> None:
+        # Bracket balance is the parser's contract, not the lexer's: a
+        # malformed macro must still reach the parser as this token so
+        # the error is macro-specific rather than UNKNOWN_BLOCK.
+        (token,) = tokenize("attachments::[cols=")
+        assert isinstance(token, AttachmentTableMacroToken)
+        self.assertEqual(token.raw, "[cols=")
+
+    def test_missing_brackets_still_lexes_as_the_macro(self) -> None:
+        (token,) = tokenize("attachments::")
+        assert isinstance(token, AttachmentTableMacroToken)
+        self.assertEqual(token.raw, "")
+
+    def test_inline_single_colon_macro_is_not_this_token(self) -> None:
+        # The inline ``attachment:`` macro belongs to the inline parser;
+        # a line carrying one is ordinary prose at the line level.
+        (token,) = tokenize("See attachment:a.pdf[the file].")
+        self.assertIsInstance(token, LineToken)
+
+    def test_line_starting_with_the_inline_macro_is_a_line_token(self) -> None:
+        (token,) = tokenize("attachment:a.pdf[the file]")
+        self.assertIsInstance(token, LineToken)
 
 
 if __name__ == "__main__":

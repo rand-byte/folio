@@ -34,7 +34,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from enums import AdmonitionKind, LinkScheme
+from enums import AdmonitionKind, AttachmentTableColumn, LinkScheme
 
 
 # ---------------------------------------------------------------------------
@@ -183,15 +183,52 @@ class Link:
     source_line: int
 
 
+@dataclass(frozen=True)
+class AttachmentLink:
+    """An inline ``attachment:FILE[label]`` macro — a *save* link.
+
+    The sibling of :class:`Link`: both are *activatable* things the
+    reader can click, and both carry a non-empty ``text`` tuple so the
+    renderer iterates display children without a special case. Where a
+    :class:`Link` names a remote URL, this node names an attachment of
+    the **currently displayed note** by its :attr:`filename` — the same
+    key :class:`Image` resolves against. It is not a path and not an
+    attachment id; the parser rejects a target that is empty, carries
+    whitespace, or contains a path separator with
+    :class:`ParseErrorKind.BAD_ATTACHMENT_MACRO`.
+
+    Resolution is deliberately **not** the parser's job: the parser is
+    storage-free and cannot know which files are attached, so a macro
+    naming a file that is not attached is a *parse success*. Whether the
+    named attachment exists is discovered at click time, where the UI
+    surfaces the failure.
+
+    ``text`` is the bracketed label when the user wrote one, and a single
+    :class:`Text` carrying the filename when the brackets are empty
+    (``attachment:report.pdf[]``) — mirroring :class:`Link`'s bare-URL
+    rule. The label may contain nested formatting (bold, italic,
+    monospace) but **not** another link or attachment macro: activatable
+    things do not nest, and the inline parser raises
+    :class:`ParseErrorKind.BAD_ATTACHMENT_MACRO` (or
+    :class:`ParseErrorKind.BAD_LINK_MACRO`) if one is found inside.
+    """
+
+    filename: str
+    text: tuple[InlineNode, ...]
+    source_line: int
+
+
 type InlineNode = (
     Text | Bold | Italic | Strikethrough | Underline | Monospace | Link
-    | SoftBreak | HardBreak
+    | AttachmentLink | SoftBreak | HardBreak
 )
 """The closed union of inline node kinds the parser produces.
 
 Step 4 produced :class:`Text`, :class:`Bold`, :class:`Italic`,
 :class:`Strikethrough`, and :class:`Underline`. Step 13 extends this
-union with :class:`Monospace` and :class:`Link`. The soft-line-break
+union with :class:`Monospace` and :class:`Link`; the attachment-links
+feature extends it with :class:`AttachmentLink`, the save-link sibling
+of :class:`Link`. The soft-line-break
 fix extends it with :class:`SoftBreak` — the typed joiner the block
 parser emits between a multi-line paragraph's source lines (replacing
 the former ``Text("\\n", …)`` connector). The hard-line-break feature
@@ -453,6 +490,32 @@ class Blockquote:
     source_line: int
 
 
+@dataclass(frozen=True)
+class AttachmentTable:
+    """The block macro ``attachments::[]`` — a *generated* table.
+
+    A placeholder node, not a rendering: it records *that* the note asked
+    for a table of its own attachments and *which columns* it wants. The
+    node carries no attachment data at all, because the AST is pure —
+    the parser has no access to storage.
+
+    The node is expanded into an ordinary :class:`Table` (or, when the
+    note has no attachments, a single italic paragraph) by a pure
+    transform in the UI-render layer — the first layer that may know
+    about both the AST and the storage models — so the table reaches the
+    reader through the *same* renderer path a hand-written ``|===`` table
+    does. No :class:`AttachmentTable` ever reaches the renderer.
+
+    ``columns`` is the ordered, duplicate-free tuple of columns to render:
+    the parsed ``cols="…"`` attribute, or every
+    :class:`AttachmentTableColumn` member in declaration order when the
+    attribute is absent.
+    """
+
+    columns: tuple[AttachmentTableColumn, ...]
+    source_line: int
+
+
 type BlockNode = (
     Section
     | Paragraph
@@ -463,13 +526,16 @@ type BlockNode = (
     | Table
     | Admonition
     | Blockquote
+    | AttachmentTable
 )
 """The closed union of block node kinds the parser produces.
 
 Step 4 produced :class:`Section`, :class:`Paragraph`, :class:`OrderedList`,
 :class:`UnorderedList`, :class:`CodeBlock`, and :class:`Image`. Step 14
 extends this union with :class:`Table`. Step 15 extends it further with
-:class:`Admonition` and :class:`Blockquote`.
+:class:`Admonition` and :class:`Blockquote`. The attachment-links feature
+adds :class:`AttachmentTable`, the only node that is *expanded away*
+(into a :class:`Table`) before rendering rather than emitted directly.
 """
 
 

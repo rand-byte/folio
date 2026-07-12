@@ -16,14 +16,14 @@ from pathlib import Path
 
 from gi.repository import Gdk, Gtk
 
-from enums import AttachmentRejectionReason
+from enums import AttachmentExportFailureReason, AttachmentRejectionReason
 from giruntime.controllers.app_state import AppState
 from giruntime.controllers.note_controller import NoteController
 from giruntime.controllers.note_list_store import NoteListStore
 from giruntime.ui.attachments_panel import AttachmentsPanel
 from models.attachment import Attachment
 from models.note import Note
-from storage.protocols import AttachmentRejected
+from storage.protocols import AttachmentExportFailed, AttachmentRejected
 
 
 _FIXED_NOW: datetime = datetime(2026, 4, 28, 12, 0, 0, tzinfo=UTC)
@@ -148,6 +148,21 @@ class _FakeAttachmentStore:
 
     def count_for_note(self, note_id: str) -> int:
         return len(self.list_for_note(note_id))
+
+    def export_to(self, attachment_id: str, destination: Path) -> None:
+        """Write the attachment's bytes out (the outbound mirror of add)."""
+        try:
+            data = self.get_bytes(attachment_id)
+        except KeyError as exc:
+            raise AttachmentExportFailed(
+                AttachmentExportFailureReason.UNKNOWN_ATTACHMENT,
+            ) from exc
+        try:
+            destination.write_bytes(data)
+        except OSError as exc:
+            raise AttachmentExportFailed(
+                AttachmentExportFailureReason.DESTINATION_UNWRITABLE,
+            ) from exc
 
 
 class _FakeFileDialogOpener:

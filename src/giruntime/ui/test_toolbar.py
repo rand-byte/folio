@@ -43,7 +43,8 @@ from pathlib import Path
 
 from gi.repository import Gdk, Gtk, Pango
 
-from enums import HeaderCentrePage
+from enums import AttachmentExportFailureReason, HeaderCentrePage
+from storage.protocols import AttachmentExportFailed
 from giruntime.controllers.app_state import AppState
 from giruntime.controllers.note_controller import NoteController
 from giruntime.controllers.note_list_store import NoteListStore
@@ -140,6 +141,21 @@ class _FakeAttachmentStore:
 
     def get_bytes(self, _attachment_id: str) -> bytes:
         raise NotImplementedError
+
+    def export_to(self, attachment_id: str, destination: Path) -> None:
+        """Write the attachment's bytes out (the outbound mirror of add)."""
+        try:
+            data = self.get_bytes(attachment_id)
+        except KeyError as exc:
+            raise AttachmentExportFailed(
+                AttachmentExportFailureReason.UNKNOWN_ATTACHMENT,
+            ) from exc
+        try:
+            destination.write_bytes(data)
+        except OSError as exc:
+            raise AttachmentExportFailed(
+                AttachmentExportFailureReason.DESTINATION_UNWRITABLE,
+            ) from exc
 
 
 def _build_toolbar_and_store(

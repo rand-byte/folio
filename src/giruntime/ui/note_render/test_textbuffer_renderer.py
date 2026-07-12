@@ -18,7 +18,9 @@ from giruntime.ui.note_render.tag_table import (
     list_item_tag_name,
 )
 from giruntime.ui.note_render.textbuffer_renderer import (
+    AttachmentTarget,
     TextBufferRenderer,
+    UrlTarget,
     _CellRun,
     _ORDERED_STYLES,
     _PlaceholderImagePaintable,
@@ -30,6 +32,7 @@ from giruntime.ui.note_render.textbuffer_renderer import (
     _truncate_cell,
 )
 from enums import AdmonitionKind, ListNumberStyle
+from models.attachment import Attachment
 from models.parse_error import ParseError
 from config.defaults import (
     LIST_MARKER_FIELD_CHARS,
@@ -211,6 +214,7 @@ def _paintables_at(
 def _build_renderer(
     *,
     image_bytes_for: Callable[[str], bytes] | None = None,
+    attachments_for: Callable[[], tuple[Attachment, ...]] | None = None,
     column_width_px: Callable[[], int] | None = None,
     cell_width_px: Callable[[str, bool, bool], int] | None = None,
     tag_table: Gtk.TextTagTable | None = None,
@@ -219,6 +223,7 @@ def _build_renderer(
     table = tag_table if tag_table is not None else build_tag_table(char_width_px=9)
     renderer = TextBufferRenderer(
         image_bytes_for=image_bytes_for if image_bytes_for is not None else (lambda _f: _PNG_1X1),
+        attachments_for=attachments_for if attachments_for is not None else (lambda: ()),
         column_width_px=column_width_px if column_width_px is not None else (lambda: 800),
         cell_width_px=cell_width_px if cell_width_px is not None else _fake_cell_width,
         tag_table=table,
@@ -958,6 +963,7 @@ class RebuildSemanticsTests(unittest.TestCase):
         right_table = build_tag_table(char_width_px=9)
         renderer = TextBufferRenderer(
             image_bytes_for=lambda _f: _PNG_1X1,
+            attachments_for=lambda: (),
             column_width_px=lambda: 800,
             cell_width_px=_fake_cell_width,
             tag_table=right_table,
@@ -1119,8 +1125,8 @@ class LinkRenderingTests(unittest.TestCase):
             [(link_start, link_start + len("the docs"))],
         )
 
-    def test_url_recoverable_via_url_for_tags(self) -> None:
-        # The renderer's ``url_for_tags`` should return the URL of
+    def test_url_recoverable_via_target_for_tags(self) -> None:
+        # The renderer's ``target_for_tags`` should return the URL of
         # whichever link the iter is inside. This is the contract
         # the click handler in ui/link_handler relies on.
         renderer, buffer, _ = _build_renderer()
@@ -1133,10 +1139,10 @@ class LinkRenderingTests(unittest.TestCase):
         # Pick an offset inside the display text "here".
         offset = text.index("here") + 1
         tags = buffer.get_iter_at_offset(offset).get_tags()
-        url = renderer.url_for_tags(list(tags))
-        self.assertEqual(url, "https://example.com")
+        target = renderer.target_for_tags(list(tags))
+        self.assertEqual(target, UrlTarget(url="https://example.com"))
 
-    def test_url_for_tags_returns_none_outside_link(self) -> None:
+    def test_target_for_tags_returns_none_outside_link(self) -> None:
         renderer, buffer, _ = _build_renderer()
         renderer.render_into(
             "no link here, just text\n",
@@ -1145,7 +1151,7 @@ class LinkRenderingTests(unittest.TestCase):
         )
         offset = 2  # somewhere inside "no link here..."
         tags = buffer.get_iter_at_offset(offset).get_tags()
-        self.assertIsNone(renderer.url_for_tags(list(tags)))
+        self.assertIsNone(renderer.target_for_tags(list(tags)))
 
     def test_two_links_get_distinct_url_tags(self) -> None:
         # Each link produces its own anonymous URL-marker tag —
@@ -1162,8 +1168,14 @@ class LinkRenderingTests(unittest.TestCase):
         b_offset = text.index("B")
         a_tags = buffer.get_iter_at_offset(a_offset).get_tags()
         b_tags = buffer.get_iter_at_offset(b_offset).get_tags()
-        self.assertEqual(renderer.url_for_tags(list(a_tags)), "https://a.com")
-        self.assertEqual(renderer.url_for_tags(list(b_tags)), "https://b.com")
+        self.assertEqual(
+            renderer.target_for_tags(list(a_tags)),
+            UrlTarget(url="https://a.com"),
+        )
+        self.assertEqual(
+            renderer.target_for_tags(list(b_tags)),
+            UrlTarget(url="https://b.com"),
+        )
 
     def test_link_inside_bold_carries_both_tags(self) -> None:
         # *Read https://x[here] now* — bold wraps a link; the link
@@ -1247,14 +1259,17 @@ class LinkRenderingTests(unittest.TestCase):
         text = _full_text(buffer)
         offset = text.index("B")
         tags = buffer.get_iter_at_offset(offset).get_tags()
-        self.assertEqual(renderer.url_for_tags(list(tags)), "https://b.com")
+        self.assertEqual(
+            renderer.target_for_tags(list(tags)),
+            UrlTarget(url="https://b.com"),
+        )
 
-    def test_url_for_tags_with_unrelated_tag_returns_none(self) -> None:
+    def test_target_for_tags_with_unrelated_tag_returns_none(self) -> None:
         # Sanity-check: passing a list that contains a non-link tag
         # (e.g. just BOLD) returns None rather than raising.
         renderer, _buffer, table = _build_renderer()
         bold_tag = table.lookup(TagName.BOLD.value)
-        self.assertIsNone(renderer.url_for_tags([bold_tag]))
+        self.assertIsNone(renderer.target_for_tags([bold_tag]))
 
 
 # ---------------------------------------------------------------------------
@@ -1565,7 +1580,10 @@ class TabArrayTableRenderingTests(unittest.TestCase):
         text = _full_text(buffer)
         offset = text.index("label")
         tags = buffer.get_iter_at_offset(offset).get_tags()
-        self.assertEqual(renderer.url_for_tags(tags), "https://example.com")
+        self.assertEqual(
+            renderer.target_for_tags(tags),
+            UrlTarget(url="https://example.com"),
+        )
         self.assertIn(TagName.LINK.value, _tag_names_at(buffer, offset))
 
     def test_three_column_table_has_two_tab_stops(self) -> None:
@@ -2196,6 +2214,143 @@ class PostTitleHookTests(unittest.TestCase):
         )
 
         self.assertEqual(_anchor_offsets(buffer), [])
+
+
+def _attachment(filename: str, byte_size: int) -> Attachment:
+    return Attachment(
+        id=f"att-{filename}",
+        note_id="n1",
+        filename=filename,
+        byte_size=byte_size,
+    )
+
+
+@unittest.skipUnless(_display_available(), "no GDK display")
+class AttachmentLinkRenderingTests(unittest.TestCase):
+    """A save link wears the shared LINK styling and its own target tag."""
+
+    def test_display_text_is_the_label(self) -> None:
+        renderer, buffer, _ = _build_renderer()
+        renderer.render_into(
+            "See attachment:a.pdf[the file] now\n",
+            buffer,
+            note_id="n1",
+        )
+        self.assertIn("See the file now", _full_text(buffer))
+
+    def test_bare_macro_displays_the_filename(self) -> None:
+        renderer, buffer, _ = _build_renderer()
+        renderer.render_into("attachment:a.pdf[]\n", buffer, note_id="n1")
+        self.assertIn("a.pdf", _full_text(buffer))
+
+    def test_label_carries_the_shared_link_tag(self) -> None:
+        # Decision 4: no new text tag — a save link and a web link both
+        # mean "clickable", so they share TagName.LINK.
+        renderer, buffer, _ = _build_renderer()
+        renderer.render_into(
+            "See attachment:a.pdf[the file] now\n",
+            buffer,
+            note_id="n1",
+        )
+        text = _full_text(buffer)
+        start = text.index("the file")
+        self.assertEqual(
+            _ranges_with_tag(buffer, TagName.LINK.value),
+            [(start, start + len("the file"))],
+        )
+
+    def test_target_for_tags_returns_the_attachment_target(self) -> None:
+        renderer, buffer, _ = _build_renderer()
+        renderer.render_into(
+            "See attachment:a.pdf[the file] now\n",
+            buffer,
+            note_id="n1",
+        )
+        offset = _full_text(buffer).index("the file") + 1
+        tags = buffer.get_iter_at_offset(offset).get_tags()
+        self.assertEqual(
+            renderer.target_for_tags(list(tags)),
+            AttachmentTarget(filename="a.pdf"),
+        )
+
+    def test_url_and_attachment_targets_coexist(self) -> None:
+        renderer, buffer, _ = _build_renderer()
+        renderer.render_into(
+            "https://x.test[web] and attachment:a.pdf[save]\n",
+            buffer,
+            note_id="n1",
+        )
+        text = _full_text(buffer)
+        web = buffer.get_iter_at_offset(text.index("web")).get_tags()
+        save = buffer.get_iter_at_offset(text.index("save")).get_tags()
+        self.assertEqual(
+            renderer.target_for_tags(list(web)),
+            UrlTarget(url="https://x.test"),
+        )
+        self.assertEqual(
+            renderer.target_for_tags(list(save)),
+            AttachmentTarget(filename="a.pdf"),
+        )
+
+
+@unittest.skipUnless(_display_available(), "no GDK display")
+class AttachmentTableExpansionTests(unittest.TestCase):
+    """``attachments::[]`` renders through the ordinary table path."""
+
+    def test_rows_are_rendered_from_the_resolver(self) -> None:
+        renderer, buffer, _ = _build_renderer(
+            attachments_for=lambda: (
+                _attachment("a.pdf", 1024),
+                _attachment("b.png", 2048),
+            ),
+        )
+        renderer.render_into("attachments::[]\n", buffer, note_id="n1")
+        text = _full_text(buffer)
+        for expected in ("Name", "Size", "a.pdf", "1 KB", "b.png", "2 KB"):
+            self.assertIn(expected, text)
+
+    def test_generated_name_cell_is_an_activation_target(self) -> None:
+        # The generated save link goes through the same click path as a
+        # hand-written macro — one activation mechanism, not two.
+        renderer, buffer, _ = _build_renderer(
+            attachments_for=lambda: (_attachment("a.pdf", 1024),),
+        )
+        renderer.render_into("attachments::[]\n", buffer, note_id="n1")
+        offset = _full_text(buffer).index("a.pdf")
+        tags = buffer.get_iter_at_offset(offset).get_tags()
+        self.assertEqual(
+            renderer.target_for_tags(list(tags)),
+            AttachmentTarget(filename="a.pdf"),
+        )
+
+    def test_note_with_no_attachments_renders_the_notice(self) -> None:
+        renderer, buffer, _ = _build_renderer(attachments_for=lambda: ())
+        renderer.render_into("attachments::[]\n", buffer, note_id="n1")
+        self.assertIn("No attachments.", _full_text(buffer))
+
+    def test_cols_attribute_is_honoured(self) -> None:
+        renderer, buffer, _ = _build_renderer(
+            attachments_for=lambda: (_attachment("a.pdf", 1024),),
+        )
+        renderer.render_into(
+            'attachments::[cols="size"]\n',
+            buffer,
+            note_id="n1",
+        )
+        text = _full_text(buffer)
+        self.assertIn("Size", text)
+        self.assertNotIn("Name", text)
+
+    def test_resolver_is_consulted_once_per_render(self) -> None:
+        calls: list[int] = []
+
+        def resolver() -> tuple[Attachment, ...]:
+            calls.append(1)
+            return (_attachment("a.pdf", 1),)
+
+        renderer, buffer, _ = _build_renderer(attachments_for=resolver)
+        renderer.render_into("attachments::[]\n", buffer, note_id="n1")
+        self.assertEqual(len(calls), 1)
 
 
 if __name__ == "__main__":

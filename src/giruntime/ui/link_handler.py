@@ -2,14 +2,23 @@
 
 Principles & invariants
 -----------------------
-* This module is the bridge between the renderer's per-link URL tags
-  and the system's URL launcher. Every link the user sees in the
-  rendered :class:`Gtk.TextView` flows through one
-  :class:`LinkHandler` instance.
-* Link *identity* (which URL each link points at) lives on per-link
-  anonymous tags managed by :class:`TextBufferRenderer` and recovered
-  via :meth:`TextBufferRenderer.url_for_tags`. This module is the sole
-  caller of that method outside of the renderer's own tests.
+* This module is the bridge between the renderer's per-link activation
+  tags and whoever acts on them. Every clickable thing the user sees in
+  the rendered :class:`Gtk.TextView` — a web link *and* an
+  ``attachment:`` save link — flows through one :class:`LinkHandler`
+  instance.
+* Click *identity* (what each clickable range points at) lives on
+  per-link anonymous tags managed by :class:`TextBufferRenderer` and
+  recovered via :meth:`TextBufferRenderer.target_for_tags` as the closed
+  :data:`ActivationTarget` union. This module is the sole caller of that
+  method outside of the renderer's own tests, and its dispatch is a
+  ``match`` closed with :func:`typing.assert_never` — a third
+  activatable thing cannot be added without every consumer handling it.
+* The handler owns the *click*, never the *consequence*: a
+  :class:`UrlTarget` goes to the injected :data:`UriLauncherFactory`, an
+  :class:`AttachmentTarget` to the injected
+  :data:`AttachmentActivator`. Both collaborators are injected so tests
+  drive them synchronously.
 * :meth:`LinkHandler.install` attaches two GTK 4 event controllers to
   the controlled :class:`Gtk.TextView`:
 
@@ -63,11 +72,16 @@ Principles & invariants
 from __future__ import annotations
 
 from collections.abc import Callable
-from typing import Protocol
+from typing import Protocol, assert_never
 
 from gi.repository import Gdk, Gio, Gtk
 
-from giruntime.ui.note_render.textbuffer_renderer import TextBufferRenderer
+from giruntime.ui.note_render.textbuffer_renderer import (
+    ActivationTarget,
+    AttachmentTarget,
+    TextBufferRenderer,
+    UrlTarget,
+)
 
 
 _LINK_CURSOR_NAME: str = "pointer"
@@ -123,6 +137,19 @@ called."
 """
 
 
+type AttachmentActivator = Callable[[str], None]
+"""Activate an attachment save-link, by filename.
+
+The attachment sibling of :data:`UriLauncherFactory`, and injected for
+the same reason: this module owns the *click*, not the *consequence*.
+Resolving the filename against the current note, opening the save
+dialog, and writing the bytes all belong to the widget that knows which
+note is displayed (``NoteView``) — or, in the help window, to a static
+demo list. A filename matching no attachment is that collaborator's to
+report; the handler simply forwards what the tag said.
+"""
+
+
 def default_launcher_factory(url: str) -> UriLauncherProtocol:
     """The production :data:`UriLauncherFactory`.
 
@@ -149,16 +176,21 @@ class LinkHandler:
       the controller targets. The handler reads its iter-at-location
       and writes its cursor.
     * ``renderer`` — the :class:`TextBufferRenderer` whose
-      :meth:`url_for_tags` is consulted to resolve a click position
-      to a URL. The handler does *not* render; it only reads tags.
+      :meth:`target_for_tags` is consulted to resolve a click position
+      to an :data:`ActivationTarget`. The handler does *not* render; it
+      only reads tags.
     * ``launcher_factory`` — the :data:`UriLauncherFactory` that
       builds a launcher for a URL. Production passes
       :func:`default_launcher_factory`; tests pass a recording fake.
+    * ``attachment_activator`` — the :data:`AttachmentActivator` invoked
+      for an :class:`AttachmentTarget`. Symmetric with the launcher
+      factory: the handler dispatches, the collaborator acts.
     """
 
     _text_view: Gtk.TextView
     _renderer: TextBufferRenderer
     _launcher_factory: UriLauncherFactory
+    _attachment_activator: AttachmentActivator
     _link_cursor: Gdk.Cursor
     _default_cursor: Gdk.Cursor | None
     _showing_link_cursor: bool
@@ -169,10 +201,12 @@ class LinkHandler:
         text_view: Gtk.TextView,
         renderer: TextBufferRenderer,
         launcher_factory: UriLauncherFactory,
+        attachment_activator: AttachmentActivator,
     ) -> None:
         self._text_view = text_view
         self._renderer = renderer
         self._launcher_factory = launcher_factory
+        self._attachment_activator = attachment_activator
         # The cursor is built once and reused. ``Gdk.Cursor`` is a
         # cheap value-like object; the same instance can be applied to
         # any number of widgets without sharing state hazards.
@@ -251,42 +285,54 @@ class LinkHandler:
             return None
         return iterator
 
-    def _url_at_iter(self, iterator: Gtk.TextIter) -> str | None:
-        """Look up the URL carried by the link tag covering ``iterator``.
+    def _target_at_iter(
+        self,
+        iterator: Gtk.TextIter,
+    ) -> ActivationTarget | None:
+        """Look up what the tag covering ``iterator`` activates.
 
         Pulls the iter's tags via :meth:`Gtk.TextIter.get_tags`, then
-        defers to :meth:`TextBufferRenderer.url_for_tags` for the
-        per-link URL lookup. Returns :data:`None` when no link tag
-        covers the iter — which is the common case (most of the
-        document is not a link).
+        defers to :meth:`TextBufferRenderer.target_for_tags` for the
+        per-link lookup. Returns :data:`None` when no activation tag
+        covers the iter — the common case (most of the document is not
+        clickable).
 
-        This is the seam every URL-resolving entry point routes
-        through. Both controller callbacks and tests reach the
-        renderer through here.
+        This is the seam every activation entry point routes through.
+        Both controller callbacks and tests reach the renderer here.
         """
-        return self._renderer.url_for_tags(list(iterator.get_tags()))
+        return self._renderer.target_for_tags(list(iterator.get_tags()))
 
-    def _activate_url(self, url: str | None) -> None:
-        """Hand a URL off to the launcher factory and launch it.
+    def _activate(self, target: ActivationTarget | None) -> None:
+        """Dispatch an activation target to the collaborator that owns it.
 
-        ``url`` is :data:`None` when there is no link at the click
-        position; the method is a no-op in that case so callers can
-        forward whatever :meth:`_url_at_widget_coords` returned
-        without their own ``None``-check. This unifies the click and
-        any future programmatic-activation entry points.
+        ``target`` is :data:`None` when there is nothing clickable at the
+        click position; the method is a no-op in that case so callers can
+        forward whatever :meth:`_target_at_iter` returned without their
+        own ``None``-check.
 
-        For a real URL, the factory is asked to build a launcher,
-        and the launcher is asked to launch immediately. The launch
-        is fire-and-forget: ``callback=None`` means we do not
-        observe the GIO async result. That matches the plan's
-        no-error-toast policy for v1; if a launch fails the OS will
-        typically still surface the failure to the user via the
-        default URI handler.
+        The dispatch is a ``match`` closed with :func:`assert_never`, so
+        a third activatable thing is a type error here until it is
+        handled:
+
+        * :class:`UrlTarget` — the factory builds a launcher and the
+          launcher launches immediately. Fire-and-forget
+          (``callback=None``): we do not observe the GIO async result,
+          matching the no-error-toast policy; a failed launch is still
+          surfaced by the OS's default URI handler.
+        * :class:`AttachmentTarget` — the injected
+          :data:`AttachmentActivator` is handed the filename. Resolution
+          (and the "no such attachment" report) belongs to it.
         """
-        if url is None:
-            return
-        launcher = self._launcher_factory(url)
-        launcher.launch(self._resolve_parent_window(), None, None)
+        match target:
+            case None:
+                return
+            case UrlTarget(url=url):
+                launcher = self._launcher_factory(url)
+                launcher.launch(self._resolve_parent_window(), None, None)
+            case AttachmentTarget(filename=filename):
+                self._attachment_activator(filename)
+            case _:
+                assert_never(target)
 
     def _set_cursor_to_link(self, want_link: bool) -> None:
         """Toggle the text view's cursor with idempotency.
@@ -348,8 +394,10 @@ class LinkHandler:
         cursor is the right state.
         """
         iterator = self._iter_at_widget_coords(x, y)
-        url = self._url_at_iter(iterator) if iterator is not None else None
-        self._set_cursor_to_link(url is not None)
+        target = (
+            self._target_at_iter(iterator) if iterator is not None else None
+        )
+        self._set_cursor_to_link(target is not None)
 
     def _on_leave(self, _controller: Gtk.EventControllerMotion) -> None:
         """``leave`` callback: clear the link cursor unconditionally.
@@ -371,11 +419,11 @@ class LinkHandler:
 
         ``_n_press`` is the click count; a double-click is delivered
         as a separate ``released`` with ``_n_press == 2``. Treating
-        every release the same (forwarding to :meth:`_activate_url`)
+        every release the same (forwarding to :meth:`_activate`)
         is the right behaviour: a double-click on a link should
-        still launch it, not nothing.
+        still activate it, not nothing.
         """
         iterator = self._iter_at_widget_coords(x, y)
         if iterator is None:
             return
-        self._activate_url(self._url_at_iter(iterator))
+        self._activate(self._target_at_iter(iterator))

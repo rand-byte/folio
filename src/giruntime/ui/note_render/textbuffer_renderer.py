@@ -68,13 +68,27 @@ Principles & invariants
   also acts as the visual gap to the next block. A redundant trailing
   newline at the very end of the buffer is trimmed so the buffer does
   not finish with a blank line.
+* An ``attachments::[]`` macro never reaches the emit walk: ``render_into``
+  first runs the pure :func:`~giruntime.ui.note_render.attachment_table.expand_attachment_tables`
+  transform, which replaces the macro node with an ordinary
+  :class:`~asciidoc.ast.Table` built from the injected
+  :data:`AttachmentListResolver` (metadata only — no BLOB is read to draw
+  the table), or with an italic "No attachments." paragraph when the note
+  has none. The generated table therefore reuses ``_emit_table``'s column
+  geometry wholesale rather than duplicating it, and the save links in its
+  name column are the *same* :class:`~asciidoc.ast.AttachmentLink` node a
+  hand-written ``attachment:`` macro produces — one activation mechanism,
+  not two.
 * Links carry their *URL identity* on a per-link **anonymous** tag
   (a :class:`Gtk.TextTag` constructed with ``name=None``) that is
   added to the tag table at render time. The renderer keeps a
-  ``dict[Gtk.TextTag, str]`` mapping each anonymous tag to its URL,
-  exposed via :meth:`url_for_tags`. The shared
+  ``dict[Gtk.TextTag, ActivationTarget]`` mapping each anonymous tag to
+  what it activates — a :class:`UrlTarget` for a web link, an
+  :class:`AttachmentTarget` for an ``attachment:`` save link — exposed via
+  :meth:`target_for_tags` as a closed union. The shared
   :data:`TagName.LINK` tag from :mod:`tag_table` provides the visual
-  styling — colour and underline — that every link shares. Anonymous
+  styling — colour and underline — that every link shares, save links
+  included (**no new tag**: both mean "clickable"). Anonymous
   tags from a *previous* render are removed from the tag table at the
   start of every :meth:`render_into` call so the table cannot
   accumulate stale link tags as the user edits a note.
@@ -123,6 +137,8 @@ from gi.repository import Gdk, GLib, GObject, Graphene, Gtk, Pango
 
 from asciidoc.ast import (
     Admonition,
+    AttachmentLink,
+    AttachmentTable,
     BlockNode,
     Blockquote,
     Bold,
@@ -147,6 +163,7 @@ from asciidoc.ast import (
     UnorderedList,
 )
 from asciidoc.parser import parse
+from giruntime.ui.note_render.attachment_table import expand_attachment_tables
 from giruntime.ui.note_render.tag_table import (
     TagName,
     admonition_body_tag_name,
@@ -157,7 +174,11 @@ from giruntime.ui.note_render.tag_table import (
 )
 from config.defaults import TABLE_CELL_HPADDING_PX
 from enums import HeadingTrailing, ListNumberStyle
-from storage.protocols import ColumnWidthResolver, ImageBytesResolver
+from storage.protocols import (
+    AttachmentListResolver,
+    ColumnWidthResolver,
+    ImageBytesResolver,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -181,6 +202,40 @@ from the article view's Pango context (see
 a fixed pixels-per-character with monospace identical and bold a hair
 wider) so the truncation logic is unit-testable without a real font —
 mirroring the ``build_tag_table(char_width_px=9)`` test convention.
+"""
+
+
+@dataclass(frozen=True)
+class UrlTarget:
+    """What a clicked :class:`~asciidoc.ast.Link` activates: a URL."""
+
+    url: str
+
+
+@dataclass(frozen=True)
+class AttachmentTarget:
+    """What a clicked :class:`~asciidoc.ast.AttachmentLink` activates.
+
+    The attachment is named by :attr:`filename` — the same key the
+    ``image::`` resolver uses — and is scoped to the note currently
+    rendered. Resolving it to an :class:`~models.attachment.Attachment`
+    (and reporting a filename that matches none) happens at click time,
+    in the widget that knows the current note.
+    """
+
+    filename: str
+
+
+type ActivationTarget = UrlTarget | AttachmentTarget
+"""The closed union of things a click in the rendered view can activate.
+
+Both members ride the *same* per-link anonymous tag machinery and the
+same shared :data:`TagName.LINK` styling — a save link and a web link
+both mean "clickable". The union is what keeps the two apart at the
+point of *dispatch*: :meth:`TextBufferRenderer.target_for_tags` returns
+it, and its single consumer (``giruntime.ui.link_handler``) matches on
+it with :func:`typing.assert_never`, so adding a third activatable thing
+is a type error until every consumer handles it.
 """
 
 
@@ -302,28 +357,32 @@ class TextBufferRenderer:
     """
 
     _image_bytes_for: ImageBytesResolver
+    _attachments_for: AttachmentListResolver
     _column_width_px: ColumnWidthResolver
     _cell_width_px: CellWidthMeasurer
     _tag_table: Gtk.TextTagTable
-    _link_url_tags: dict[Gtk.TextTag, str]
+    _activation_tags: dict[Gtk.TextTag, ActivationTarget]
     _table_tab_tags: list[Gtk.TextTag]
 
     def __init__(
         self,
         *,
         image_bytes_for: ImageBytesResolver,
+        attachments_for: AttachmentListResolver,
         column_width_px: ColumnWidthResolver,
         cell_width_px: CellWidthMeasurer,
         tag_table: Gtk.TextTagTable,
     ) -> None:
         self._image_bytes_for = image_bytes_for
+        self._attachments_for = attachments_for
         self._column_width_px = column_width_px
         self._cell_width_px = cell_width_px
         self._tag_table = tag_table
-        # Anonymous per-link tags currently registered on
-        # ``self._tag_table``. Cleared at the start of every render
-        # so stale link tags don't accumulate as the user edits.
-        self._link_url_tags = {}
+        # Anonymous per-activation tags currently registered on
+        # ``self._tag_table`` — one per link *and* per attachment link.
+        # Cleared at the start of every render so stale tags don't
+        # accumulate as the user edits.
+        self._activation_tags = {}
         # Anonymous per-table tab tags (each carries one table's
         # ``Pango.TabArray``). Swept at the start of every render the
         # same way the link tags are, so the tag table cannot
@@ -361,6 +420,12 @@ class TextBufferRenderer:
         untouched and the hook is never invoked.
         """
         document = parse(source)  # may raise ParseError
+        # Expand every ``attachments::[]`` macro into an ordinary table
+        # *before* the emit walk, so the generated table reaches the
+        # reader through the same ``_emit_table`` path a hand-written one
+        # does. The transform is pure; the resolver is metadata-only (no
+        # BLOB is read to draw the table).
+        document = expand_attachment_tables(document, self._attachments_for())
         buffer.set_text("")
         if buffer.get_tag_table() is not self._tag_table:
             # The tag table is part of the buffer's identity in GTK 4.
@@ -369,7 +434,7 @@ class TextBufferRenderer:
             raise ValueError(
                 "buffer's tag table is not the renderer's tag table",
             )
-        self._clear_link_url_tags()
+        self._clear_activation_tags()
         self._clear_table_tab_tags()
         if document.title is not None:
             # Emit the title with only a SINGLE newline so the metadata
@@ -405,32 +470,36 @@ class TextBufferRenderer:
             self._emit_block(buffer, block)
         self._strip_trailing_blank(buffer)
 
-    def url_for_tags(self, tags: list[Gtk.TextTag]) -> str | None:
-        """Return the URL associated with the first link tag in ``tags``.
+    def target_for_tags(
+        self,
+        tags: list[Gtk.TextTag],
+    ) -> ActivationTarget | None:
+        """Return what the first activation tag in ``tags`` activates.
 
-        Used by :mod:`ui.link_handler` to recover the URL
-        to launch when the user clicks somewhere inside a link
-        decoration. The argument is the list returned by
-        :meth:`Gtk.TextIter.get_tags` for the click position; if none
-        of those tags are link-URL markers, the method returns
-        :data:`None` and the caller does nothing.
+        Used by :mod:`giruntime.ui.link_handler` to recover the click
+        target — a :class:`UrlTarget` to launch, or an
+        :class:`AttachmentTarget` to save. The argument is the list
+        returned by :meth:`Gtk.TextIter.get_tags` for the click position;
+        if none of those tags is an activation marker the method returns
+        :data:`None` and the caller does nothing (the common case — most
+        of a document is not clickable).
 
-        The lookup is per-renderer because the URL→tag mapping is
-        per-render: a renderer instance is the smallest scope that
-        owns one consistent set of link tags.
+        The lookup is per-renderer because the tag→target mapping is
+        per-render: a renderer instance is the smallest scope that owns
+        one consistent set of activation tags.
         """
         for tag in tags:
-            url = self._link_url_tags.get(tag)
-            if url is not None:
-                return url
+            target = self._activation_tags.get(tag)
+            if target is not None:
+                return target
         return None
 
     # ------------------------------------------------------------------
-    # Link tag lifecycle
+    # Activation tag lifecycle
     # ------------------------------------------------------------------
 
-    def _clear_link_url_tags(self) -> None:
-        """Remove every per-link anonymous tag from the tag table.
+    def _clear_activation_tags(self) -> None:
+        """Remove every per-activation anonymous tag from the tag table.
 
         Called at the start of each :meth:`render_into` so the tag
         table doesn't accumulate stale link tags as the user edits.
@@ -439,21 +508,23 @@ class TextBufferRenderer:
         ``set_text("")`` anyway, so there are no application ranges
         to worry about.
         """
-        for tag in self._link_url_tags:
+        for tag in self._activation_tags:
             self._tag_table.remove(tag)
-        self._link_url_tags.clear()
+        self._activation_tags.clear()
 
-    def _make_link_url_tag(self, url: str) -> Gtk.TextTag:
-        """Build and register an anonymous tag carrying a link's URL.
+    def _make_activation_tag(self, target: ActivationTarget) -> Gtk.TextTag:
+        """Build and register an anonymous tag carrying a click target.
 
-        The tag itself has no visual properties — visual styling
-        comes from the shared :data:`TagName.LINK` tag. This tag's
-        sole purpose is to associate a buffer range with a URL via
-        the ``self._link_url_tags`` mapping.
+        The tag itself has no visual properties — visual styling comes
+        from the shared :data:`TagName.LINK` tag, which a web link and a
+        save link both wear (both mean "clickable"). This tag's sole
+        purpose is to associate a buffer range with its
+        :data:`ActivationTarget` via the ``self._activation_tags``
+        mapping.
         """
         tag = Gtk.TextTag.new(None)
         self._tag_table.add(tag)
-        self._link_url_tags[tag] = url
+        self._activation_tags[tag] = target
         return tag
 
     # ------------------------------------------------------------------
@@ -463,7 +534,7 @@ class TextBufferRenderer:
     def _clear_table_tab_tags(self) -> None:
         """Remove every per-table tab tag from the tag table.
 
-        Mirrors :meth:`_clear_link_url_tags`: a table's column geometry
+        Mirrors :meth:`_clear_activation_tags`: a table's column geometry
         varies (column count / proportions / live column width), so its
         :class:`Pango.TabArray` cannot live on a fixed named tag and is
         carried on an anonymous tag minted per render. Sweeping them at
@@ -517,6 +588,15 @@ class TextBufferRenderer:
             self._emit_admonition(buffer, block)
         elif isinstance(block, Blockquote):
             self._emit_blockquote(buffer, block)
+        elif isinstance(block, AttachmentTable):
+            # Unreachable in a well-formed render: ``render_into``
+            # expands every ``attachments::[]`` macro into an ordinary
+            # ``Table`` before the walk starts, which is what lets the
+            # generated table reuse ``_emit_table`` wholesale. Reaching
+            # here means a caller walked an unexpanded document.
+            raise TypeError(
+                "AttachmentTable must be expanded before rendering",
+            )
         else:
             # Exhaustive over the current :data:`BlockNode` union. New
             # block kinds must extend this dispatch — the ``else`` makes
@@ -976,14 +1056,17 @@ class TextBufferRenderer:
                 runs=runs,
             )
             return
-        if isinstance(inline, Link):
-            # A link's URL identity rides a fresh anonymous tag (as in
-            # ``_emit_link``); a truncated link keeps its target on the
-            # surviving characters because the tag is on every run.
+        if isinstance(inline, (Link, AttachmentLink)):
+            # An activatable node's identity rides a fresh anonymous tag
+            # (as in ``_emit_activatable``); a
+            # truncated link keeps its target on the surviving characters
+            # because the tag is on every run. Both kinds appear in cells:
+            # the generated attachments table's name column *is* an
+            # ``AttachmentLink``.
             link_tags = (
                 *tags,
                 self._tag(TagName.LINK),
-                self._make_link_url_tag(inline.url),
+                self._make_activation_tag(_target_of(inline)),
             )
             for child in inline.text:
                 self._flatten_inline(
@@ -1200,8 +1283,8 @@ class TextBufferRenderer:
         if isinstance(inline, Monospace):
             self._emit_monospace(buffer, inline, tag_stack)
             return
-        if isinstance(inline, Link):
-            self._emit_link(buffer, inline, tag_stack)
+        if isinstance(inline, (Link, AttachmentLink)):
+            self._emit_activatable(buffer, inline, tag_stack)
             return
         if isinstance(inline, SoftBreak):
             # A source-line boundary inside a paragraph: a soft break is a
@@ -1244,24 +1327,25 @@ class TextBufferRenderer:
             buffer.apply_tag(tag, start_iter, end_iter)
         buffer.apply_tag(self._tag(TagName.MONOSPACE), start_iter, end_iter)
 
-    def _emit_link(
+    def _emit_activatable(
         self,
         buffer: Gtk.TextBuffer,
-        link: Link,
+        link: Link | AttachmentLink,
         tag_stack: list[Gtk.TextTag],
     ) -> None:
-        """Emit a link's display children with link tags added.
+        """Emit a link's or save-link's display children, tagged.
 
-        Two tags are stacked for the duration of the link's body:
-        the shared :data:`TagName.LINK` tag (visual styling) and a
-        fresh anonymous tag carrying the URL (consumed by
-        :meth:`url_for_tags` for click handling). The display text
-        is iterated through :meth:`_emit_inline` so any nested
-        formatting in the link's display text composes correctly.
+        Two tags are stacked for the duration of the body: the shared
+        :data:`TagName.LINK` tag (visual styling — **no new tag** for
+        attachment links, because a save link and a web link both mean
+        "clickable") and a fresh anonymous tag carrying the
+        :data:`ActivationTarget` (consumed by :meth:`target_for_tags` for
+        click handling). The display text is iterated through
+        :meth:`_emit_inline` so any nested formatting composes correctly.
         """
         link_tag = self._tag(TagName.LINK)
-        url_tag = self._make_link_url_tag(link.url)
-        new_stack = [*tag_stack, link_tag, url_tag]
+        target_tag = self._make_activation_tag(_target_of(link))
+        new_stack = [*tag_stack, link_tag, target_tag]
         for child in link.text:
             self._emit_inline(buffer, child, new_stack)
 
@@ -1328,6 +1412,19 @@ class TextBufferRenderer:
         if end.get_offset() == buffer.get_end_iter().get_offset():
             return
         buffer.delete(end, buffer.get_end_iter())
+
+
+def _target_of(node: Link | AttachmentLink) -> ActivationTarget:
+    """Return the :data:`ActivationTarget` an activatable node carries.
+
+    The single place the AST's two activatable nodes map onto the
+    renderer's activation union, shared by the paragraph path
+    (:meth:`TextBufferRenderer._emit_activatable`) and the table-cell
+    path (:meth:`TextBufferRenderer._flatten_inline`).
+    """
+    if isinstance(node, Link):
+        return UrlTarget(url=node.url)
+    return AttachmentTarget(filename=node.filename)
 
 
 # ---------------------------------------------------------------------------

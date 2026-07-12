@@ -9,7 +9,12 @@ from dataclasses import dataclass, field
 from gi.repository import Gdk, Gio, Gtk
 
 from giruntime.ui.note_render.tag_table import TagName, build_tag_table
-from giruntime.ui.note_render.textbuffer_renderer import TextBufferRenderer
+from giruntime.ui.note_render.textbuffer_renderer import (
+    ActivationTarget,
+    AttachmentTarget,
+    TextBufferRenderer,
+    UrlTarget,
+)
 from giruntime.ui.link_handler import (
     LinkHandler,
     UriLauncherProtocol,
@@ -90,28 +95,43 @@ class _FakeRenderer:
     """Minimal stand-in for :class:`TextBufferRenderer`.
 
     The link handler only ever calls
-    :meth:`TextBufferRenderer.url_for_tags`. Tests that exercise the
+    :meth:`TextBufferRenderer.target_for_tags`. Tests that exercise the
     handler's logic without rendering a real document use this fake
-    so they can dictate what URL (or :data:`None`) the lookup
-    returns. :attr:`url_for_tags_calls` records the lists of tags it
+    so they can dictate what target (or :data:`None`) the lookup
+    returns. :attr:`target_for_tags_calls` records the lists of tags it
     was given so tests can assert on the lookup happening at all.
     """
 
-    return_value: str | None
-    url_for_tags_calls: list[list[Gtk.TextTag]]
+    return_value: ActivationTarget | None
+    target_for_tags_calls: list[list[Gtk.TextTag]]
 
-    def __init__(self, *, return_value: str | None) -> None:
+    def __init__(self, *, return_value: ActivationTarget | None) -> None:
         self.return_value = return_value
-        self.url_for_tags_calls = []
+        self.target_for_tags_calls = []
 
-    def url_for_tags(self, tags: list[Gtk.TextTag]) -> str | None:
-        self.url_for_tags_calls.append(list(tags))
+    def target_for_tags(
+        self,
+        tags: list[Gtk.TextTag],
+    ) -> ActivationTarget | None:
+        self.target_for_tags_calls.append(list(tags))
         return self.return_value
+
+
+class _RecordingActivator:
+    """Records every filename the handler asks to save; writes nothing."""
+
+    filenames: list[str]
+
+    def __init__(self) -> None:
+        self.filenames = []
+
+    def __call__(self, filename: str) -> None:
+        self.filenames.append(filename)
 
 
 def _make_handler(
     *,
-    return_value: str | None,
+    return_value: ActivationTarget | None,
 ) -> tuple[LinkHandler, _RecordingLauncherFactory, _FakeRenderer, Gtk.TextView]:
     """Build a :class:`LinkHandler` with fakes wired in."""
     fake_renderer = _FakeRenderer(return_value=return_value)
@@ -121,6 +141,7 @@ def _make_handler(
         text_view=text_view,
         renderer=fake_renderer,  # type: ignore[arg-type]
         launcher_factory=factory,
+        attachment_activator=_RecordingActivator(),
     )
     return handler, factory, fake_renderer, text_view
 
@@ -165,7 +186,7 @@ class DefaultLauncherFactoryTests(unittest.TestCase):
 
 
 # ---------------------------------------------------------------------------
-# _activate_url — the URL → launcher contract
+# _activate — the target → launcher / activator dispatch
 # ---------------------------------------------------------------------------
 
 
@@ -175,12 +196,12 @@ class ActivateUrlTests(unittest.TestCase):
 
     def test_factory_invoked_once_with_the_url(self) -> None:
         handler, factory, _, _ = _make_handler(return_value=None)
-        handler._activate_url("https://example.com")
+        handler._activate(UrlTarget(url="https://example.com"))
         self.assertEqual(factory.urls, ["https://example.com"])
 
     def test_launch_called_exactly_once_on_returned_launcher(self) -> None:
         handler, factory, _, _ = _make_handler(return_value=None)
-        handler._activate_url("https://example.com")
+        handler._activate(UrlTarget(url="https://example.com"))
         self.assertEqual(len(factory.launchers), 1)
         self.assertEqual(len(factory.launchers[0].launch_calls), 1)
 
@@ -188,17 +209,17 @@ class ActivateUrlTests(unittest.TestCase):
         # The plan's "callback=None" policy is in force: the handler
         # must hand the launcher None for both cancellable and callback.
         handler, factory, _, _ = _make_handler(return_value=None)
-        handler._activate_url("mailto:a@b.c")
+        handler._activate(UrlTarget(url="mailto:a@b.c"))
         call = factory.launchers[0].launch_calls[0]
         self.assertIsNone(call.cancellable)
         self.assertIsNone(call.callback)
 
     def test_none_url_is_a_noop(self) -> None:
         # The "non-link click does nothing" contract — the handler's
-        # ``_activate_url`` short-circuits on None, so no launcher is
+        # ``_activate`` short-circuits on None, so no launcher is
         # ever asked of the factory.
         handler, factory, _, _ = _make_handler(return_value=None)
-        handler._activate_url(None)
+        handler._activate(None)
         self.assertEqual(factory.urls, [])
         self.assertEqual(factory.launchers, [])
 
@@ -206,8 +227,8 @@ class ActivateUrlTests(unittest.TestCase):
         # Each click is independent: two activations of the same URL
         # build two separate launchers and call ``launch`` on each.
         handler, factory, _, _ = _make_handler(return_value=None)
-        handler._activate_url("https://x.test")
-        handler._activate_url("https://x.test")
+        handler._activate(UrlTarget(url="https://x.test"))
+        handler._activate(UrlTarget(url="https://x.test"))
         self.assertEqual(factory.urls, ["https://x.test", "https://x.test"])
         self.assertEqual(len(factory.launchers), 2)
         self.assertEqual(len(factory.launchers[0].launch_calls), 1)
@@ -246,14 +267,14 @@ class ResolveParentWindowTests(unittest.TestCase):
         window = Gtk.Window.new()
         window.set_child(text_view)
         try:
-            handler._activate_url("https://example.com")
+            handler._activate(UrlTarget(url="https://example.com"))
         finally:
             window.destroy()
         self.assertIs(factory.launchers[0].launch_calls[0].parent, window)
 
 
 # ---------------------------------------------------------------------------
-# _url_at_iter — the iter → URL pipeline
+# _target_at_iter — the iter → activation-target pipeline
 # ---------------------------------------------------------------------------
 
 
@@ -266,21 +287,21 @@ class UrlAtIterTests(unittest.TestCase):
 
     def test_passes_iter_tags_through_to_renderer(self) -> None:
         handler, _, fake_renderer, text_view = _make_handler(
-            return_value="https://example.com",
+            return_value=UrlTarget(url="https://example.com"),
         )
         iterator = _spare_iter_for(text_view)
-        result = handler._url_at_iter(iterator)
-        self.assertEqual(result, "https://example.com")
+        result = handler._target_at_iter(iterator)
+        self.assertEqual(result, UrlTarget(url="https://example.com"))
         # The renderer was asked exactly once.
-        self.assertEqual(len(fake_renderer.url_for_tags_calls), 1)
+        self.assertEqual(len(fake_renderer.target_for_tags_calls), 1)
         # The argument was a list of tags (possibly empty here, since
         # the iter is at offset 0 of a freshly-seeded buffer).
-        self.assertIsInstance(fake_renderer.url_for_tags_calls[0], list)
+        self.assertIsInstance(fake_renderer.target_for_tags_calls[0], list)
 
     def test_returns_none_when_renderer_returns_none(self) -> None:
         handler, _, _, text_view = _make_handler(return_value=None)
         iterator = _spare_iter_for(text_view)
-        self.assertIsNone(handler._url_at_iter(iterator))
+        self.assertIsNone(handler._target_at_iter(iterator))
 
 
 # ---------------------------------------------------------------------------
@@ -448,21 +469,21 @@ class IterPipelineTests(unittest.TestCase):
         # was resolved successfully, asserting the cursor switches
         # to link.
         handler, _, _, text_view = _make_handler(
-            return_value="https://example.com",
+            return_value=UrlTarget(url="https://example.com"),
         )
         iterator = _spare_iter_for(text_view)
-        url = handler._url_at_iter(iterator)
+        target = handler._target_at_iter(iterator)
 
-        handler._set_cursor_to_link(url is not None)
+        handler._set_cursor_to_link(target is not None)
         self.assertTrue(handler._showing_link_cursor)
         self.assertIs(text_view.get_cursor(), handler._link_cursor)
 
     def test_iter_resolving_to_none_keeps_default_cursor(self) -> None:
         handler, _, _, text_view = _make_handler(return_value=None)
         iterator = _spare_iter_for(text_view)
-        url = handler._url_at_iter(iterator)
+        target = handler._target_at_iter(iterator)
 
-        handler._set_cursor_to_link(url is not None)
+        handler._set_cursor_to_link(target is not None)
         self.assertFalse(handler._showing_link_cursor)
         # The cursor matches the captured default — no change.
         self.assertIs(text_view.get_cursor(), handler._default_cursor)
@@ -471,11 +492,11 @@ class IterPipelineTests(unittest.TestCase):
         # Compose the same calls ``_on_released`` makes for a
         # link click, and assert the launch fired.
         handler, factory, _, text_view = _make_handler(
-            return_value="https://example.com",
+            return_value=UrlTarget(url="https://example.com"),
         )
         iterator = _spare_iter_for(text_view)
 
-        handler._activate_url(handler._url_at_iter(iterator))
+        handler._activate(handler._target_at_iter(iterator))
         self.assertEqual(factory.urls, ["https://example.com"])
         self.assertEqual(len(factory.launchers[0].launch_calls), 1)
 
@@ -484,7 +505,7 @@ class IterPipelineTests(unittest.TestCase):
         handler, factory, _, text_view = _make_handler(return_value=None)
         iterator = _spare_iter_for(text_view)
 
-        handler._activate_url(handler._url_at_iter(iterator))
+        handler._activate(handler._target_at_iter(iterator))
         self.assertEqual(factory.urls, [])
         self.assertEqual(factory.launchers, [])
 
@@ -502,7 +523,7 @@ class ControllerCallbackUnrealisedFallbackTests(unittest.TestCase):
         # False, so _on_motion sees no iter and treats it as
         # "not on a link" — the default cursor is the right state.
         handler, _, fake_renderer, text_view = _make_handler(
-            return_value="https://example.com",
+            return_value=UrlTarget(url="https://example.com"),
         )
         call_count = 0
         original_set_cursor = text_view.set_cursor
@@ -520,13 +541,13 @@ class ControllerCallbackUnrealisedFallbackTests(unittest.TestCase):
         )
         # The renderer is never consulted, because no iter was
         # resolved, and the cursor stayed in its default state.
-        self.assertEqual(fake_renderer.url_for_tags_calls, [])
+        self.assertEqual(fake_renderer.target_for_tags_calls, [])
         self.assertEqual(call_count, 0)
         self.assertFalse(handler._showing_link_cursor)
 
     def test_release_off_text_does_nothing(self) -> None:
         handler, factory, fake_renderer, _ = _make_handler(
-            return_value="https://example.com",
+            return_value=UrlTarget(url="https://example.com"),
         )
         handler._on_released(
             Gtk.GestureClick.new(),
@@ -537,7 +558,7 @@ class ControllerCallbackUnrealisedFallbackTests(unittest.TestCase):
         self.assertEqual(factory.urls, [])
         self.assertEqual(factory.launchers, [])
         # Renderer was never consulted either.
-        self.assertEqual(fake_renderer.url_for_tags_calls, [])
+        self.assertEqual(fake_renderer.target_for_tags_calls, [])
 
 
 # ---------------------------------------------------------------------------
@@ -566,6 +587,7 @@ class UrlRecoveryFromLinkTagTests(unittest.TestCase):
         table = build_tag_table(char_width_px=9)
         renderer = TextBufferRenderer(
             image_bytes_for=lambda _f: b"",
+            attachments_for=lambda: (),
             column_width_px=lambda: 800,
             cell_width_px=lambda _t, _b, _m: 0,
             tag_table=table,
@@ -586,9 +608,10 @@ class UrlRecoveryFromLinkTagTests(unittest.TestCase):
             text_view=text_view,
             renderer=renderer,
             launcher_factory=factory,
+            attachment_activator=_RecordingActivator(),
         )
 
-        handler._activate_url(handler._url_at_iter(iterator))
+        handler._activate(handler._target_at_iter(iterator))
         self.assertEqual(factory.urls, ["https://example.com"])
         self.assertEqual(len(factory.launchers[0].launch_calls), 1)
 
@@ -596,6 +619,7 @@ class UrlRecoveryFromLinkTagTests(unittest.TestCase):
         table = build_tag_table(char_width_px=9)
         renderer = TextBufferRenderer(
             image_bytes_for=lambda _f: b"",
+            attachments_for=lambda: (),
             column_width_px=lambda: 800,
             cell_width_px=lambda _t, _b, _m: 0,
             tag_table=table,
@@ -614,11 +638,12 @@ class UrlRecoveryFromLinkTagTests(unittest.TestCase):
             text_view=text_view,
             renderer=renderer,
             launcher_factory=factory,
+            attachment_activator=_RecordingActivator(),
         )
 
-        url = handler._url_at_iter(iterator)
-        handler._activate_url(url)
-        self.assertIsNone(url)
+        target = handler._target_at_iter(iterator)
+        handler._activate(target)
+        self.assertIsNone(target)
         self.assertEqual(factory.urls, [])
         self.assertEqual(factory.launchers, [])
 
@@ -629,6 +654,7 @@ class UrlRecoveryFromLinkTagTests(unittest.TestCase):
         table = build_tag_table(char_width_px=9)
         renderer = TextBufferRenderer(
             image_bytes_for=lambda _f: b"",
+            attachments_for=lambda: (),
             column_width_px=lambda: 800,
             cell_width_px=lambda _t, _b, _m: 0,
             tag_table=table,
@@ -648,10 +674,11 @@ class UrlRecoveryFromLinkTagTests(unittest.TestCase):
             text_view=text_view,
             renderer=renderer,
             launcher_factory=factory,
+            attachment_activator=_RecordingActivator(),
         )
 
-        handler._activate_url(handler._url_at_iter(a_iter))
-        handler._activate_url(handler._url_at_iter(b_iter))
+        handler._activate(handler._target_at_iter(a_iter))
+        handler._activate(handler._target_at_iter(b_iter))
         self.assertEqual(factory.urls, ["https://a.test", "https://b.test"])
 
     def test_unrelated_tag_in_buffer_does_not_match_a_link(self) -> None:
@@ -661,6 +688,7 @@ class UrlRecoveryFromLinkTagTests(unittest.TestCase):
         table = build_tag_table(char_width_px=9)
         renderer = TextBufferRenderer(
             image_bytes_for=lambda _f: b"",
+            attachments_for=lambda: (),
             column_width_px=lambda: 800,
             cell_width_px=lambda _t, _b, _m: 0,
             tag_table=table,
@@ -674,7 +702,7 @@ class UrlRecoveryFromLinkTagTests(unittest.TestCase):
         text = buffer.get_text(buffer.get_start_iter(), buffer.get_end_iter(), False)
         iterator = buffer.get_iter_at_offset(text.index("bold"))
         # Sanity check: BOLD is in the tag list, so we ARE inside a
-        # tagged region — we just want url_for_tags to still be None.
+        # tagged region — we just want target_for_tags to still be None.
         bold_tag = table.lookup(TagName.BOLD.value)
         self.assertIn(bold_tag, iterator.get_tags())
         factory = _RecordingLauncherFactory()
@@ -683,9 +711,10 @@ class UrlRecoveryFromLinkTagTests(unittest.TestCase):
             text_view=text_view,
             renderer=renderer,
             launcher_factory=factory,
+            attachment_activator=_RecordingActivator(),
         )
 
-        handler._activate_url(handler._url_at_iter(iterator))
+        handler._activate(handler._target_at_iter(iterator))
         self.assertEqual(factory.urls, [])
 
 
@@ -718,6 +747,108 @@ class InstallSmokeTests(unittest.TestCase):
         handler.install()
         after = text_view.observe_controllers().get_n_items()
         self.assertEqual(after - before, 2)
+
+
+def _make_attachment_handler() -> tuple[
+    LinkHandler,
+    _RecordingLauncherFactory,
+    _RecordingActivator,
+    Gtk.TextView,
+]:
+    """Build a handler whose renderer always reports an attachment."""
+    fake_renderer = _FakeRenderer(
+        return_value=AttachmentTarget(filename="a.pdf"),
+    )
+    factory = _RecordingLauncherFactory()
+    activator = _RecordingActivator()
+    text_view = Gtk.TextView.new()
+    handler = LinkHandler(
+        text_view=text_view,
+        renderer=fake_renderer,  # type: ignore[arg-type]
+        launcher_factory=factory,
+        attachment_activator=activator,
+    )
+    return handler, factory, activator, text_view
+
+
+@unittest.skipUnless(_display_available(), "no GDK display")
+class AttachmentTargetDispatchTests(unittest.TestCase):
+    """An :class:`AttachmentTarget` goes to the activator, not the launcher."""
+
+    def test_activator_receives_the_filename(self) -> None:
+        handler, _, activator, _ = _make_attachment_handler()
+        handler._activate(AttachmentTarget(filename="a.pdf"))
+        self.assertEqual(activator.filenames, ["a.pdf"])
+
+    def test_no_launcher_is_built_for_an_attachment(self) -> None:
+        handler, factory, _, _ = _make_attachment_handler()
+        handler._activate(AttachmentTarget(filename="a.pdf"))
+        self.assertEqual(factory.urls, [])
+        self.assertEqual(factory.launchers, [])
+
+    def test_url_target_does_not_reach_the_activator(self) -> None:
+        handler, factory, activator, _ = _make_attachment_handler()
+        handler._activate(UrlTarget(url="https://x.test"))
+        self.assertEqual(activator.filenames, [])
+        self.assertEqual(factory.urls, ["https://x.test"])
+
+    def test_none_target_activates_nothing(self) -> None:
+        handler, factory, activator, _ = _make_attachment_handler()
+        handler._activate(None)
+        self.assertEqual(activator.filenames, [])
+        self.assertEqual(factory.urls, [])
+
+    def test_iter_pipeline_dispatches_to_the_activator(self) -> None:
+        handler, _, activator, text_view = _make_attachment_handler()
+        iterator = _spare_iter_for(text_view)
+        handler._activate(handler._target_at_iter(iterator))
+        self.assertEqual(activator.filenames, ["a.pdf"])
+
+    def test_attachment_target_shows_the_link_cursor(self) -> None:
+        # A save link is clickable, so the pointer must say so.
+        handler, _, _, text_view = _make_attachment_handler()
+        iterator = _spare_iter_for(text_view)
+        target = handler._target_at_iter(iterator)
+        handler._set_cursor_to_link(target is not None)
+        self.assertTrue(handler._showing_link_cursor)
+        self.assertIs(text_view.get_cursor(), handler._link_cursor)
+
+
+@unittest.skipUnless(_display_available(), "no GDK display")
+class AttachmentRecoveryFromRealRendererTests(unittest.TestCase):
+    """End-to-end: render a save link, click it, the activator fires."""
+
+    def test_clicking_an_attachment_link_activates_it(self) -> None:
+        table = build_tag_table(char_width_px=9)
+        renderer = TextBufferRenderer(
+            image_bytes_for=lambda _f: b"",
+            attachments_for=lambda: (),
+            column_width_px=lambda: 800,
+            cell_width_px=lambda _t, _b, _m: 0,
+            tag_table=table,
+        )
+        buffer = Gtk.TextBuffer.new(table)
+        renderer.render_into(
+            "get attachment:report.pdf[the report] now\n",
+            buffer,
+            note_id="n1",
+        )
+        text = buffer.get_text(
+            buffer.get_start_iter(),
+            buffer.get_end_iter(),
+            False,
+        )
+        iterator = buffer.get_iter_at_offset(text.index("the report") + 1)
+        activator = _RecordingActivator()
+        handler = LinkHandler(
+            text_view=Gtk.TextView.new_with_buffer(buffer),
+            renderer=renderer,
+            launcher_factory=_RecordingLauncherFactory(),
+            attachment_activator=activator,
+        )
+
+        handler._activate(handler._target_at_iter(iterator))
+        self.assertEqual(activator.filenames, ["report.pdf"])
 
 
 if __name__ == "__main__":

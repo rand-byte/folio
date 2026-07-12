@@ -379,3 +379,39 @@ natural size capped at the column width.
 Limit: you cannot set an image's size or alt text from the source —
 sizing is automatic. The brackets must still be present and balanced,
 with no further `[` or `]` between them.
+
+=== Attachments
+
+Files attached to a note (in the Source view's attachments panel) can be
+linked from the note body with the `attachment:file[label]` macro. The
+link renders like any other link, but clicking it opens a *save* dialog
+rather than a browser: attachment:help-demo.png[save the demo image].
+The label is optional — `attachment:help-demo.png[]` shows the filename
+itself.
+
+A note can also list *all* of its attachments in one go with the
+`attachments::[]` block macro, written on a line of its own. It expands,
+when the note is rendered, into a table of the note's attachments — each
+name being a save link of its own:
+
+attachments::[]
+
+The source of both is short:
+
+----
+See attachment:help-demo.png[save the demo image] for the picture.
+
+attachments::[]
+----
+
+By default the table shows every column. To choose the columns, or their
+order, pass `cols` — the two column names are `name` and `size`:
+
+----
+attachments::[cols="size,name"]
+----
+
+Limit: the filename names an attachment of *this* note (no paths, no
+other notes), an attachment link never nests inside another link, and a
+note with no attachments renders the macro as a short _No attachments._
+line instead of an empty table.

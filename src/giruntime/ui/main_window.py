@@ -345,10 +345,15 @@ class MainWindow(  # pylint: disable=too-many-instance-attributes
         # filename. ``None`` is acceptable here — the resolver
         # falls back to the placeholder bytes contract from build
         # step 8 — and existing tests rely on that default.
+        # The controller is passed for the *outbound* attachment path:
+        # clicking an ``attachment:`` save link in the rendered view
+        # routes the chosen destination through
+        # ``NoteController.export_attachment``.
         self._note_view = NoteView(
             note_store=note_store,
             app_state=app_state,
             attachments=attachment_store,
+            note_controller=note_controller,
         )
         # The editor embeds the attachments panel, which lists the
         # selected note's attachment metadata — so the editor now

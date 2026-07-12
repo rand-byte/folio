@@ -74,6 +74,15 @@ Principles & invariants
 * Example links inside the help are live: a :class:`LinkHandler` is
   installed on the read-only text view exactly as it would be on a note's
   read view, so the rendered example URLs open in the system browser.
+* **The attachment macros document themselves by working.** The help has
+  no note and no attachment store, so the window injects a *static demo
+  attachment list* — one entry describing the already-bundled
+  ``help-demo.png`` its ``image::`` example uses. The help's
+  ``attachments::[]`` therefore renders a real row, and its
+  ``attachment:help-demo.png[…]`` link really saves the bundled bytes
+  (written here rather than through a controller, because there is no
+  store behind the help). The save dialog is injected, like the launcher,
+  so tests drive it synchronously.
 * This module lives under ``giruntime/ui`` because it owns a widget tree —
   the only layer permitted to. It is thin and unit-testable: the
   renderer, the launcher factory, and the system-document bytes are all
@@ -90,9 +99,15 @@ Principles & invariants
 
 from __future__ import annotations
 
+from pathlib import Path
+
 from gi.repository import Gtk
 
 from enums import HelpSection, SystemDocument
+from giruntime.ui._file_picker import (
+    FileSaveDialogOpener,
+    default_file_save_dialog_opener,
+)
 from giruntime.ui.link_handler import (
     LinkHandler,
     UriLauncherFactory,
@@ -105,6 +120,7 @@ from giruntime.ui.note_view import (
     build_article_surface,
     make_cell_width_measurer,
 )
+from models.attachment import Attachment
 from system_docs import load_bytes, load_text
 
 
@@ -140,6 +156,19 @@ _HELP_NOTE_ID: str = "help"
 The renderer's :meth:`TextBufferRenderer.render_into` takes a ``note_id``
 for future caching/diagnostics; the help is not a database note, so a
 stable synthetic id documents the call site.
+"""
+
+
+_HELP_DEMO_ATTACHMENT_ID: str = "help-demo-attachment"
+"""Synthetic attachment id for the help's demo attachment.
+
+The help window has no note and no attachment store, but the coverage
+test requires the help to *use* both attachment macros — so the window
+injects a static demo list of exactly one attachment: the already-bundled
+``help-demo.png`` its ``image::`` example shows. The id is never used to
+reach storage (there is none); it exists because
+:class:`~models.attachment.Attachment` is the same value type the real
+store produces, and the help renders through the same path a note does.
 """
 
 
@@ -184,7 +213,9 @@ class HelpWindow(  # pylint: disable=too-many-instance-attributes
     _tag_table: Gtk.TextTagTable
     _renderer: TextBufferRenderer
     _link_handler: LinkHandler
+    _save_dialog_opener: FileSaveDialogOpener
     _image_bytes: dict[str, bytes]
+    _demo_attachments: tuple[Attachment, ...]
     _sections: tuple[HelpSection, ...]
     _section_marks: dict[HelpSection, Gtk.TextMark]
     _contents_list: Gtk.ListBox
@@ -194,8 +225,12 @@ class HelpWindow(  # pylint: disable=too-many-instance-attributes
         *,
         application: Gtk.Application,
         launcher_factory: UriLauncherFactory = default_launcher_factory,
+        save_dialog_opener: FileSaveDialogOpener = (
+            default_file_save_dialog_opener
+        ),
     ) -> None:
         super().__init__(application=application)
+        self._save_dialog_opener = save_dialog_opener
         self.set_title(_WINDOW_TITLE)
         # Non-modal is the default for a top-level window; stated
         # explicitly because it is load-bearing (see the module docstring).
@@ -212,11 +247,24 @@ class HelpWindow(  # pylint: disable=too-many-instance-attributes
 
         # The image map is built before the renderer so the resolver
         # closure can read it. The help bundles exactly one demo image.
+        demo_image_bytes = load_bytes(SystemDocument.HELP_DEMO_IMAGE)
         self._image_bytes = {
-            SystemDocument.HELP_DEMO_IMAGE.value: load_bytes(
-                SystemDocument.HELP_DEMO_IMAGE,
-            ),
+            SystemDocument.HELP_DEMO_IMAGE.value: demo_image_bytes,
         }
+        # The static demo attachment list (§3.4 of the plan): the help
+        # has no note and no store, so it supplies its own one-item list
+        # describing the bundled demo image. That makes the help's
+        # ``attachments::[]`` render a real row and its
+        # ``attachment:help-demo.png[]`` link really save real bytes —
+        # the feature documents itself by working.
+        self._demo_attachments = (
+            Attachment(
+                id=_HELP_DEMO_ATTACHMENT_ID,
+                note_id=_HELP_NOTE_ID,
+                filename=SystemDocument.HELP_DEMO_IMAGE.value,
+                byte_size=len(demo_image_bytes),
+            ),
+        )
 
         # ----- Shared article surface (identical to a rendered note) -----
         # The whole reading surface — the painted text view (paper sheet +
@@ -251,6 +299,7 @@ class HelpWindow(  # pylint: disable=too-many-instance-attributes
         # container's text-column width, exactly as the note view's does.
         self._renderer = TextBufferRenderer(
             image_bytes_for=self._resolve_image_bytes,
+            attachments_for=self._list_demo_attachments,
             column_width_px=surface.container.text_column_width,
             cell_width_px=make_cell_width_measurer(surface.text_view),
             tag_table=self._tag_table,
@@ -261,6 +310,7 @@ class HelpWindow(  # pylint: disable=too-many-instance-attributes
             text_view=self._text_view,
             renderer=self._renderer,
             launcher_factory=launcher_factory,
+            attachment_activator=self._activate_demo_attachment,
         )
         self._link_handler.install()
 
@@ -412,6 +462,42 @@ class HelpWindow(  # pylint: disable=too-many-instance-attributes
         propagates rather than masking it as a grey placeholder.
         """
         return self._image_bytes[filename]
+
+    def _list_demo_attachments(self) -> tuple[Attachment, ...]:
+        """The :data:`AttachmentListResolver` the renderer expands with.
+
+        Returns the static demo list, so the help's ``attachments::[]``
+        macro renders one real row rather than the "No attachments."
+        paragraph.
+        """
+        return self._demo_attachments
+
+    def _activate_demo_attachment(self, filename: str) -> None:
+        """The :data:`AttachmentActivator` for the help's save links.
+
+        The help has no note controller and no store, so the write is
+        done here: the save dialog opens pre-filled with the bundled
+        file's name and, on a chosen path, the bundled bytes are written
+        to it — the same user-visible behaviour a note's save link has,
+        against package data instead of a BLOB. A filename the help does
+        not bundle opens no dialog (help-authoring bug, same as the
+        image path — but silent rather than fatal, because a click must
+        never crash the window).
+        """
+        data = self._image_bytes.get(filename)
+        if data is None:
+            return
+
+        def _on_path_chosen(destination: Path | None) -> None:
+            if destination is None:
+                return
+            destination.write_bytes(data)
+
+        self._save_dialog_opener(
+            self,
+            Path(filename).name,
+            _on_path_chosen,
+        )
 
     # ------------------------------------------------------------------
     # Navigation

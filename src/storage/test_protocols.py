@@ -24,10 +24,11 @@ from pathlib import Path
 from typing import TYPE_CHECKING, TypeAliasType
 from unittest.mock import Mock
 
-from enums import AttachmentRejectionReason
+from enums import AttachmentExportFailureReason, AttachmentRejectionReason
 from models.attachment import Attachment
 from models.note import Note
 from storage.protocols import (
+    AttachmentExportFailed,
     AttachmentRejected,
     AttachmentStoreProtocol,
     ColumnWidthResolver,
@@ -256,6 +257,21 @@ class _FakeAttachmentStore:
 
     def count_for_note(self, note_id: str) -> int:
         return sum(1 for a in self.items.values() if a.note_id == note_id)
+
+    def export_to(self, attachment_id: str, destination: Path) -> None:
+        """Write the attachment's bytes out (the outbound mirror of add)."""
+        try:
+            data = self.get_bytes(attachment_id)
+        except KeyError as exc:
+            raise AttachmentExportFailed(
+                AttachmentExportFailureReason.UNKNOWN_ATTACHMENT,
+            ) from exc
+        try:
+            destination.write_bytes(data)
+        except OSError as exc:
+            raise AttachmentExportFailed(
+                AttachmentExportFailureReason.DESTINATION_UNWRITABLE,
+            ) from exc
 
 
 class FakeAttachmentStoreSanityTests(unittest.TestCase):

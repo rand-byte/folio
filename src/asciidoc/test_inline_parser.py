@@ -19,6 +19,7 @@ from __future__ import annotations
 import unittest
 
 from asciidoc.ast import (
+    AttachmentLink,
     Bold,
     InlineNode,
     Italic,
@@ -967,6 +968,128 @@ class LinkMacroPassthroughTests(unittest.TestCase):
         # The display contains a Bold node and a Text node.
         kinds = [type(n).__name__ for n in link.text]
         self.assertIn("Bold", kinds)
+
+
+class AttachmentMacroTests(unittest.TestCase):
+    """``attachment:FILE[label]`` — the inline save link."""
+
+    def test_macro_with_label_parses(self) -> None:
+        (node,) = parse_inline("attachment:report.pdf[the report]", 1)
+        self.assertEqual(
+            node,
+            AttachmentLink(
+                filename="report.pdf",
+                text=(Text(content="the report", source_line=1),),
+                source_line=1,
+            ),
+        )
+
+    def test_empty_label_falls_back_to_the_filename(self) -> None:
+        (node,) = parse_inline("attachment:report.pdf[]", 1)
+        assert isinstance(node, AttachmentLink)
+        self.assertEqual(node.text, (Text(content="report.pdf", source_line=1),))
+
+    def test_label_may_contain_inline_formatting(self) -> None:
+        (node,) = parse_inline("attachment:a.pdf[the *report*]", 1)
+        assert isinstance(node, AttachmentLink)
+        self.assertEqual(
+            node.text,
+            (
+                Text(content="the ", source_line=1),
+                Bold(
+                    children=(Text(content="report", source_line=1),),
+                    source_line=1,
+                ),
+            ),
+        )
+
+    def test_macro_inside_prose_keeps_the_surrounding_text(self) -> None:
+        nodes = parse_inline("see attachment:a.pdf[here] now", 1)
+        self.assertEqual(
+            [type(n).__name__ for n in nodes],
+            ["Text", "AttachmentLink", "Text"],
+        )
+
+    def test_mid_word_prefix_is_not_a_macro(self) -> None:
+        # The same word-boundary rule ``link:`` uses.
+        nodes = parse_inline("myattachment:a.pdf[x]", 1)
+        self.assertEqual([type(n).__name__ for n in nodes], ["Text"])
+
+    def test_missing_brackets_raise(self) -> None:
+        with self.assertRaises(ParseError) as ctx:
+            parse_inline("attachment:a.pdf", 1)
+        self.assertEqual(ctx.exception.kind, ParseErrorKind.BAD_ATTACHMENT_MACRO)
+
+    def test_unclosed_bracket_raises(self) -> None:
+        with self.assertRaises(ParseError) as ctx:
+            parse_inline("attachment:a.pdf[label", 1)
+        self.assertEqual(ctx.exception.kind, ParseErrorKind.BAD_ATTACHMENT_MACRO)
+
+    def test_nested_bracket_in_the_label_raises(self) -> None:
+        with self.assertRaises(ParseError) as ctx:
+            parse_inline("attachment:a.pdf[a[b]]", 1)
+        self.assertEqual(ctx.exception.kind, ParseErrorKind.BAD_ATTACHMENT_MACRO)
+
+    def test_empty_target_raises(self) -> None:
+        with self.assertRaises(ParseError) as ctx:
+            parse_inline("attachment:[label]", 1)
+        self.assertEqual(ctx.exception.kind, ParseErrorKind.BAD_ATTACHMENT_MACRO)
+
+    def test_target_with_whitespace_raises(self) -> None:
+        with self.assertRaises(ParseError) as ctx:
+            parse_inline("attachment:my file.pdf[label]", 1)
+        self.assertEqual(ctx.exception.kind, ParseErrorKind.BAD_ATTACHMENT_MACRO)
+
+    def test_target_with_path_separator_raises(self) -> None:
+        for target in ("dir/a.pdf", "dir\\a.pdf"):
+            with self.subTest(target=target):
+                with self.assertRaises(ParseError) as ctx:
+                    parse_inline(f"attachment:{target}[label]", 1)
+                self.assertEqual(
+                    ctx.exception.kind,
+                    ParseErrorKind.BAD_ATTACHMENT_MACRO,
+                )
+
+    def test_error_carries_the_source_line(self) -> None:
+        with self.assertRaises(ParseError) as ctx:
+            parse_inline("attachment:a.pdf", 7)
+        self.assertEqual(ctx.exception.line, 7)
+
+
+class ActivatableNestingTests(unittest.TestCase):
+    """Activatable things do not nest — in either direction."""
+
+    def test_link_macro_inside_an_attachment_label_raises(self) -> None:
+        # A ``link:`` macro carries its own brackets, so the label's
+        # no-nested-bracket rule catches it first — either way the
+        # nesting is rejected, and the error names the outer macro.
+        with self.assertRaises(ParseError) as ctx:
+            parse_inline("attachment:a.pdf[link:https://x.test[y]]", 1)
+        self.assertEqual(
+            ctx.exception.kind,
+            ParseErrorKind.BAD_ATTACHMENT_MACRO,
+        )
+
+    def test_bare_url_inside_an_attachment_label_raises(self) -> None:
+        with self.assertRaises(ParseError) as ctx:
+            parse_inline("attachment:a.pdf[https://x.test]", 1)
+        self.assertEqual(ctx.exception.kind, ParseErrorKind.BAD_LINK_MACRO)
+
+    def test_attachment_inside_a_link_label_raises(self) -> None:
+        with self.assertRaises(ParseError) as ctx:
+            parse_inline("link:https://x.test[attachment:a.pdf[y]]", 1)
+        self.assertEqual(
+            ctx.exception.kind,
+            ParseErrorKind.BAD_ATTACHMENT_MACRO,
+        )
+
+    def test_attachment_inside_an_attachment_label_raises(self) -> None:
+        with self.assertRaises(ParseError) as ctx:
+            parse_inline("attachment:a.pdf[attachment:b.pdf[y]]", 1)
+        self.assertEqual(
+            ctx.exception.kind,
+            ParseErrorKind.BAD_ATTACHMENT_MACRO,
+        )
 
 
 if __name__ == "__main__":

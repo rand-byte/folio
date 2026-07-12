@@ -20,8 +20,11 @@ from gi.repository import GLib, Gdk, Gtk
 
 from giruntime.ui._file_picker import (
     FileDialogOpener,
+    FileSaveDialogOpener,
     _DIALOG_TITLE,
+    _SAVE_DIALOG_TITLE,
     default_file_dialog_opener,
+    default_file_save_dialog_opener,
 )
 
 
@@ -239,6 +242,163 @@ class DefaultFileDialogOpenerCallbackTests(unittest.TestCase):
         # attach those in v1.
         probe, results = _run_opener_with_probe()
         probe.deliver_non_local_uri()
+        self.assertEqual(results, [None])
+
+
+class _SaveDialogProbe:
+    """Minimal stand-in for :class:`Gtk.FileDialog` in *save* mode.
+
+    The save opener's shape mirrors the open opener's, so this probe
+    mirrors :class:`_DialogProbe`: it records the configuration the
+    opener applies (title, modal, initial name) and short-circuits the
+    asynchronous ``save`` so each terminal branch of the result callback
+    can be driven synchronously.
+    """
+
+    title: str | None
+    modal: bool
+    initial_name: str | None
+    save_calls: list[tuple[Gtk.Window | None, object, Callable[..., None]]]
+    _last_callback: Callable[[object, object], None] | None
+    _finish_raises: bool
+    _finish_returns_path: str | None
+    _finish_returns_none: bool
+
+    def __init__(self) -> None:
+        self.title = None
+        self.modal = False
+        self.initial_name = None
+        self.save_calls = []
+        self._last_callback = None
+        self._finish_raises = False
+        self._finish_returns_path = None
+        self._finish_returns_none = False
+
+    def set_title(self, title: str) -> None:
+        self.title = title
+
+    def set_modal(self, modal: bool) -> None:
+        self.modal = modal
+
+    def set_initial_name(self, name: str) -> None:
+        self.initial_name = name
+
+    def save(
+        self,
+        parent: Gtk.Window | None,
+        cancellable: object,
+        callback: Callable[[object, object], None],
+    ) -> None:
+        self.save_calls.append((parent, cancellable, callback))
+        self._last_callback = callback
+
+    def deliver_path(self, path: str) -> None:
+        self._finish_returns_path = path
+        self._finish_returns_none = False
+        self._finish_raises = False
+        self._fire()
+
+    def deliver_cancel_via_glib_error(self) -> None:
+        self._finish_raises = True
+        self._fire()
+
+    def deliver_non_local_uri(self) -> None:
+        self._finish_returns_path = None
+        self._finish_returns_none = False
+        self._finish_raises = False
+        self._fire()
+
+    def deliver_none_file(self) -> None:
+        self._finish_returns_none = True
+        self._finish_raises = False
+        self._fire()
+
+    def save_finish(self, _result: object) -> object:
+        if self._finish_raises:
+            raise GLib.Error("user cancelled")
+        if self._finish_returns_none:
+            return None
+
+        path_value = self._finish_returns_path
+
+        class _StubFile:
+            def get_path(self) -> str | None:
+                return path_value
+
+        return _StubFile()
+
+    def _fire(self) -> None:
+        callback = self._last_callback
+        if callback is None:
+            raise AssertionError("save() must be called before a result")
+        callback(self, None)
+
+
+def _run_save_opener_with_probe(
+    suggested_name: str = "report.pdf",
+) -> tuple[_SaveDialogProbe, list[Path | None]]:
+    probe = _SaveDialogProbe()
+    results: list[Path | None] = []
+    with patch.object(Gtk.FileDialog, "new", return_value=probe):
+        parent = Gtk.Box.new(Gtk.Orientation.HORIZONTAL, 0)
+        default_file_save_dialog_opener(parent, suggested_name, results.append)
+    return probe, results
+
+
+class FileSaveDialogOpenerTypeAliasTests(unittest.TestCase):
+    def test_default_save_opener_is_callable(self) -> None:
+        self.assertTrue(callable(default_file_save_dialog_opener))
+
+    def test_alias_accepts_the_default_save_opener(self) -> None:
+        opener: FileSaveDialogOpener = default_file_save_dialog_opener
+        self.assertIs(opener, default_file_save_dialog_opener)
+
+
+@unittest.skipUnless(_display_available(), "no GDK display")
+class DefaultFileSaveDialogOpenerConfigurationTests(unittest.TestCase):
+    def test_dialog_title_is_the_save_title(self) -> None:
+        probe, _ = _run_save_opener_with_probe()
+        self.assertEqual(probe.title, _SAVE_DIALOG_TITLE)
+
+    def test_dialog_is_modal(self) -> None:
+        probe, _ = _run_save_opener_with_probe()
+        self.assertTrue(probe.modal)
+
+    def test_initial_name_is_the_suggested_name(self) -> None:
+        probe, _ = _run_save_opener_with_probe("budget-2026.xlsx")
+        self.assertEqual(probe.initial_name, "budget-2026.xlsx")
+
+    def test_save_is_invoked_once(self) -> None:
+        probe, _ = _run_save_opener_with_probe()
+        self.assertEqual(len(probe.save_calls), 1)
+
+    def test_no_cancellable_is_passed(self) -> None:
+        probe, _ = _run_save_opener_with_probe()
+        self.assertIsNone(probe.save_calls[0][1])
+
+
+@unittest.skipUnless(_display_available(), "no GDK display")
+class DefaultFileSaveDialogOpenerResultTests(unittest.TestCase):
+    """The three "no path" outcomes all forward :data:`None`."""
+
+    def test_chosen_path_is_forwarded_as_a_path(self) -> None:
+        probe, results = _run_save_opener_with_probe()
+        probe.deliver_path("/tmp/out.pdf")
+        self.assertEqual(results, [Path("/tmp/out.pdf")])
+
+    def test_cancellation_forwards_none(self) -> None:
+        probe, results = _run_save_opener_with_probe()
+        probe.deliver_cancel_via_glib_error()
+        self.assertEqual(results, [None])
+
+    def test_non_local_uri_forwards_none(self) -> None:
+        probe, results = _run_save_opener_with_probe()
+        probe.deliver_non_local_uri()
+        self.assertEqual(results, [None])
+
+    def test_none_file_forwards_none(self) -> None:
+        probe, results = _run_save_opener_with_probe()
+        probe.deliver_none_file()
         self.assertEqual(results, [None])
 
 

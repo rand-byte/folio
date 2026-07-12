@@ -99,6 +99,7 @@ from dataclasses import dataclass
 
 from asciidoc.ast import (
     Admonition,
+    AttachmentTable,
     BlockNode,
     Blockquote,
     CodeBlock,
@@ -120,6 +121,7 @@ from asciidoc.inline_parser import parse_inline
 from asciidoc.lexer import (
     AdmonitionDirectiveToken,
     AdmonitionFenceToken,
+    AttachmentTableMacroToken,
     AttributeEntryToken,
     BlankToken,
     CodeDirectiveToken,
@@ -139,7 +141,12 @@ from asciidoc.lexer import (
     tokenize,
 )
 from config.defaults import MAX_LIST_DEPTH
-from enums import AdmonitionKind, ParseErrorKind, TokenKind
+from enums import (
+    AdmonitionKind,
+    AttachmentTableColumn,
+    ParseErrorKind,
+    TokenKind,
+)
 from models.parse_error import ParseError
 
 
@@ -180,6 +187,19 @@ _MALFORMED_ATTRIBUTE_ENTRY_RE: re.Pattern[str] = re.compile(r"^:[^:\n]*:")
 # appear inside ``attrs``.
 _IMAGE_OPEN_BRACKET: str = "["
 _IMAGE_CLOSE_BRACKET: str = "]"
+
+# The ``attachments::[…]`` block macro's attribute list. The only
+# attribute the macro accepts is ``cols``, whose value is a
+# comma-separated list of :class:`AttachmentTableColumn` tokens — the
+# same *word* the ``[cols="1,2"]`` table directive uses, but with
+# column **names** rather than proportions as its values. The two never
+# co-occur (the directive attaches to a ``|===`` fence, this attrlist to
+# the macro), so the overload is unambiguous in practice.
+_ATTACHMENT_TABLE_COLS_ATTRIBUTE: str = "cols"
+_ATTACHMENT_TABLE_ATTRIBUTE_RE: re.Pattern[str] = re.compile(
+    r'^([A-Za-z][A-Za-z0-9_-]*)="?([^"]*)"?$'
+)
+_ATTACHMENT_TABLE_COLUMN_SEPARATOR: str = ","
 
 
 # Tag charset: lowercase letters, digits, and hyphens; must start with
@@ -464,6 +484,8 @@ class _Parser:
             return self._parse_code_block_no_directive(token)
         if isinstance(token, ImageMacroToken):
             return self._parse_image(token)
+        if isinstance(token, AttachmentTableMacroToken):
+            return self._parse_attachment_table(token)
         if isinstance(token, ColsDirectiveToken):
             return self._parse_table_with_directive(token)
         if isinstance(token, TableFenceToken):
@@ -1022,6 +1044,65 @@ class _Parser:
         return Image(
             filename=filename,
             attrs=attrs,
+            source_line=token.line,
+        )
+
+    # -- attachment table ---------------------------------------------------
+
+    def _parse_attachment_table(
+        self,
+        token: AttachmentTableMacroToken,
+    ) -> AttachmentTable:
+        """Validate an ``attachments::[ATTRS]`` block macro.
+
+        ``token.raw`` is everything after the ``attachments::`` prefix —
+        the bracketed attribute list, which must be present, balanced,
+        and free of nested brackets
+        (:class:`ParseErrorKind.BAD_ATTACHMENT_TABLE_MACRO`). The macro's
+        *target* is empty by design: the note scope is implicit, exactly
+        as AsciiDoc's own ``toc::[]`` spells it.
+
+        The attribute list accepts a single attribute, ``cols``, whose
+        value is a comma-separated list of
+        :class:`AttachmentTableColumn` tokens. An unknown column name
+        raises :class:`ParseErrorKind.UNKNOWN_ATTACHMENT_TABLE_COLUMN`; a
+        duplicate name, an empty value, an unknown attribute, or a
+        malformed list raises
+        :class:`ParseErrorKind.BAD_ATTACHMENT_TABLE_MACRO`. An absent
+        ``cols`` selects every column in declaration order.
+        """
+        self.pos += 1
+        raw = token.raw
+        if not (
+            raw.startswith(_IMAGE_OPEN_BRACKET)
+            and raw.endswith(_IMAGE_CLOSE_BRACKET)
+            and len(raw) >= 2
+        ):
+            raise ParseError(
+                line=token.line,
+                column=0,
+                message=(
+                    "attachments:: macro must be followed by a balanced "
+                    "`[…]` attribute list"
+                ),
+                kind=ParseErrorKind.BAD_ATTACHMENT_TABLE_MACRO,
+            )
+        body = raw[1:-1].strip()
+        if (
+            _IMAGE_OPEN_BRACKET in body
+            or _IMAGE_CLOSE_BRACKET in body
+        ):
+            raise ParseError(
+                line=token.line,
+                column=0,
+                message=(
+                    "attachments:: macro attributes contain unbalanced "
+                    "brackets"
+                ),
+                kind=ParseErrorKind.BAD_ATTACHMENT_TABLE_MACRO,
+            )
+        return AttachmentTable(
+            columns=_parse_attachment_table_columns(body, token.line),
             source_line=token.line,
         )
 
@@ -1665,6 +1746,75 @@ def _parse_inline_only(text: str, line: int) -> tuple[InlineNode, ...]:
     so this is a presentational normalisation, not a semantic one.
     """
     return parse_inline(text.strip(), line)
+
+
+def _parse_attachment_table_columns(
+    body: str,
+    line: int,
+) -> tuple[AttachmentTableColumn, ...]:
+    """Parse an ``attachments::[…]`` attribute body into its columns.
+
+    ``body`` is the text between the macro's brackets, already stripped.
+    An empty body selects every :class:`AttachmentTableColumn` member in
+    declaration order — the default column set.
+
+    Otherwise the body must be exactly ``cols="a,b"`` (the quotes are
+    optional): any other attribute name, a malformed ``key=value``
+    shape, an empty value, or a duplicated column raises
+    :class:`ParseErrorKind.BAD_ATTACHMENT_TABLE_MACRO`, and a value that
+    is not an :class:`AttachmentTableColumn` token raises
+    :class:`ParseErrorKind.UNKNOWN_ATTACHMENT_TABLE_COLUMN`.
+    """
+    if not body:
+        return tuple(AttachmentTableColumn)
+    match = _ATTACHMENT_TABLE_ATTRIBUTE_RE.match(body)
+    if match is None or match.group(1) != _ATTACHMENT_TABLE_COLS_ATTRIBUTE:
+        raise ParseError(
+            line=line,
+            column=0,
+            message=(
+                "attachments:: macro accepts only a `cols=\"…\"` attribute"
+            ),
+            kind=ParseErrorKind.BAD_ATTACHMENT_TABLE_MACRO,
+        )
+    columns: list[AttachmentTableColumn] = []
+    for part in match.group(2).split(_ATTACHMENT_TABLE_COLUMN_SEPARATOR):
+        name = part.strip()
+        if not name:
+            raise ParseError(
+                line=line,
+                column=0,
+                message=(
+                    "attachments:: macro `cols` attribute contains an "
+                    "empty column name"
+                ),
+                kind=ParseErrorKind.BAD_ATTACHMENT_TABLE_MACRO,
+            )
+        try:
+            column = AttachmentTableColumn(name)
+        except ValueError as exc:
+            allowed = ", ".join(c.value for c in AttachmentTableColumn)
+            raise ParseError(
+                line=line,
+                column=0,
+                message=(
+                    f"unknown attachments:: column: {name!r}; "
+                    f"only {allowed} are allowed"
+                ),
+                kind=ParseErrorKind.UNKNOWN_ATTACHMENT_TABLE_COLUMN,
+            ) from exc
+        if column in columns:
+            raise ParseError(
+                line=line,
+                column=0,
+                message=(
+                    f"attachments:: macro `cols` attribute repeats the "
+                    f"{name!r} column"
+                ),
+                kind=ParseErrorKind.BAD_ATTACHMENT_TABLE_MACRO,
+            )
+        columns.append(column)
+    return tuple(columns)
 
 
 def _parse_cols_proportions(raw: str, line: int) -> tuple[int, ...]:

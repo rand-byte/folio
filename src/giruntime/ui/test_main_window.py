@@ -11,7 +11,8 @@ from pathlib import Path
 from gi.repository import Gdk, Gio, GLib, Gtk
 
 from asciidoc.summary import derive_summary
-from enums import ViewMode
+from enums import AttachmentExportFailureReason, ViewMode
+from storage.protocols import AttachmentExportFailed
 from models.attachment import Attachment
 from models.note import Note
 from models.session_state import DEFAULT_SESSION_STATE, SessionState
@@ -220,6 +221,21 @@ class _FakeAttachmentStore:
 
     def get_bytes(self, _attachment_id: str) -> bytes:
         raise NotImplementedError
+
+    def export_to(self, attachment_id: str, destination: Path) -> None:
+        """Write the attachment's bytes out (the outbound mirror of add)."""
+        try:
+            data = self.get_bytes(attachment_id)
+        except KeyError as exc:
+            raise AttachmentExportFailed(
+                AttachmentExportFailureReason.UNKNOWN_ATTACHMENT,
+            ) from exc
+        try:
+            destination.write_bytes(data)
+        except OSError as exc:
+            raise AttachmentExportFailed(
+                AttachmentExportFailureReason.DESTINATION_UNWRITABLE,
+            ) from exc
 
 
 # ---------------------------------------------------------------------------

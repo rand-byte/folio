@@ -38,7 +38,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, Protocol
 
-from enums import AttachmentRejectionReason
+from enums import AttachmentExportFailureReason, AttachmentRejectionReason
 from models.attachment import Attachment
 from models.note import Note
 from models.session_state import SessionState
@@ -63,6 +63,23 @@ fake (e.g. a function returning a 1x1 PNG) and production can wire
 :meth:`AttachmentStoreProtocol.get_bytes` through a closure that captures
 the current note context.
 """
+
+type AttachmentListResolver = Callable[[], tuple[Attachment, ...]]
+"""Returns the attachment **metadata** of the note currently rendered.
+
+The renderer calls this once per render to expand an
+``attachments::[]`` macro into an ordinary table. It is deliberately a
+metadata-only surface — no BLOB is touched to *draw* the table, which
+is the whole point of the metadata/bytes split; bytes are pulled only
+when the reader actually saves an attachment.
+
+Injected at construction of the concrete renderer, like
+:data:`ImageBytesResolver`: production wires it to
+:meth:`AttachmentStoreProtocol.list_for_note` through a closure that
+captures the current note context, the help window wires it to a static
+demo list, and tests pass a literal tuple.
+"""
+
 
 type ColumnWidthResolver = Callable[[], int]
 """Returns the live pixel width of the rendered article column.
@@ -99,6 +116,32 @@ class AttachmentRejected(Exception):
     ) -> None:
         super().__init__(
             message if message is not None else f"Attachment rejected: {reason.name}"
+        )
+        self.reason = reason
+
+
+class AttachmentExportFailed(Exception):
+    """Raised by :meth:`AttachmentStoreProtocol.export_to` when the bytes
+    cannot be written to the destination the user chose.
+
+    The mirror image of :class:`AttachmentRejected` (which guards the
+    *inbound* path): same shape, same discipline. The :attr:`reason`
+    discriminator lets the controller pick a specific user-facing toast
+    without parsing the human-readable message, and the caller catches
+    this exception by name — never via a broader ``except``.
+    """
+
+    reason: AttachmentExportFailureReason
+
+    def __init__(
+        self,
+        reason: AttachmentExportFailureReason,
+        message: str | None = None,
+    ) -> None:
+        super().__init__(
+            message
+            if message is not None
+            else f"Attachment export failed: {reason.name}"
         )
         self.reason = reason
 
@@ -209,6 +252,22 @@ class AttachmentStoreProtocol(Protocol):
         this, and only when the image is actually about to be displayed.
         Listing notes or browsing attachment metadata must use
         :meth:`list_for_note` instead.
+        """
+
+    def export_to(self, attachment_id: str, destination: Path) -> None:
+        """Write the attachment's bytes to ``destination`` (overwriting).
+
+        The mirror image of :meth:`add_for_note`: the *outbound* file
+        I/O belongs to the same layer that owns the inbound file I/O,
+        not to a widget. Raises :class:`AttachmentExportFailed` carrying
+        :data:`AttachmentExportFailureReason.UNKNOWN_ATTACHMENT` for a
+        missing row, or
+        :data:`AttachmentExportFailureReason.DESTINATION_UNWRITABLE`
+        when the write itself fails.
+
+        Returns **no bytes to the caller** — which is what keeps the
+        metadata/bytes split intact: :meth:`get_bytes` remains the only
+        method that materialises a BLOB to a caller.
         """
 
     def count_for_note(self, note_id: str) -> int:

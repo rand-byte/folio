@@ -91,6 +91,7 @@ class NodeKind(StrEnum):
     TABLE_CELL = auto()
     ADMONITION = auto()
     BLOCKQUOTE = auto()
+    ATTACHMENT_TABLE = auto()
     # Inline
     TEXT = auto()
     BOLD = auto()
@@ -99,6 +100,7 @@ class NodeKind(StrEnum):
     UNDERLINE = auto()
     MONOSPACE = auto()
     LINK = auto()
+    ATTACHMENT_LINK = auto()
 
 
 class TokenKind(StrEnum):
@@ -115,6 +117,7 @@ class TokenKind(StrEnum):
     ADMONITION_DIRECTIVE = auto()
     ADMONITION_FENCE = auto()
     SINGLE_ADMONITION = auto()
+    ATTACHMENT_TABLE_MACRO = auto()
     QUOTE_DIRECTIVE = auto()
     QUOTE_FENCE = auto()
     ATTRIBUTE_ENTRY = auto()
@@ -154,6 +157,9 @@ class ParseErrorKind(StrEnum):
     LIST_STARTS_BELOW_TOP_LEVEL = auto()
     LIST_NESTING_SKIPS_LEVEL = auto()
     LIST_NESTING_TOO_DEEP = auto()
+    BAD_ATTACHMENT_MACRO = auto()
+    BAD_ATTACHMENT_TABLE_MACRO = auto()
+    UNKNOWN_ATTACHMENT_TABLE_COLUMN = auto()
 
 
 class HeadingTrailing(StrEnum):
@@ -261,6 +267,41 @@ class AttachmentRejectionReason(Enum):
 
     EXCEEDS_SIZE_LIMIT = auto()
     UNREADABLE_SOURCE = auto()
+
+
+class AttachmentTableColumn(StrEnum):
+    """Columns the ``attachments::[]`` block macro can render.
+
+    Values are exactly the tokens a user writes in the macro's
+    ``cols="…"`` attribute (``attachments::[cols="name,size"]``), and
+    the *declaration order below is the default column order* — an
+    ``attachments::[]`` with no ``cols`` renders every member in this
+    order.
+
+    ``StrEnum`` with explicit values because the value appears in note
+    source, which is persisted content: changing one would silently
+    re-interpret (or break) notes already written. Adding a member is a
+    deliberate change that ripples to the table expansion's cell
+    builder, which is exhaustive over this enum.
+    """
+
+    NAME = "name"
+    SIZE = "size"
+
+
+class AttachmentExportFailureReason(Enum):
+    """Why writing an attachment to a user-chosen path failed.
+
+    Carried by :class:`AttachmentExportFailed` (defined in the storage
+    layer) and re-emitted by the note controller's
+    ``attachment-export-failed`` signal. Plain :class:`enum.Enum` rather
+    than ``StrEnum`` — mirroring :class:`AttachmentRejectionReason`, its
+    inbound twin — because the value is never persisted: it exists so
+    the UI can pick a toast without parsing a message string.
+    """
+
+    UNKNOWN_ATTACHMENT = auto()
+    DESTINATION_UNWRITABLE = auto()
 
 
 class SystemDocument(StrEnum):

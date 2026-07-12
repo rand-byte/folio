@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import sqlite3
 import unittest
+from tempfile import TemporaryDirectory
 from collections.abc import Iterator
 from datetime import UTC, datetime
 from pathlib import Path
@@ -11,7 +12,11 @@ from pathlib import Path
 from gi.repository import GObject
 
 from asciidoc.summary import derive_summary
-from enums import AttachmentRejectionReason, SmartFilter
+from enums import (
+    AttachmentExportFailureReason,
+    AttachmentRejectionReason,
+    SmartFilter,
+)
 from giruntime.controllers.app_state import AppState
 from giruntime.controllers.note_controller import (
     NoteController,
@@ -21,7 +26,7 @@ from giruntime.controllers.note_list_store import NoteListStore
 from models.attachment import Attachment
 from models.note import Note
 from search.note_filter import SmartSelection, TagSelection
-from storage.protocols import AttachmentRejected
+from storage.protocols import AttachmentExportFailed, AttachmentRejected
 
 
 _FIXED_NOW: datetime = datetime(2026, 4, 27, 12, 0, 0, tzinfo=UTC)
@@ -145,11 +150,28 @@ class _FakeAttachmentStore:
     def list_for_note(self, note_id: str) -> list[Attachment]:
         return [a for a in self.attachments.values() if a.note_id == note_id]
 
-    def get_bytes(self, _attachment_id: str) -> bytes:
-        return b""
+    def get_bytes(self, attachment_id: str) -> bytes:
+        if attachment_id not in self.attachments:
+            raise KeyError(attachment_id)
+        return b"payload"
 
     def count_for_note(self, note_id: str) -> int:
         return sum(1 for a in self.attachments.values() if a.note_id == note_id)
+
+    def export_to(self, attachment_id: str, destination: Path) -> None:
+        """Write the attachment's bytes out (the outbound mirror of add)."""
+        try:
+            data = self.get_bytes(attachment_id)
+        except KeyError as exc:
+            raise AttachmentExportFailed(
+                AttachmentExportFailureReason.UNKNOWN_ATTACHMENT,
+            ) from exc
+        try:
+            destination.write_bytes(data)
+        except OSError as exc:
+            raise AttachmentExportFailed(
+                AttachmentExportFailureReason.DESTINATION_UNWRITABLE,
+            ) from exc
 
 
 class _Recorder:
@@ -165,6 +187,7 @@ class _Recorder:
     def __init__(self, controller: NoteController) -> None:
         self.events = []
         for signal in (
+            "attachment-export-failed",
             "attachment-rejected",
             "attachments-changed",
             "storage-error",
@@ -490,6 +513,73 @@ class RemoveAttachmentTests(unittest.TestCase):
         self.assertEqual(
             recorder.names(),
             ["storage-error"],
+        )
+
+
+class ExportAttachmentTests(unittest.TestCase):
+    """``export_attachment`` — the click-time half of a save link."""
+
+    def setUp(self) -> None:
+        # pylint: disable-next=consider-using-with
+        self._dir = TemporaryDirectory()
+        self.root = Path(self._dir.name)
+
+    def tearDown(self) -> None:
+        self._dir.cleanup()
+
+    def _controller_with_attachment(
+        self,
+    ) -> tuple[NoteController, _Recorder, str]:
+        controller, _, _, attachments, _ = _build_controller()
+        source = self.root / "photo.png"
+        source.write_bytes(b"payload")
+        attachment = attachments.add_for_note("note-1", source)
+        recorder = _Recorder(controller)
+        return controller, recorder, attachment.id
+
+    def test_successful_export_writes_the_bytes(self) -> None:
+        controller, _, attachment_id = self._controller_with_attachment()
+        destination = self.root / "out.png"
+        self.assertTrue(
+            controller.export_attachment(attachment_id, destination)
+        )
+        self.assertEqual(destination.read_bytes(), b"payload")
+
+    def test_successful_export_emits_no_signal(self) -> None:
+        controller, recorder, attachment_id = (
+            self._controller_with_attachment()
+        )
+        controller.export_attachment(attachment_id, self.root / "out.png")
+        self.assertEqual(recorder.names(), [])
+
+    def test_unknown_attachment_emits_the_failure_signal(self) -> None:
+        controller, recorder, _ = self._controller_with_attachment()
+        self.assertFalse(
+            controller.export_attachment("att-nope", self.root / "out.png")
+        )
+        self.assertEqual(recorder.names(), ["attachment-export-failed"])
+        self.assertEqual(
+            recorder.events[0][1],
+            (AttachmentExportFailureReason.UNKNOWN_ATTACHMENT,),
+        )
+
+    def test_unknown_attachment_writes_nothing(self) -> None:
+        controller, _, _ = self._controller_with_attachment()
+        destination = self.root / "out.png"
+        controller.export_attachment("att-nope", destination)
+        self.assertFalse(destination.exists())
+
+    def test_unwritable_destination_emits_its_reason(self) -> None:
+        controller, recorder, attachment_id = (
+            self._controller_with_attachment()
+        )
+        destination = self.root / "missing-dir" / "out.png"
+        self.assertFalse(
+            controller.export_attachment(attachment_id, destination)
+        )
+        self.assertEqual(
+            recorder.events[0][1],
+            (AttachmentExportFailureReason.DESTINATION_UNWRITABLE,),
         )
 
 

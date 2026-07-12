@@ -4,6 +4,9 @@ from __future__ import annotations
 
 import typing
 import unittest
+from collections.abc import Callable
+from pathlib import Path
+from tempfile import TemporaryDirectory
 
 from gi.repository import Gdk, GLib, Gtk
 
@@ -12,6 +15,7 @@ from asciidoc.ast import BlockNode, InlineNode
 from asciidoc.parser import parse
 from enums import HelpSection, SystemDocument
 from giruntime.ui.application import NotesApplication
+from giruntime.ui._filesize import format_byte_size
 from giruntime.ui.help_window import HelpWindow, _section_mark_name
 from giruntime.ui.link_handler import UriLauncherProtocol
 from giruntime.ui.note_render.tag_table import build_wash_specs
@@ -418,6 +422,105 @@ class HelpActionTests(unittest.TestCase):
         window = self.app._ensure_help_window()
         self.assertEqual(set(window.section_marks), set(HelpSection))
         self.assertNotEqual(window.rendered_text.strip(), "")
+
+
+class _RecordingSaveDialog:
+    """Synchronous stand-in for the production save-dialog opener."""
+
+    suggested_names: list[str]
+    result: Path | None
+
+    def __init__(self, result: Path | None) -> None:
+        self.suggested_names = []
+        self.result = result
+
+    def __call__(
+        self,
+        _parent: Gtk.Widget,
+        suggested_name: str,
+        on_result: Callable[[Path | None], None],
+    ) -> None:
+        self.suggested_names.append(suggested_name)
+        on_result(self.result)
+
+
+@unittest.skipUnless(_display_available(), "no GDK display")
+class HelpWindowDemoAttachmentTests(unittest.TestCase):
+    """The help's attachment macros work against a static demo list."""
+
+    def setUp(self) -> None:
+        # pylint: disable-next=consider-using-with
+        self._dir = TemporaryDirectory()
+        self.root = Path(self._dir.name)
+
+    def tearDown(self) -> None:
+        self._dir.cleanup()
+
+    def _build_window(self, dialog: _RecordingSaveDialog) -> HelpWindow:
+        window = HelpWindow(
+            application=_test_application(),
+            launcher_factory=_fake_launcher_factory,
+            save_dialog_opener=dialog,
+        )
+        self.addCleanup(window.destroy)
+        return window
+
+    def test_demo_list_names_the_bundled_image(self) -> None:
+        window = self._build_window(_RecordingSaveDialog(result=None))
+        self.assertEqual(
+            [a.filename for a in window._list_demo_attachments()],
+            [SystemDocument.HELP_DEMO_IMAGE.value],
+        )
+
+    def test_demo_attachment_carries_the_real_byte_size(self) -> None:
+        window = self._build_window(_RecordingSaveDialog(result=None))
+        (attachment,) = window._list_demo_attachments()
+        self.assertEqual(
+            attachment.byte_size,
+            len(load_bytes(SystemDocument.HELP_DEMO_IMAGE)),
+        )
+
+    def test_attachments_macro_renders_a_real_row(self) -> None:
+        # The help's ``attachments::[]`` must expand to a real table —
+        # its header labels plus a row for the bundled demo file. (The
+        # empty-list notice cannot be asserted against here: the help's
+        # own prose mentions it.)
+        window = self._build_window(_RecordingSaveDialog(result=None))
+        text = window.rendered_text
+        self.assertIn("Name", text)
+        self.assertIn("Size", text)
+        self.assertIn(SystemDocument.HELP_DEMO_IMAGE.value, text)
+        self.assertIn(
+            format_byte_size(len(load_bytes(SystemDocument.HELP_DEMO_IMAGE))),
+            text,
+        )
+
+    def test_activating_the_demo_link_writes_the_bundled_bytes(self) -> None:
+        destination = self.root / "saved.png"
+        dialog = _RecordingSaveDialog(result=destination)
+        window = self._build_window(dialog)
+
+        window._activate_demo_attachment(SystemDocument.HELP_DEMO_IMAGE.value)
+        self.assertEqual(
+            dialog.suggested_names,
+            [SystemDocument.HELP_DEMO_IMAGE.value],
+        )
+        self.assertEqual(
+            destination.read_bytes(),
+            load_bytes(SystemDocument.HELP_DEMO_IMAGE),
+        )
+
+    def test_cancelled_dialog_writes_nothing(self) -> None:
+        dialog = _RecordingSaveDialog(result=None)
+        window = self._build_window(dialog)
+        window._activate_demo_attachment(SystemDocument.HELP_DEMO_IMAGE.value)
+        self.assertEqual(list(self.root.iterdir()), [])
+
+    def test_unknown_filename_opens_no_dialog(self) -> None:
+        dialog = _RecordingSaveDialog(result=self.root / "x.png")
+        window = self._build_window(dialog)
+        window._activate_demo_attachment("not-bundled.png")
+        self.assertEqual(dialog.suggested_names, [])
 
 
 if __name__ == "__main__":

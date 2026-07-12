@@ -10,6 +10,17 @@ Principles & invariants
   :class:`AttachmentStoreProtocol`. It re-renders on
   ``notify::selected-note-id`` and on a store ``items-changed`` that
   touches the displayed note (an edit replaces that note's row).
+* **Clicks in the read pane run through one :class:`LinkHandler`.** The
+  renderer tags every clickable range with a closed
+  :data:`~giruntime.ui.note_render.textbuffer_renderer.ActivationTarget`;
+  the handler dispatches a ``UrlTarget`` to the URI launcher and an
+  ``AttachmentTarget`` to this view's :meth:`_activate_attachment`, which
+  resolves the filename against the current note, opens a *save* dialog
+  pre-filled with the attachment's name, and hands the chosen path to
+  :meth:`NoteController.export_attachment` (storage owns the write). A
+  filename matching no attachment opens **no** dialog. The save-link and
+  image macros share one filename→attachment lookup
+  (:meth:`_attachment_named`), so they cannot disagree.
 * The pane's layout is the three-step stack from §2 of the plan:
   ``Gtk.ScrolledWindow`` (horizontal AUTOMATIC, vertical AUTOMATIC) →
   :class:`ArticleContainer` (a ``Gtk.Widget`` that also implements
@@ -212,6 +223,7 @@ from __future__ import annotations
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from datetime import datetime
+from pathlib import Path
 
 from gi.repository import Gdk, GObject, Graphene, Gsk, Gtk, Pango
 
@@ -222,10 +234,25 @@ from config.defaults import (
     ARTICLE_TOP_MARGIN_LINES,
     TARGET_CHARS_PER_LINE,
 )
-from enums import LinkScheme, ParseErrorKind, WashShape
+from enums import (
+    AttachmentTableColumn,
+    LinkScheme,
+    ParseErrorKind,
+    WashShape,
+)
 from giruntime.controllers.app_state import AppState
+from giruntime.controllers.note_controller import NoteController
 from giruntime.controllers.note_list_store import NoteListStore
 from giruntime.ui._dates import format_date_long
+from giruntime.ui._file_picker import (
+    FileSaveDialogOpener,
+    default_file_save_dialog_opener,
+)
+from giruntime.ui.link_handler import (
+    LinkHandler,
+    UriLauncherFactory,
+    default_launcher_factory,
+)
 from giruntime.ui.note_render.tag_table import (
     SheetWash,
     TagName,
@@ -238,6 +265,7 @@ from giruntime.ui.note_render.textbuffer_renderer import (
     CellWidthMeasurer,
     TextBufferRenderer,
 )
+from models.attachment import Attachment
 from models.note import Note
 from models.parse_error import ParseError
 from storage.protocols import (
@@ -372,6 +400,18 @@ _ALLOWED_SCHEMES_LIST: str = ", ".join(s.value for s in LinkScheme)
 the user-facing message for :data:`ParseErrorKind.UNSUPPORTED_LINK_SCHEME`.
 Computed once at import time so the message is stable and the enum is
 queried only once.
+"""
+
+
+_ATTACHMENT_TABLE_COLUMNS_LIST: str = ", ".join(
+    c.value for c in AttachmentTableColumn
+)
+"""Pre-computed list of the columns ``attachments::[cols=…]`` accepts.
+
+Computed once at import time, like :data:`_ALLOWED_SCHEMES_LIST`, so the
+user-facing message for
+:data:`ParseErrorKind.UNKNOWN_ATTACHMENT_TABLE_COLUMN` names exactly the
+enum's members and cannot drift from them.
 """
 
 
@@ -514,6 +554,23 @@ def _message_for(kind: ParseErrorKind, line: int) -> str:
         case ParseErrorKind.LIST_NESTING_TOO_DEEP:
             return (
                 f"Line {line}: lists can nest at most three levels deep."
+            )
+        case ParseErrorKind.BAD_ATTACHMENT_MACRO:
+            return (
+                f"Line {line}: the attachment macro is malformed. Expected "
+                "`attachment:filename[label]`, where the filename names an "
+                "attachment of this note (no spaces, no path)."
+            )
+        case ParseErrorKind.BAD_ATTACHMENT_TABLE_MACRO:
+            return (
+                f"Line {line}: the attachments-table macro is malformed. "
+                "Expected `attachments::[]`, optionally with "
+                "`[cols=\"name,size\"]`."
+            )
+        case ParseErrorKind.UNKNOWN_ATTACHMENT_TABLE_COLUMN:
+            return (
+                f"Line {line}: unknown column in `attachments::[cols=…]`. "
+                f"The columns are: {_ATTACHMENT_TABLE_COLUMNS_LIST}."
             )
 
 
@@ -1641,10 +1698,13 @@ class NoteView(Gtk.Box):
     # to the same M-width measurement without retaining the widget.
     _note_store: NoteListStore
     _attachments: AttachmentStoreProtocol | None
+    _note_controller: NoteController | None
+    _save_dialog_opener: FileSaveDialogOpener
     _app_state: AppState
     _buffer: Gtk.TextBuffer
     _text_view: ArticleTextView
     _renderer: TextBufferRenderer
+    _link_handler: LinkHandler
     _current_note_id: str | None
     _current_note: Note | None
     _error_message: str | None
@@ -1656,10 +1716,22 @@ class NoteView(Gtk.Box):
         note_store: NoteListStore,
         app_state: AppState,
         attachments: AttachmentStoreProtocol | None = None,
+        note_controller: NoteController | None = None,
+        save_dialog_opener: FileSaveDialogOpener = (
+            default_file_save_dialog_opener
+        ),
+        launcher_factory: UriLauncherFactory = default_launcher_factory,
     ) -> None:
         super().__init__(orientation=Gtk.Orientation.VERTICAL, spacing=0)
         self._note_store = note_store
         self._attachments = attachments
+        # The controller performs the export (storage owns the file I/O);
+        # the opener asks the user where to put it. Both are ``None`` /
+        # defaulted on the same contract as ``attachments``: a view built
+        # without them still renders — a save link then reports "no
+        # attachment" rather than writing anything.
+        self._note_controller = note_controller
+        self._save_dialog_opener = save_dialog_opener
         self._app_state = app_state
         # ``_current_note_id`` is the note whose source is presently
         # rendered in the buffer. The image-bytes resolver reads this
@@ -1726,10 +1798,23 @@ class NoteView(Gtk.Box):
         # widget's outer footprint.
         self._renderer = TextBufferRenderer(
             image_bytes_for=self._resolve_image_bytes,
+            attachments_for=self._list_attachments,
             column_width_px=surface.container.text_column_width,
             cell_width_px=make_cell_width_measurer(surface.text_view),
             tag_table=surface.tag_table,
         )
+
+        # Clicks in the read pane: a web link launches, an
+        # ``attachment:`` save link opens the save dialog. Both ride the
+        # one handler — the renderer hands it a closed activation target,
+        # and this view supplies the attachment half of the dispatch.
+        self._link_handler = LinkHandler(
+            text_view=self._text_view,
+            renderer=self._renderer,
+            launcher_factory=launcher_factory,
+            attachment_activator=self._activate_attachment,
+        )
+        self._link_handler.install()
 
         # Subscribe to the selected-note signal. The handler is a bound
         # method so disconnecting later is simple if the widget is ever
@@ -1955,6 +2040,77 @@ class NoteView(Gtk.Box):
     # Renderer wiring
     # ------------------------------------------------------------------
 
+    def _attachment_named(self, filename: str) -> Attachment | None:
+        """Find the current note's attachment called ``filename``.
+
+        The single filename→attachment lookup, shared by the image
+        resolver (``image::FILE[]``) and the save-link activator
+        (``attachment:FILE[label]``) — the two macros key on the same
+        thing, so they must resolve it the same way.
+
+        Returns :data:`None` when there is no attachment store, no
+        current note, or no attachment of that name. The scan is linear
+        over :meth:`AttachmentStoreProtocol.list_for_note` (metadata
+        only — the BLOB column is not selected): for v1's "handful of
+        attachments per note" that is cheaper than a cache which would
+        have to be invalidated on every add / remove.
+        """
+        if self._attachments is None or self._current_note_id is None:
+            return None
+        for attachment in self._attachments.list_for_note(
+            self._current_note_id,
+        ):
+            if attachment.filename == filename:
+                return attachment
+        return None
+
+    def _list_attachments(self) -> tuple[Attachment, ...]:
+        """The :data:`AttachmentListResolver` plugged into the renderer.
+
+        Feeds the ``attachments::[]`` expansion the current note's
+        attachment **metadata**, in ``list_for_note`` order (insertion
+        order). Metadata only: no BLOB is read to draw the table, which
+        is the point of the metadata/bytes split. An empty tuple — no
+        store, no selection, or a note with no attachments — expands to
+        the italic "No attachments." paragraph.
+        """
+        if self._attachments is None or self._current_note_id is None:
+            return ()
+        return tuple(self._attachments.list_for_note(self._current_note_id))
+
+    def _activate_attachment(self, filename: str) -> None:
+        """The :data:`AttachmentActivator` the link handler dispatches to.
+
+        Called when the reader clicks an ``attachment:FILE[…]`` link (in
+        prose or in a generated ``attachments::[]`` row — both are the
+        same AST node, so both land here).
+
+        A filename matching no attachment of the current note is a *dead
+        link*: the parser could not know (it is storage-free), so this is
+        where it surfaces — and no dialog is opened. Otherwise the save
+        dialog opens pre-filled with the attachment's name
+        (``Path(...).name``, defence in depth: the parser already rejects
+        separators), and a chosen path is handed to the controller, which
+        owns the write. Cancelling writes nothing.
+        """
+        attachment = self._attachment_named(filename)
+        if attachment is None or self._note_controller is None:
+            return
+        controller = self._note_controller
+
+        def _on_path_chosen(destination: Path | None) -> None:
+            if destination is None:
+                # Cancelled, backend error, or a non-local URI — all
+                # three mean "no path", and all three mean do nothing.
+                return
+            controller.export_attachment(attachment.id, destination)
+
+        self._save_dialog_opener(
+            self,
+            Path(attachment.filename).name,
+            _on_path_chosen,
+        )
+
     def _resolve_image_bytes(self, filename: str) -> bytes:
         """The :data:`ImageBytesResolver` plugged into the renderer.
 
@@ -1967,28 +2123,19 @@ class NoteView(Gtk.Box):
         the renderer's image path now inserts the placeholder via
         ``insert_paintable`` rather than building an anchored widget.
 
-        Lookup is a linear scan over
-        :meth:`AttachmentStoreProtocol.list_for_note`. For v1's
-        "handful of images per note" this is cheaper than a per-note
-        dict cache that would have to be invalidated on every
-        attachment add / remove. The list call itself is metadata-
-        only: the BLOB column is not selected.
+        Lookup goes through the shared :meth:`_attachment_named` — the
+        same helper the ``attachment:`` save link uses, because both
+        macros name an attachment by filename and must agree on what
+        that resolves to.
         """
-        if self._attachments is None:
+        attachment = self._attachment_named(filename)
+        if attachment is None or self._attachments is None:
+            # No store, no current note, or no attachment of that name.
+            # The renderer's decode-failure branch produces the
+            # placeholder paintable on empty bytes, which is the right
+            # user-visible signal for "image not found".
             return _placeholder_image_bytes(filename)
-        if self._current_note_id is None:
-            # Defensive: a malformed renderer call before refresh has
-            # set the current note would land here. The placeholder
-            # contract keeps the document viewable.
-            return _placeholder_image_bytes(filename)
-        for attachment in self._attachments.list_for_note(self._current_note_id):
-            if attachment.filename == filename:
-                return self._attachments.get_bytes(attachment.id)
-        # No match — the image macro references a filename that has
-        # no attachment row. The renderer's decode-failure branch
-        # produces the placeholder paintable on empty bytes, which is
-        # the right user-visible signal for "image not found".
-        return _placeholder_image_bytes(filename)
+        return self._attachments.get_bytes(attachment.id)
 
     @property
     def current_note_id(self) -> str | None:

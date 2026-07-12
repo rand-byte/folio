@@ -26,7 +26,13 @@ Principles & invariants
 * :class:`AttachmentRejected` is caught and surfaced as the
   ``attachment-rejected`` signal carrying the
   :class:`AttachmentRejectionReason`; the method returns ``None``
-  rather than re-raising.
+  rather than re-raising. :class:`AttachmentExportFailed` — its
+  outbound twin — is handled identically, on the
+  ``attachment-export-failed`` signal, so the two attachment paths
+  have exactly one shape between them. (Nothing *listens* to these
+  toast signals yet — there is no toast widget — but following the
+  established pattern is what wires them for free when that layer
+  lands.)
 * There is **no** ``notes-changed`` signal. The note list, the rendered
   view, and the sidebar all update by observing the store's
   ``items-changed`` (directly or through the derived
@@ -61,6 +67,7 @@ from models.attachment import Attachment
 from models.note import Note
 from search.note_filter import Selection, SmartSelection, TagSelection
 from storage.protocols import (
+    AttachmentExportFailed,
     AttachmentRejected,
     AttachmentStoreProtocol,
 )
@@ -123,6 +130,10 @@ class NoteController(GObject.Object):
     -------
     attachment-rejected
         Fired when :meth:`add_attachment` declines a file.
+    attachment-export-failed
+        Fired when :meth:`export_attachment` cannot write an
+        attachment's bytes to the path the user chose. Carries an
+        :class:`AttachmentExportFailureReason`.
     attachments-changed
         Fired after a successful :meth:`add_attachment` /
         :meth:`remove_attachment`, carrying the affected note's id. A
@@ -137,6 +148,11 @@ class NoteController(GObject.Object):
 
     __gsignals__ = {
         "attachment-rejected": (
+            GObject.SignalFlags.RUN_LAST,
+            None,
+            (object,),
+        ),
+        "attachment-export-failed": (
             GObject.SignalFlags.RUN_LAST,
             None,
             (object,),
@@ -239,6 +255,32 @@ class NoteController(GObject.Object):
             return None
         self.emit("attachments-changed", note_id)
         return attachment
+
+    def export_attachment(self, attachment_id: str, destination: Path) -> bool:
+        """Write ``attachment_id``'s bytes to ``destination``.
+
+        The click-time half of the ``attachment:`` save link: the view
+        has already resolved the macro's filename to an attachment and
+        obtained a destination from the save dialog, so all that is left
+        is the write — which belongs to the store, not the widget.
+
+        Returns ``True`` on success. A typed
+        :class:`AttachmentExportFailed` (unknown attachment, unwritable
+        destination) emits ``attachment-export-failed`` with its reason
+        and returns ``False`` rather than re-raising — the exact shape of
+        :meth:`add_attachment`'s rejection path. A database error still
+        goes through :func:`capturing_storage_errors` (toast + re-raise).
+        """
+        with capturing_storage_errors(
+            self._emit_storage_error,
+            "export attachment",
+        ):
+            try:
+                self._attachments.export_to(attachment_id, destination)
+            except AttachmentExportFailed as exc:
+                self.emit("attachment-export-failed", exc.reason)
+                return False
+        return True
 
     def remove_attachment(self, attachment_id: str, note_id: str) -> None:
         """Remove an attachment by id.

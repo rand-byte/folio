@@ -18,6 +18,8 @@ import unittest
 
 from asciidoc.ast import (
     Admonition,
+    AttachmentLink,
+    AttachmentTable,
     Blockquote,
     Bold,
     CodeBlock,
@@ -36,7 +38,12 @@ from asciidoc.ast import (
     UnorderedList,
 )
 from asciidoc.parser import parse
-from enums import AdmonitionKind, ParseErrorKind, SystemDocument
+from enums import (
+    AdmonitionKind,
+    AttachmentTableColumn,
+    ParseErrorKind,
+    SystemDocument,
+)
 from models.parse_error import ParseError
 from system_docs import load_text
 
@@ -1975,6 +1982,122 @@ class TagsAttributeDuplicateTests(unittest.TestCase):
         self.assertEqual(
             ctx.exception.kind,
             ParseErrorKind.DUPLICATE_TAG_ATTRIBUTE,
+        )
+
+
+class AttachmentTableMacroTests(unittest.TestCase):
+    """``attachments::[]`` — the generated-table block macro."""
+
+    def test_bare_macro_selects_every_column_in_declaration_order(self) -> None:
+        document = parse("attachments::[]\n")
+        self.assertEqual(
+            document.blocks,
+            (
+                AttachmentTable(
+                    columns=tuple(AttachmentTableColumn),
+                    source_line=1,
+                ),
+            ),
+        )
+
+    def test_cols_attribute_selects_and_orders_columns(self) -> None:
+        document = parse('attachments::[cols="size,name"]\n')
+        block = document.blocks[0]
+        assert isinstance(block, AttachmentTable)
+        self.assertEqual(
+            block.columns,
+            (AttachmentTableColumn.SIZE, AttachmentTableColumn.NAME),
+        )
+
+    def test_unquoted_cols_value_is_accepted(self) -> None:
+        document = parse("attachments::[cols=name]\n")
+        block = document.blocks[0]
+        assert isinstance(block, AttachmentTable)
+        self.assertEqual(block.columns, (AttachmentTableColumn.NAME,))
+
+    def test_macro_inside_a_section_parses(self) -> None:
+        document = parse("== S\n\nattachments::[]\n")
+        section = document.blocks[0]
+        assert isinstance(section, Section)
+        self.assertIsInstance(section.blocks[0], AttachmentTable)
+
+    def test_source_line_is_the_macro_line(self) -> None:
+        document = parse("= T\n\npara\n\nattachments::[]\n")
+        block = document.blocks[-1]
+        assert isinstance(block, AttachmentTable)
+        self.assertEqual(block.source_line, 5)
+
+    def test_missing_brackets_raise(self) -> None:
+        with self.assertRaises(ParseError) as ctx:
+            parse("attachments::\n")
+        self.assertEqual(
+            ctx.exception.kind,
+            ParseErrorKind.BAD_ATTACHMENT_TABLE_MACRO,
+        )
+
+    def test_unknown_attribute_raises(self) -> None:
+        with self.assertRaises(ParseError) as ctx:
+            parse('attachments::[rows="1"]\n')
+        self.assertEqual(
+            ctx.exception.kind,
+            ParseErrorKind.BAD_ATTACHMENT_TABLE_MACRO,
+        )
+
+    def test_empty_cols_value_raises(self) -> None:
+        with self.assertRaises(ParseError) as ctx:
+            parse('attachments::[cols=""]\n')
+        self.assertEqual(
+            ctx.exception.kind,
+            ParseErrorKind.BAD_ATTACHMENT_TABLE_MACRO,
+        )
+
+    def test_duplicate_column_raises(self) -> None:
+        with self.assertRaises(ParseError) as ctx:
+            parse('attachments::[cols="name,name"]\n')
+        self.assertEqual(
+            ctx.exception.kind,
+            ParseErrorKind.BAD_ATTACHMENT_TABLE_MACRO,
+        )
+
+    def test_unknown_column_raises_its_own_kind(self) -> None:
+        with self.assertRaises(ParseError) as ctx:
+            parse('attachments::[cols="created"]\n')
+        self.assertEqual(
+            ctx.exception.kind,
+            ParseErrorKind.UNKNOWN_ATTACHMENT_TABLE_COLUMN,
+        )
+
+    def test_error_carries_the_macro_line(self) -> None:
+        with self.assertRaises(ParseError) as ctx:
+            parse("para\n\nattachments::[cols=]\n")
+        self.assertEqual(ctx.exception.line, 3)
+
+
+class AttachmentLinkInBlocksTests(unittest.TestCase):
+    """The inline macro reaches the AST through the block parser."""
+
+    def test_attachment_link_in_a_paragraph(self) -> None:
+        document = parse("See attachment:a.pdf[the file].\n")
+        paragraph = document.blocks[0]
+        assert isinstance(paragraph, Paragraph)
+        self.assertEqual(
+            [type(n).__name__ for n in paragraph.inlines],
+            ["Text", "AttachmentLink", "Text"],
+        )
+
+    def test_attachment_link_in_a_table_cell(self) -> None:
+        document = parse("|===\n|attachment:a.pdf[x]\n|===\n")
+        table = document.blocks[0]
+        assert isinstance(table, Table)
+        cell = table.rows[0].cells[0]
+        self.assertIsInstance(cell.inlines[0], AttachmentLink)
+
+    def test_malformed_macro_in_a_paragraph_raises(self) -> None:
+        with self.assertRaises(ParseError) as ctx:
+            parse("See attachment:a.pdf for details.\n")
+        self.assertEqual(
+            ctx.exception.kind,
+            ParseErrorKind.BAD_ATTACHMENT_MACRO,
         )
 
 

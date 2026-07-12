@@ -15,6 +15,9 @@ from dataclasses import FrozenInstanceError, fields, is_dataclass
 
 from asciidoc.ast import (
     Admonition,
+    AttachmentLink,
+    AttachmentTable,
+    BlockNode,
     Blockquote,
     Bold,
     CodeBlock,
@@ -36,7 +39,7 @@ from asciidoc.ast import (
     Underline,
     UnorderedList,
 )
-from enums import AdmonitionKind
+from enums import AdmonitionKind, AttachmentTableColumn
 
 
 # ---------------------------------------------------------------------------
@@ -391,6 +394,57 @@ class AstEqualityTests(unittest.TestCase):
         # Same field value, different type: the renderer must be able to
         # tell a reflow joiner from a forced break.
         self.assertNotEqual(HardBreak(source_line=1), SoftBreak(source_line=1))
+
+
+class AttachmentNodeTests(unittest.TestCase):
+    """The two attachment nodes are frozen, structural, and in the unions."""
+
+    def test_attachment_link_is_frozen(self) -> None:
+        node = AttachmentLink(
+            filename="a.pdf",
+            text=(Text(content="a.pdf", source_line=1),),
+            source_line=1,
+        )
+        with self.assertRaises(FrozenInstanceError):
+            node.filename = "b.pdf"  # type: ignore[misc]
+
+    def test_attachment_table_is_frozen(self) -> None:
+        node = AttachmentTable(
+            columns=(AttachmentTableColumn.NAME,),
+            source_line=1,
+        )
+        with self.assertRaises(FrozenInstanceError):
+            node.columns = ()  # type: ignore[misc]
+
+    def test_attachment_nodes_are_dataclasses(self) -> None:
+        self.assertTrue(is_dataclass(AttachmentLink))
+        self.assertTrue(is_dataclass(AttachmentTable))
+
+    def test_attachment_link_equality_is_structural(self) -> None:
+        def build() -> AttachmentLink:
+            return AttachmentLink(
+                filename="a.pdf",
+                text=(Text(content="x", source_line=1),),
+                source_line=1,
+            )
+
+        self.assertEqual(build(), build())
+
+    def test_attachment_link_is_in_the_inline_union(self) -> None:
+        members = {m.__name__ for m in typing.get_args(InlineNode.__value__)}
+        self.assertIn("AttachmentLink", members)
+
+    def test_attachment_table_is_in_the_block_union(self) -> None:
+        members = {m.__name__ for m in typing.get_args(BlockNode.__value__)}
+        self.assertIn("AttachmentTable", members)
+
+    def test_attachment_link_fields(self) -> None:
+        names = [f.name for f in fields(AttachmentLink)]
+        self.assertEqual(names, ["filename", "text", "source_line"])
+
+    def test_attachment_table_fields(self) -> None:
+        names = [f.name for f in fields(AttachmentTable)]
+        self.assertEqual(names, ["columns", "source_line"])
 
 
 if __name__ == "__main__":

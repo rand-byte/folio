@@ -174,6 +174,34 @@ class ImageMacroToken:
 
 
 @dataclass(frozen=True)
+class AttachmentTableMacroToken:
+    """An ``attachments::[ATTRS]`` block macro on a line of its own.
+
+    ``raw`` is the text *after* the ``attachments::`` prefix, exactly as
+    it appeared in the source (modulo trailing whitespace) — normally
+    ``"[]"`` or ``'[cols="name,size"]'``. As with
+    :class:`ImageMacroToken`, the lexer does **not** split or validate
+    it: bracket balance and the ``cols`` attribute are strict-mode
+    contracts the parser owns
+    (:class:`ParseErrorKind.BAD_ATTACHMENT_TABLE_MACRO` /
+    :class:`ParseErrorKind.UNKNOWN_ATTACHMENT_TABLE_COLUMN`), so even a
+    malformed ``attachments::`` line reaches the parser as this token
+    and gets a macro-specific error rather than a generic
+    ``UNKNOWN_BLOCK``.
+
+    The double colon is what makes this a *block* macro (AsciiDoc spells
+    inline macros with one colon and block macros with two), so the
+    single-colon inline ``attachment:FILE[label]`` — handled entirely by
+    the inline parser — can never be confused with it.
+    """
+
+    kind: ClassVar[TokenKind] = TokenKind.ATTACHMENT_TABLE_MACRO
+
+    line: int
+    raw: str
+
+
+@dataclass(frozen=True)
 class TableFenceToken:
     """A table fence: a line that is exactly ``|===``.
 
@@ -392,6 +420,7 @@ type Token = (
     | CodeFenceToken
     | CodeDirectiveToken
     | ImageMacroToken
+    | AttachmentTableMacroToken
     | TableFenceToken
     | ColsDirectiveToken
     | AdmonitionDirectiveToken
@@ -409,7 +438,9 @@ Step 4 produced the original eight token classes; step 14 extended the
 union with :class:`TableFenceToken` and :class:`ColsDirectiveToken`;
 step 15 extends it further with :class:`AdmonitionDirectiveToken`,
 :class:`AdmonitionFenceToken`, :class:`SingleAdmonitionToken`,
-:class:`QuoteDirectiveToken`, and :class:`QuoteFenceToken`.
+:class:`QuoteDirectiveToken`, and :class:`QuoteFenceToken`. The
+attachment-links feature adds :class:`AttachmentTableMacroToken` (the
+``attachments::[…]`` block macro).
 """
 
 
@@ -427,6 +458,7 @@ _LIST_BULLET_RE: re.Pattern[str] = re.compile(r"^(\*+)[ \t]")
 _LIST_NUMBER_RE: re.Pattern[str] = re.compile(r"^(\.+)[ \t]")
 _CODE_FENCE_LITERAL: str = "----"
 _IMAGE_MACRO_PREFIX: str = "image::"
+_ATTACHMENT_TABLE_MACRO_PREFIX: str = "attachments::"
 _TABLE_FENCE_LITERAL: str = "|==="
 _ADMONITION_FENCE_LITERAL: str = "===="
 _QUOTE_FENCE_LITERAL: str = "____"
@@ -608,6 +640,12 @@ def _classify_line(raw_line: str, line_number: int) -> Token:
         return ImageMacroToken(
             line=line_number,
             raw=line[len(_IMAGE_MACRO_PREFIX):],
+        )
+
+    if line.startswith(_ATTACHMENT_TABLE_MACRO_PREFIX):
+        return AttachmentTableMacroToken(
+            line=line_number,
+            raw=line[len(_ATTACHMENT_TABLE_MACRO_PREFIX):],
         )
 
     return LineToken(line=line_number, text=line)

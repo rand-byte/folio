@@ -7,7 +7,9 @@
   document title, sections (== through six equals signs), unordered
   lists (asterisk item), ordered lists (dot item), code blocks
   (four-hyphen fences, with optional [source,lang] directive), image
-  macros (image::file[]), the four inline styles bold (*x*), italic
+  macros (image::file[]), the attachments-table block macro
+  (attachments::[]) and the inline attachment save link
+  (attachment:file[label]), the four inline styles bold (*x*), italic
   (_x_), strikethrough ([.line-through]#x#), and underline
   ([.underline]#x#), inline monospace (`x`), links in three forms:
   bare URL (https://x), URL-with-text (https://x[label]), and the
@@ -130,6 +132,18 @@
     -->
     <context id="image-macro" style-ref="image-macro">
       <match>^image::[^\[\]\s]+\[[^\]]*\]\s*$</match>
+    </context>
+
+    <!--
+      Attachments-table macro: attachments::[] (optionally with a
+      cols="name,size" attribute), alone on its line. A *block* macro —
+      two colons — so it can never collide with the single-colon inline
+      attachment: macro below. Coloured like the image macro: the whole
+      line is structural, and malformed attributes stay the parser's to
+      report.
+    -->
+    <context id="attachment-table-macro" style-ref="image-macro">
+      <match>^attachments::\[[^\]]*\]\s*$</match>
     </context>
 
     <!--
@@ -325,6 +339,24 @@
       </include>
     </context>
 
+    <!--
+      attachment: macro — attachment:FILE[label], the inline save link.
+      The sibling of link:, and coloured the same way (a save link and a
+      web link both mean "clickable"), with the target carrying the
+      link-destination style. The target admits no whitespace, brackets,
+      or path separators — exactly what the parser rejects — so a prose
+      "attachment: see below" is left as plain text by the highlighter
+      even though the parser is stricter about it.
+    -->
+    <context id="attachment-macro" style-ref="link">
+      <start>(?&lt;![A-Za-z0-9])attachment:[^\s\[\]/\\]+\[</start>
+      <end>\]</end>
+      <include>
+        <context sub-pattern="0" where="start" style-ref="link-destination"/>
+        <context sub-pattern="0" where="end" style-ref="link-destination"/>
+      </include>
+    </context>
+
     <!-- Top-level dispatch: order matters for overlapping patterns.
          Block-level constructs are tried first so a line beginning
          with ``*`` is recognised as a list item before the inline
@@ -351,10 +383,12 @@
         <context ref="single-admonition"/>
         <context ref="heading"/>
         <context ref="image-macro"/>
+        <context ref="attachment-table-macro"/>
         <context ref="unordered-list-bullet"/>
         <context ref="ordered-list-bullet"/>
         <context ref="table-cell-separator"/>
         <context ref="link-macro"/>
+        <context ref="attachment-macro"/>
         <context ref="url-with-text"/>
         <context ref="bare-url"/>
         <context ref="inline-monospace"/>

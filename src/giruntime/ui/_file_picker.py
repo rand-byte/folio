@@ -1,11 +1,16 @@
-"""File picker — file-dialog opener for the attachments panel.
+"""File picker — the file-dialog openers the widgets inject.
 
 Principles & invariants
 -----------------------
 * This module exists to keep the widgets that open a file dialog small
-  while preserving their injection-friendly shape. The single public
-  surface is :data:`FileDialogOpener` plus the production
-  :func:`default_file_dialog_opener` that satisfies it.
+  while preserving their injection-friendly shape. There are two public
+  surfaces — one per direction the bytes travel:
+  :data:`FileDialogOpener` + :func:`default_file_dialog_opener` (pick a
+  file to *attach*), and :data:`FileSaveDialogOpener` +
+  :func:`default_file_save_dialog_opener` (pick where to *save* an
+  attachment back out). The two are deliberately symmetric: same
+  callback-style contract, same three "no path" outcomes, same test
+  wiring.
 * The opener's contract is *callback-style*: parameters are
   ``(parent: Gtk.Widget, on_result: Callable[[Path | None], None])``,
   return is ``None``. The result arrives asynchronously via
@@ -55,8 +60,30 @@ it explicitly with a fake path.
 """
 
 
+type FileSaveDialogOpener = Callable[
+    [Gtk.Widget, str, Callable[[Path | None], None]],
+    None,
+]
+"""Open a *save* dialog pre-filled with a name, then call back with the path.
+
+Parameters: the *parent widget* (walked up to the window for modal
+anchoring, exactly as :data:`FileDialogOpener` does), the *suggested
+name* the dialog pre-fills (production passes the attachment's
+filename), and a *result callback* that receives the chosen path — or
+:data:`None` when the user cancelled, the backend errored, or the target
+is a non-local URI.
+
+Production wiring: :func:`default_file_save_dialog_opener`. Test wiring:
+a synchronous fake that records the suggested name and lets the test
+invoke the callback with a temporary path.
+"""
+
+
 _DIALOG_TITLE: Final[str] = "Attach file"
-"""Title shown in the file dialog's window decoration."""
+"""Title shown in the open dialog's window decoration."""
+
+_SAVE_DIALOG_TITLE: Final[str] = "Save attachment"
+"""Title shown in the save dialog's window decoration."""
 
 
 def default_file_dialog_opener(
@@ -113,3 +140,56 @@ def default_file_dialog_opener(
         on_result(Path(path_str))
 
     dialog.open(parent_window, None, _on_open_finished)
+
+
+def default_file_save_dialog_opener(
+    parent: Gtk.Widget,
+    suggested_name: str,
+    on_result: Callable[[Path | None], None],
+) -> None:
+    """Production save-opener — wraps :class:`Gtk.FileDialog`.
+
+    Pre-fills the dialog with ``suggested_name``
+    (:meth:`Gtk.FileDialog.set_initial_name`) and invokes
+    :meth:`Gtk.FileDialog.save`. The async result callback unpacks the
+    chosen :class:`Gio.File` to a :class:`Path` (or :data:`None` on
+    cancellation / backend error / non-local URI) and forwards it to
+    ``on_result`` — the same three "no path" outcomes the open-opener
+    already collapses to :data:`None`, so both call sites treat "no
+    path" identically: do nothing.
+
+    ``Gtk.FileDialog`` is the GTK 4.10+ API; nothing here is deprecated
+    in 4.18.
+    """
+    dialog = Gtk.FileDialog.new()
+    dialog.set_title(_SAVE_DIALOG_TITLE)
+    dialog.set_modal(True)
+    dialog.set_initial_name(suggested_name)
+
+    root = parent.get_root()
+    parent_window = root if isinstance(root, Gtk.Window) else None
+
+    def _on_save_finished(
+        source: GObject.Object,
+        result: Gio.AsyncResult,
+    ) -> None:
+        # ``source`` is the dialog itself; the parameter exists because
+        # that is the static shape of the GIO async callback.
+        del source
+        try:
+            chosen = dialog.save_finish(result)
+        except GLib.Error:
+            on_result(None)
+            return
+        if chosen is None:
+            on_result(None)
+            return
+        path_str = chosen.get_path()
+        if path_str is None:
+            # A non-local URI (gvfs / portal mounts) — out of scope, as
+            # on the inbound path.
+            on_result(None)
+            return
+        on_result(Path(path_str))
+
+    dialog.save(parent_window, None, _on_save_finished)

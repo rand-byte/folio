@@ -30,8 +30,10 @@ Principles & invariants
   treatment has to be decided explicitly.
 * Prose vs structure (snippet rule): paragraphs, list items, and the
   bodies of admonitions and blockquotes are *prose* and contribute their
-  flattened text; section headings, code blocks, images, and tables are
-  *structure* and contribute nothing (a section's nested blocks are
+  flattened text; section headings, code blocks, images, tables, and the
+  generated attachments table are *structure* and contribute nothing (the
+  attachments table's rows do not exist until render time, and a snippet
+  must never leak the macro's source syntax) (a section's nested blocks are
   still descended into to reach prose under deeper headings).
 * This module is pure: it imports only the parser, the lexer (for the
   fallback tag walk), the AST, the :class:`NoteSummary` value type, the
@@ -46,6 +48,8 @@ from typing import assert_never
 
 from asciidoc.ast import (
     Admonition,
+    AttachmentLink,
+    AttachmentTable,
     BlockNode,
     Blockquote,
     Bold,
@@ -144,7 +148,7 @@ def _flatten(inlines: Iterable[InlineNode]) -> str:
                 parts.append(_flatten(children))
             case Monospace(content=content):
                 parts.append(content)
-            case Link(text=text):
+            case Link(text=text) | AttachmentLink(text=text):
                 parts.append(_flatten(text))
             case _:
                 assert_never(node)
@@ -204,7 +208,7 @@ def _prose_pieces(block: BlockNode) -> list[str]:
             for nested_block in blocks:
                 nested.extend(_prose_pieces(nested_block))
             return nested
-        case CodeBlock() | Image() | Table():
+        case CodeBlock() | Image() | Table() | AttachmentTable():
             return []
         case _:
             assert_never(block)

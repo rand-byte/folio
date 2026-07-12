@@ -5,6 +5,7 @@ from __future__ import annotations
 import gc
 import struct
 import unittest
+from tempfile import TemporaryDirectory
 import zlib
 from collections.abc import Callable
 from datetime import UTC, datetime, timedelta
@@ -20,7 +21,12 @@ from config.defaults import (
     ARTICLE_TOP_MARGIN_LINES,
     TARGET_CHARS_PER_LINE,
 )
-from enums import AdmonitionKind, ParseErrorKind
+from enums import (
+    AdmonitionKind,
+    AttachmentExportFailureReason,
+    ParseErrorKind,
+)
+from storage.protocols import AttachmentExportFailed
 from models.attachment import Attachment
 from models.note import Note
 from giruntime.controllers.app_state import AppState
@@ -312,6 +318,21 @@ class _FakeAttachmentStore:
 
     def count_for_note(self, note_id: str) -> int:
         return len(self.metadata_by_note.get(note_id, ()))
+
+    def export_to(self, attachment_id: str, destination: Path) -> None:
+        """Write the attachment's bytes out (the outbound mirror of add)."""
+        try:
+            data = self.get_bytes(attachment_id)
+        except KeyError as exc:
+            raise AttachmentExportFailed(
+                AttachmentExportFailureReason.UNKNOWN_ATTACHMENT,
+            ) from exc
+        try:
+            destination.write_bytes(data)
+        except OSError as exc:
+            raise AttachmentExportFailed(
+                AttachmentExportFailureReason.DESTINATION_UNWRITABLE,
+            ) from exc
 
 
 # ---------------------------------------------------------------------------
@@ -2646,6 +2667,228 @@ class RgbaFromTintTests(unittest.TestCase):
         a = _rgba_from_tint((0.5, 0.5, 0.5, 0.5))
         b = _rgba_from_tint((0.5, 0.5, 0.5, 0.5))
         self.assertIsNot(a, b)
+
+
+class _RecordingSaveDialog:
+    """A synchronous stand-in for the production save-dialog opener.
+
+    Records the suggested name it was offered and hands back a path the
+    test dictates — ``None`` models a cancelled dialog.
+    """
+
+    suggested_names: list[str]
+    result: Path | None
+
+    def __init__(self, result: Path | None) -> None:
+        self.suggested_names = []
+        self.result = result
+
+    def __call__(
+        self,
+        _parent: Gtk.Widget,
+        suggested_name: str,
+        on_result: Callable[[Path | None], None],
+    ) -> None:
+        self.suggested_names.append(suggested_name)
+        on_result(self.result)
+
+
+class _RecordingExportController:
+    """Captures :meth:`NoteController.export_attachment` calls."""
+
+    exports: list[tuple[str, Path]]
+
+    def __init__(self) -> None:
+        self.exports = []
+
+    def export_attachment(self, attachment_id: str, destination: Path) -> bool:
+        self.exports.append((attachment_id, destination))
+        return True
+
+
+@unittest.skipUnless(_display_available(), "no GDK display")
+class NoteViewAttachmentActivationTests(unittest.TestCase):
+    """Clicking a save link: resolve → dialog → controller export."""
+
+    def setUp(self) -> None:
+        # pylint: disable-next=consider-using-with
+        self._dir = TemporaryDirectory()
+        self.root = Path(self._dir.name)
+
+    def tearDown(self) -> None:
+        self._dir.cleanup()
+
+    def _build_view(
+        self,
+        *,
+        attachments: _FakeAttachmentStore | None,
+        dialog: _RecordingSaveDialog,
+        controller: _RecordingExportController | None,
+    ) -> tuple[NoteView, AppState]:
+        repo = _FakeNoteRepository()
+        repo.notes["note-A"] = _make_note("note-A")
+        state = AppState()
+        view = NoteView(
+            note_store=_build_tracking_store(repo),
+            app_state=state,
+            attachments=attachments,
+            note_controller=controller,  # type: ignore[arg-type]
+            save_dialog_opener=dialog,
+        )
+        return view, state
+
+    def test_known_filename_opens_the_dialog_with_that_name(self) -> None:
+        store = _FakeAttachmentStore()
+        store.seed("note-A", "photo.png", _PNG_FIXTURE)
+        dialog = _RecordingSaveDialog(result=self.root / "out.png")
+        controller = _RecordingExportController()
+        view, state = self._build_view(
+            attachments=store,
+            dialog=dialog,
+            controller=controller,
+        )
+        state.set_selected_note_id("note-A")
+
+        view._activate_attachment("photo.png")
+        self.assertEqual(dialog.suggested_names, ["photo.png"])
+
+    def test_chosen_path_is_exported_through_the_controller(self) -> None:
+        store = _FakeAttachmentStore()
+        attachment = store.seed("note-A", "photo.png", _PNG_FIXTURE)
+        destination = self.root / "out.png"
+        dialog = _RecordingSaveDialog(result=destination)
+        controller = _RecordingExportController()
+        view, state = self._build_view(
+            attachments=store,
+            dialog=dialog,
+            controller=controller,
+        )
+        state.set_selected_note_id("note-A")
+
+        view._activate_attachment("photo.png")
+        self.assertEqual(controller.exports, [(attachment.id, destination)])
+
+    def test_cancelled_dialog_exports_nothing(self) -> None:
+        store = _FakeAttachmentStore()
+        store.seed("note-A", "photo.png", _PNG_FIXTURE)
+        dialog = _RecordingSaveDialog(result=None)
+        controller = _RecordingExportController()
+        view, state = self._build_view(
+            attachments=store,
+            dialog=dialog,
+            controller=controller,
+        )
+        state.set_selected_note_id("note-A")
+
+        view._activate_attachment("photo.png")
+        self.assertEqual(controller.exports, [])
+
+    def test_unknown_filename_opens_no_dialog(self) -> None:
+        store = _FakeAttachmentStore()
+        store.seed("note-A", "real.png", _PNG_FIXTURE)
+        dialog = _RecordingSaveDialog(result=self.root / "out.png")
+        controller = _RecordingExportController()
+        view, state = self._build_view(
+            attachments=store,
+            dialog=dialog,
+            controller=controller,
+        )
+        state.set_selected_note_id("note-A")
+
+        view._activate_attachment("missing.png")
+        self.assertEqual(dialog.suggested_names, [])
+        self.assertEqual(controller.exports, [])
+
+    def test_no_store_opens_no_dialog(self) -> None:
+        dialog = _RecordingSaveDialog(result=self.root / "out.png")
+        view, state = self._build_view(
+            attachments=None,
+            dialog=dialog,
+            controller=_RecordingExportController(),
+        )
+        state.set_selected_note_id("note-A")
+
+        view._activate_attachment("photo.png")
+        self.assertEqual(dialog.suggested_names, [])
+
+
+@unittest.skipUnless(_display_available(), "no GDK display")
+class NoteViewAttachmentListResolverTests(unittest.TestCase):
+    """The metadata-only resolver the ``attachments::[]`` macro expands with."""
+
+    def _build_view(
+        self,
+        *,
+        attachments: _FakeAttachmentStore | None,
+    ) -> tuple[NoteView, AppState]:
+        repo = _FakeNoteRepository()
+        repo.notes["note-A"] = _make_note(
+            "note-A",
+            source="= A\n\nattachments::[]\n",
+        )
+        repo.notes["note-B"] = _make_note("note-B")
+        state = AppState()
+        view = NoteView(
+            note_store=_build_tracking_store(repo),
+            app_state=state,
+            attachments=attachments,
+        )
+        return view, state
+
+    def test_no_store_resolves_to_an_empty_tuple(self) -> None:
+        view, state = self._build_view(attachments=None)
+        state.set_selected_note_id("note-A")
+        self.assertEqual(view._list_attachments(), ())
+
+    def test_no_selection_resolves_to_an_empty_tuple(self) -> None:
+        store = _FakeAttachmentStore()
+        view, _ = self._build_view(attachments=store)
+        self.assertEqual(view._list_attachments(), ())
+        self.assertEqual(store.list_calls, [])
+
+    def test_resolver_is_scoped_to_the_current_note(self) -> None:
+        store = _FakeAttachmentStore()
+        mine = store.seed("note-A", "a.pdf", b"x")
+        store.seed("note-B", "b.pdf", b"y")
+        view, state = self._build_view(attachments=store)
+        state.set_selected_note_id("note-A")
+        self.assertEqual(view._list_attachments(), (mine,))
+
+    def test_no_blob_is_read_to_draw_the_table(self) -> None:
+        # The metadata/bytes split: rendering the table must not touch
+        # a single BLOB.
+        store = _FakeAttachmentStore()
+        store.seed("note-A", "a.pdf", b"x")
+        view, state = self._build_view(attachments=store)
+        state.set_selected_note_id("note-A")
+        buffer = _find_text_view_buffer(view)
+        text = buffer.get_text(
+            buffer.get_start_iter(),
+            buffer.get_end_iter(),
+            False,
+        )
+        self.assertIn("a.pdf", text)
+        self.assertEqual(store.get_bytes_calls, [])
+
+
+@unittest.skipUnless(_display_available(), "no GDK display")
+class NoteViewAttachmentNamedTests(unittest.TestCase):
+    """The image macro and the save link share one lookup."""
+
+    def test_lookup_finds_the_attachment_of_the_current_note(self) -> None:
+        store = _FakeAttachmentStore()
+        attachment = store.seed("note-A", "photo.png", _PNG_FIXTURE)
+        repo = _FakeNoteRepository()
+        repo.notes["note-A"] = _make_note("note-A")
+        state = AppState()
+        view = NoteView(
+            note_store=_build_tracking_store(repo),
+            app_state=state,
+            attachments=store,
+        )
+        state.set_selected_note_id("note-A")
+        self.assertEqual(view._attachment_named("photo.png"), attachment)
+        self.assertIsNone(view._attachment_named("missing.png"))
 
 
 if __name__ == "__main__":

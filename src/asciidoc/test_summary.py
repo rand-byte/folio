@@ -255,5 +255,27 @@ class DeriveSummaryTagsFallbackTests(unittest.TestCase):
         self.assertEqual(derive_summary(source).tags, ())
 
 
+class AttachmentMacroSnippetTests(unittest.TestCase):
+    """Snippets show an attachment link's label, never macro syntax."""
+
+    def test_attachment_link_contributes_its_label(self) -> None:
+        summary = derive_summary("= T\n\nSee attachment:a.pdf[the file].\n")
+        self.assertEqual(summary.snippet, "See the file.")
+
+    def test_bare_attachment_link_contributes_the_filename(self) -> None:
+        summary = derive_summary("= T\n\nSee attachment:a.pdf[].\n")
+        self.assertEqual(summary.snippet, "See a.pdf.")
+
+    def test_attachments_table_contributes_no_prose(self) -> None:
+        # The table's rows do not exist until render time, and the
+        # snippet must never leak the macro's source syntax.
+        summary = derive_summary("= T\n\nattachments::[]\n\nProse.\n")
+        self.assertEqual(summary.snippet, "Prose.")
+
+    def test_note_that_is_only_the_macro_has_an_empty_snippet(self) -> None:
+        summary = derive_summary("= T\n\nattachments::[]\n")
+        self.assertEqual(summary.snippet, "")
+
+
 if __name__ == "__main__":
     unittest.main()

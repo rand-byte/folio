@@ -24,6 +24,16 @@ Principles & invariants
   :class:`AttachmentRejected` carrying the corresponding reason; the
   caller (controller) catches the exception and surfaces the right
   toast.
+* :meth:`export_to` is the outbound mirror of :meth:`add_for_note`:
+  writing an attachment's bytes to a user-chosen path is file I/O, and
+  file I/O belongs in the store, not in a widget. It reads through
+  :meth:`get_bytes` (so the ``data`` column is selected in exactly one
+  place) and returns *nothing*, keeping the "only ``get_bytes``
+  materialises bytes to a caller" invariant intact. Its two failures —
+  an unknown id and an unwritable destination (:class:`OSError`, caught
+  by name) — raise :class:`AttachmentExportFailed` carrying the matching
+  :class:`AttachmentExportFailureReason`, exactly as the inbound path
+  raises :class:`AttachmentRejected`.
 * :meth:`list_for_note` and :meth:`get_bytes` honour the metadata /
   bytes split that is the central reason BLOBs live in SQLite at all
   rather than on disk: the listing query has an explicit column list
@@ -54,10 +64,10 @@ from pathlib import Path
 from typing import Final
 
 from config.defaults import MAX_ATTACHMENT_BYTES
-from enums import AttachmentRejectionReason
+from enums import AttachmentExportFailureReason, AttachmentRejectionReason
 from models.attachment import Attachment
 from storage.database import Database
-from storage.protocols import AttachmentRejected
+from storage.protocols import AttachmentExportFailed, AttachmentRejected
 
 
 type IdFactory = Callable[[], str]
@@ -228,6 +238,41 @@ class AttachmentStore:
         if row is None:
             raise KeyError(attachment_id)
         return bytes(row["data"])
+
+    def export_to(self, attachment_id: str, destination: Path) -> None:
+        """Write ``attachment_id``'s bytes to ``destination``.
+
+        The outbound mirror of :meth:`add_for_note`, and the reason
+        export lives in the store rather than in a widget: the file I/O
+        and its typed failures belong with the bytes.
+
+        Reuses :meth:`get_bytes` for the read (so the ``data`` column is
+        still selected in exactly one place) and translates its
+        :class:`KeyError` into
+        :data:`AttachmentExportFailureReason.UNKNOWN_ATTACHMENT`. An
+        :class:`OSError` from the write — caught **by name**, never a
+        blanket ``except`` — becomes
+        :data:`AttachmentExportFailureReason.DESTINATION_UNWRITABLE`.
+        An existing file at ``destination`` is overwritten: the save
+        dialog has already obtained the user's consent to that path.
+
+        Returns nothing, so the protocol's "only ``get_bytes``
+        materialises bytes to a caller" invariant survives.
+        """
+        try:
+            data = self.get_bytes(attachment_id)
+        except KeyError as exc:
+            raise AttachmentExportFailed(
+                AttachmentExportFailureReason.UNKNOWN_ATTACHMENT,
+                f"no attachment with id {attachment_id!r}",
+            ) from exc
+        try:
+            destination.write_bytes(data)
+        except OSError as exc:
+            raise AttachmentExportFailed(
+                AttachmentExportFailureReason.DESTINATION_UNWRITABLE,
+                f"could not write {destination}: {exc}",
+            ) from exc
 
     def count_for_note(self, note_id: str) -> int:
         """Return the number of attachments belonging to ``note_id``.

@@ -42,7 +42,20 @@ Principles & invariants
     closing ``++`` the URL is validated against :class:`LinkScheme`
     exactly as in the unwrapped form. An unmatched closing ``++``
     raises :class:`ParseErrorKind.UNTERMINATED_PASSTHROUGH`.
+  - The ``attachment:`` macro ``attachment:FILE[label]`` — a *save*
+    link naming an attachment of the current note by filename. Same
+    word-boundary and commit-once-matched rules as ``link:``; every
+    malformed remainder (no ``[``, no closing ``]``, a nested ``[``,
+    an empty target, or a target carrying whitespace or a path
+    separator) raises
+    :class:`ParseErrorKind.BAD_ATTACHMENT_MACRO`. The label is
+    optional — ``attachment:f[]`` displays the filename — and, like a
+    link's, may carry other inline formatting.
 
+* **Activatable things do not nest.** The ``forbid_link`` flag that
+  enforced "links cannot contain links" now covers the attachment
+  macro too, in both directions: neither a link nor an attachment
+  macro may appear inside the display text of either.
 * Marker matching is **non-greedy** and **recursive** for the spans
   whose body is re-parsed (``*``, ``_``, ``[.line-through]#…#``,
   ``[.underline]#…#``, link display text). Same-marker self-nesting
@@ -68,6 +81,7 @@ from collections.abc import Callable
 from dataclasses import dataclass
 
 from asciidoc.ast import (
+    AttachmentLink,
     Bold,
     InlineNode,
     Italic,
@@ -92,6 +106,21 @@ _UNDERLINE_OPEN: str = "[.underline]#"
 _HASH_CLOSE: str = "#"
 _MONOSPACE_MARKER: str = "`"
 _LINK_MACRO_PREFIX: str = "link:"
+
+# The inline attachment macro: ``attachment:FILE[label]``. A *single*
+# colon — the double-colon ``attachments::[]`` block macro is a whole
+# line and never reaches the inline parser (the lexer claims it), so
+# the two cannot be confused. Recognised at a word boundary like
+# ``link:``, and committed once the prefix matches: a malformed
+# remainder raises rather than degrading to prose.
+_ATTACHMENT_MACRO_PREFIX: str = "attachment:"
+
+# Characters an attachment target may never contain. The target names
+# an ``Attachment.filename`` of the current note — not a path — so a
+# separator is rejected at parse time (defence in depth: the save
+# dialog is pre-filled with ``Path(...).name`` as well). Whitespace is
+# rejected because a target is a single filename token.
+_ATTACHMENT_TARGET_SEPARATORS: tuple[str, ...] = ("/", "\\")
 _DISPLAY_TEXT_OPEN: str = "["
 _DISPLAY_TEXT_CLOSE: str = "]"
 
@@ -229,11 +258,13 @@ class _Scanner:
     (which is a parse error if a terminator was set).
 
     The ``forbid_link`` argument to :meth:`_parse_until` is what
-    enforces "links cannot contain links" — when set, a bare URL or
-    ``link:`` macro found inside the body raises
-    :class:`ParseErrorKind.BAD_LINK_MACRO`. Other inline formatting
-    is still accepted, so a link's display text may still contain
-    bold, italic, monospace, etc.
+    enforces "activatable things cannot nest" — when set, a bare URL
+    or ``link:`` macro found inside the body raises
+    :class:`ParseErrorKind.BAD_LINK_MACRO`, and an ``attachment:``
+    macro raises :class:`ParseErrorKind.BAD_ATTACHMENT_MACRO`. Other
+    inline formatting is still accepted, so the display text of a link
+    (or of an attachment macro, which sets the same flag) may still
+    contain bold, italic, monospace, etc.
     """
 
     text: str
@@ -326,6 +357,19 @@ class _Scanner:
             if macro_link is not None:
                 flush()
                 nodes.append(macro_link)
+                continue
+
+            # ``attachment:FILE[label]`` — the save-link sibling of
+            # ``link:``. Consumed before the recursive-span dispatch so
+            # its bracketed label is never mistaken for a span opener,
+            # and gated by the same ``forbid_link`` flag: activatable
+            # things do not nest.
+            attachment_link = self._try_consume_attachment_macro(
+                forbid_link=forbid_link,
+            )
+            if attachment_link is not None:
+                flush()
+                nodes.append(attachment_link)
                 continue
 
             opener = self._find_opener_at_pos()
@@ -691,6 +735,148 @@ class _Scanner:
         # Advance past the matched scheme + ':'.
         self.pos = match.end()
         return scheme
+
+    # ------------------------------------------------------------------
+    # attachment: macro  (attachment:FILE[label])
+    # ------------------------------------------------------------------
+
+    def _try_consume_attachment_macro(
+        self,
+        *,
+        forbid_link: bool,
+    ) -> AttachmentLink | None:
+        """Try to consume an ``attachment:FILE[label]`` macro at the cursor.
+
+        Returns :data:`None` when the cursor is not at a word boundary
+        followed by the literal ``attachment:`` — the same boundary rule
+        the ``link:`` macro uses, so a mid-word ``myattachment:x[y]``
+        stays prose.
+
+        Once the prefix matches, parsing is **committed**: every
+        malformed remainder raises
+        :class:`ParseErrorKind.BAD_ATTACHMENT_MACRO` rather than
+        degrading to text, exactly as ``link:`` does. ``forbid_link``
+        (set while parsing the display text of a link *or* an attachment
+        macro) turns the match itself into that error: activatable
+        things do not nest.
+        """
+        if not self._at_word_boundary():
+            return None
+        if not self._matches_at_pos(_ATTACHMENT_MACRO_PREFIX):
+            return None
+        if forbid_link:
+            raise ParseError(
+                line=self.line,
+                column=0,
+                message=(
+                    "nested attachment link is not allowed inside a "
+                    "link's display text"
+                ),
+                kind=ParseErrorKind.BAD_ATTACHMENT_MACRO,
+            )
+        return self._consume_attachment_macro()
+
+    def _consume_attachment_macro(self) -> AttachmentLink:
+        """Consume a committed ``attachment:FILE[label]`` macro.
+
+        On entry ``self.pos`` points at the ``a`` of ``attachment:``; on
+        return it points one past the closing ``]``.
+
+        The target (the text between the colon and the ``[``) is
+        validated here — non-empty, no whitespace, no path separator —
+        because it names an :class:`Attachment` of the current note by
+        filename. Whether such an attachment *exists* is not knowable to
+        the parser (which is storage-free), so an unknown filename is a
+        parse success and is reported at click time instead.
+
+        The label is parsed recursively with ``forbid_link`` set, so it
+        may carry bold / italic / monospace but no nested link or
+        attachment macro. An empty label (``attachment:f[]``) falls back
+        to the filename as the display text, mirroring the bare-URL rule
+        that keeps every activatable node's ``text`` tuple non-empty.
+        """
+        self.pos += len(_ATTACHMENT_MACRO_PREFIX)
+        open_index = self.text.find(_DISPLAY_TEXT_OPEN, self.pos)
+        if open_index < 0:
+            raise ParseError(
+                line=self.line,
+                column=0,
+                message=(
+                    "attachment: macro is missing the '[label]' part"
+                ),
+                kind=ParseErrorKind.BAD_ATTACHMENT_MACRO,
+            )
+        target = self.text[self.pos:open_index]
+        self._validate_attachment_target(target)
+        close_index = self.text.find(_DISPLAY_TEXT_CLOSE, open_index + 1)
+        if close_index < 0:
+            raise ParseError(
+                line=self.line,
+                column=0,
+                message="attachment: macro is missing the closing ']'",
+                kind=ParseErrorKind.BAD_ATTACHMENT_MACRO,
+            )
+        if _DISPLAY_TEXT_OPEN in self.text[open_index + 1:close_index]:
+            raise ParseError(
+                line=self.line,
+                column=0,
+                message=(
+                    "attachment: macro label contains a nested '[' bracket"
+                ),
+                kind=ParseErrorKind.BAD_ATTACHMENT_MACRO,
+            )
+        # Move onto the opening bracket and parse the label body.
+        self.pos = open_index + len(_DISPLAY_TEXT_OPEN)
+        label = tuple(
+            self._parse_until(
+                close_marker=_DISPLAY_TEXT_CLOSE,
+                forbid_link=True,
+                unmatched_kind=ParseErrorKind.BAD_ATTACHMENT_MACRO,
+                unmatched_message=(
+                    "attachment: macro is missing the closing ']'"
+                ),
+            )
+        )
+        if not label:
+            label = (Text(content=target, source_line=self.line),)
+        return AttachmentLink(
+            filename=target,
+            text=label,
+            source_line=self.line,
+        )
+
+    def _validate_attachment_target(self, target: str) -> None:
+        """Reject an empty / whitespace / path-bearing attachment target.
+
+        Raises :class:`ParseErrorKind.BAD_ATTACHMENT_MACRO` — the target
+        is a bare ``Attachment.filename``, never a path.
+        """
+        if not target:
+            raise ParseError(
+                line=self.line,
+                column=0,
+                message="attachment: macro has no filename",
+                kind=ParseErrorKind.BAD_ATTACHMENT_MACRO,
+            )
+        if any(char.isspace() for char in target):
+            raise ParseError(
+                line=self.line,
+                column=0,
+                message=(
+                    "attachment: macro filename may not contain whitespace"
+                ),
+                kind=ParseErrorKind.BAD_ATTACHMENT_MACRO,
+            )
+        if any(sep in target for sep in _ATTACHMENT_TARGET_SEPARATORS):
+            raise ParseError(
+                line=self.line,
+                column=0,
+                message=(
+                    "attachment: macro filename may not contain a path "
+                    "separator"
+                ),
+                kind=ParseErrorKind.BAD_ATTACHMENT_MACRO,
+            )
 
     # ------------------------------------------------------------------
     # Shared display-text helper
