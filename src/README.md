@@ -17,10 +17,14 @@ not *how it works internally*.
 | Goal | Command |
 | --- | --- |
 | Launch app | `./run` (dev — builds the grammar resource, then runs `python3 -B src/__main__.py`) or `python folio.pyz` (distributed zipapp) |
-| Run all tests | `make test` (preferred — builds the grammar resource and provides a headless display) or `python3 -B -m unittest discover -s src -t src -v` when a display is already available |
+| Run all tests | `make test` (preferred — builds the grammar resource and provides a headless display; runs the `src` suite **and** the `build-aux` build-tooling tests) or `python3 -B -m unittest discover -s src -t src -v` when a display is already available |
 | Type-check | `mypy src` — requires **`mypy >= 1.16`** (earlier releases mis-widen `StrEnum` members to `str`, [python/mypy#18587](https://github.com/python/mypy/pull/18587)); pinned in `pyproject.toml`'s dev group |
 | Lint (non-test) | `PYTHONPATH=src pylint --disable=missing-module-docstring,missing-function-docstring,missing-class-docstring --enable=useless-suppression --min-public-methods=1 src` |
 | Lint (test files) | additionally disable `too-many-public-methods,protected-access,duplicate-code,too-many-lines` |
+| Validate everything | `make validate` (= `type` + `lint` + `test`) |
+| Check the version sites agree | `make version-check` (`build-aux/check_version.py`, see §7) |
+| Build the `.deb` | `make deb` → `build/deb/folio_<version>_all.deb`; `make deb-lint` also runs `lintian`; `make deb-clean` removes the tree (§7) |
+| Build everything | `make all` (= `validate` + `pyz` + `deb`) |
 
 **System packages:** `gir1.2-gtk-4.0`, `gir1.2-gtksource-5` (GtkSourceView **≥ 5.4**, see §7) plus equivalents elsewhere, and `glib-compile-resources` (ships with the GLib dev tooling) to build the editor grammar bundle. Python **≥ 3.13**. The only Python runtime dependency is `PyGObject>=3.50`; SQLite is in the standard library.
 
@@ -287,6 +291,7 @@ The GTK rendering of a parsed document. These are the only consumers that need
 ## 5. Testing
 
 - Tests use the standard-library `unittest`; there is no extra runner. A module `M.py` is tested in the sibling `test_M.py` (no global `tests/` directory).
+- **`make test` runs two discovery passes.** The first is over `build-aux/` — the build tooling (`check_version.py`) is GTK-free and display-free, and `discover -s src` cannot see it; the second is the application suite over `src/`, under the compositor described below. Both must be green.
 - **Storage** tests run against a real `Database.in_memory()` with the schema applied. **Controllers** are tested against in-memory **fakes** of the storage protocols plus a fake clock and counter id-gen. **UI** tests instantiate widgets directly and drive them with fakes; asynchronous GTK dialogs are wrapped behind callable type aliases so tests pass a synchronous fake.
 - **UI tests need a real GDK display.** Each is decorated `@unittest.skipUnless(_display_available(), ...)`. With no display they *skip*, so a green run without one proves nothing about the widgets.
 - **`make test` wires the display**: it launches `weston --backend headless` in the **background** (chaining with `&&` would block forever), waits for its socket, then runs the suite with `WAYLAND_DISPLAY` and `GSK_RENDERER=cairo` exported, and kills Weston on exit. Running the suite directly against your own display must export the same two variables.
@@ -401,11 +406,53 @@ icon resolve through the same name. The **GResource prefixes are a separate
 namespace** and deliberately still read `/org/folio/…` (`enums.GResourceSubtree`
 + the manifest): they are internal mount points, not the app id.
 
-**Build/verify the package** (Debian 13 *trixie* or newer — `requires-python >=
-3.13`):
+**Host requirements** (documented, never installed by the `Makefile`):
+`dpkg-dev`, `debhelper (>= 13)`, `dh-python`, `meson`, `ninja-build`,
+`libglib2.0-dev-bin`, `git`; plus `lintian` for `make deb-lint`. `debian/control`
+build-depends on `python3 (>= 3.13)`, so the build-dependency check **fails on
+Ubuntu 24.04** (python3.12) — the package targets **Debian 13 *trixie* or
+newer**. `DEB_BUILD_FLAGS` is the escape hatch:
+`make deb DEB_BUILD_FLAGS="-us -uc -b -d"`.
+
+#### Build the package (`make deb` — the primary path)
 
 ```sh
-# 3.0 (quilt) needs an orig tarball named for the *Debian upstream* version:
+make deb        # -> build/deb/folio_0.9.2~rc1-1_all.deb
+make deb-lint   # + lintian
+make deb-clean  # remove build/deb
+```
+
+Two invariants make this route what it is:
+
+- **Every artifact lives in `build/deb/`.** The tree is exported there with
+  `git archive` and `dpkg-buildpackage` runs *inside* that export, so the
+  working tree never collects debhelper's staging litter (`debian/files`,
+  `debian/folio/`, `debian/*.substvars`) and nothing lands in `..`. `build/` is
+  already gitignored; `make deb-clean` (and `make clean`) removes it.
+- **The package is `HEAD`, not the working tree.** `make deb` **fails** on a
+  dirty tree (`git diff --quiet HEAD`) rather than warning, so "the `.deb` is
+  exactly HEAD" is a hard rule. It is also what guarantees the package holds
+  committed content only — the gitignored in-tree `folio.gresource` can never
+  leak into it, and Meson's own compiled bundle is the one installed.
+
+`make deb` deliberately depends on **neither** `type`/`lint`/`test` **nor**
+`resource`: packaging and validation are orthogonal (`make all` composes them),
+forcing the GTK suite into a package build would drag `weston` into the
+build-host requirements for no packaging benefit (which is why `debian/rules`
+already disables `dh_auto_test`), and the dev GResource in the source tree has
+no relationship to the one Meson compiles. It *does* depend on `version-check`.
+
+Binary-only (`-us -uc -b`): `dpkg-source` never runs, so **`make deb` produces
+no source package and no orig tarball**.
+
+#### Manual orchestration (the documented fallback)
+
+Use the recipe below when you need what `make deb` knowingly does not do:
+build a **source** package or an orig tarball (`3.0 (quilt)` needs one named for
+the *Debian upstream* version), iterate on packaging from a dirty tree, or pass
+`-d` on a host that cannot satisfy the build-deps.
+
+```sh
 git archive --prefix=folio-0.9.2~rc1/ -o ../folio_0.9.2~rc1.orig.tar.gz HEAD
 dpkg-buildpackage -us -uc -b
 lintian -i -I ../folio_*_all.deb
@@ -417,9 +464,19 @@ dialects diverge, so the mapping matters:
 
 | Where | 0.9.2 release candidate | Final 0.9.2 |
 | --- | --- | --- |
-| `pyproject.toml`, `meson.build`, AppStream `<release>` | `0.9.2rc1` (PEP 440) | `0.9.2` |
+| `pyproject.toml` (**source of truth**) | `0.9.2rc1` (PEP 440) | `0.9.2` |
+| `meson.build` (`version:`) | `0.9.2rc1` (PEP 440) | `0.9.2` |
+| `data/io.github.rand_byte.Folio.metainfo.xml` (`<release version=…>`) | `0.9.2rc1` (PEP 440) | `0.9.2` |
 | git tag | `v0.9.2-rc1` | `v0.9.2` |
 | `debian/changelog`, orig tarball | `0.9.2~rc1-1` | `0.9.2-1` |
+
+**`build-aux/check_version.py` enforces this table** (`make version-check`, and a
+prerequisite of `make deb`): it reads all four files, treats `pyproject.toml` as
+the source of truth, and exits non-zero with one line per disagreement. It
+*reads and reports, never rewrites* — which file is wrong is a human decision.
+It parses `debian/changelog`'s first line itself rather than shelling out to
+`dpkg-parsechangelog`, so it runs on a host with no Debian tooling; the Debian
+*revision* (`-1`) is packaging-only and is stripped before comparison.
 
 The **tilde is not cosmetic**: `~` is the only character that sorts *before* the
 empty string in dpkg's comparison, so `0.9.2~rc1` < `0.9.2`, which is what makes
@@ -429,5 +486,9 @@ same release `type="development"`. The trailing `-1` is the *Debian revision*
 (packaging-only changes bump it: `-2`, `-3`, …), independent of upstream.
 
 Files: `meson.build`, `folio.in` (launcher template),
-`build-aux/install_python_tree.py`, `data/`, `debian/`. None of them live inside
-`src/` — `src/` is installed wholesale.
+`build-aux/install_python_tree.py`, `build-aux/check_version.py` (+ its
+`test_check_version.py`), `data/`, `debian/`, and the `deb*` / `version-check`
+targets in the `Makefile`. None of them live inside `src/` — `src/` is installed
+wholesale. `build-aux/` is build tooling: never shipped, but type-checked,
+linted and tested like everything else (the `Makefile` globs it, so a new script
+is covered by construction).

@@ -183,6 +183,18 @@ make pyz
 A from-source `make pyz` build does not need the `chmod` — the executable bit
 is already set locally.
 
+On Debian 13 (*trixie*) or newer you can build a proper Debian package instead:
+
+```sh
+make deb        # -> build/deb/folio_<version>_all.deb
+sudo apt install ./build/deb/folio_*_all.deb
+```
+
+The `.deb` is built from the last commit (`HEAD`), so `make deb` stops if the
+working tree has uncommitted changes. See
+[`src/README.md`](src/README.md) §7 for the details and the build-host
+requirements.
+
 If you would rather run straight from the source tree (handy while trying it
 out), the bundled `run` script builds what it needs and launches the app:
 

@@ -1,7 +1,21 @@
-.PHONY: all validate test type lint clean resource pyz
+.PHONY: all validate test type lint clean resource pyz \
+        deb deb-lint deb-clean deb-tools version-check
 
-PY_SRC := build_pyz.py build-aux/install_python_tree.py $(shell find src -type f -name "*.py" ! -name "test_*")
-PY_TST := $(shell find src -type f -name "test_*.py")
+# build-aux/*.py is build tooling: never shipped, but type-checked, linted and
+# tested like everything else. Globbed rather than listed so a new script is
+# covered by construction -- this is how check_version.py joins the install
+# script. The test_* files are filtered out of PY_SRC because PY_TST claims
+# them (mypy rejects a module passed twice; pylint would lint them without the
+# test-file exemptions).
+PY_SRC := build_pyz.py \
+          $(filter-out build-aux/test_%.py, $(wildcard build-aux/*.py)) \
+          $(shell find src -type f -name "*.py" ! -name "test_*")
+PY_TST := $(wildcard build-aux/test_*.py) $(shell find src -type f -name "test_*.py")
+
+# --- aggregates --------------------------------------------------------------
+validate: type lint test
+
+all: validate pyz deb
 
 # Distribution + generated-artifact paths. ``folio.gresource`` is a
 # generated artifact (gitignored): every entry point builds it from the
@@ -44,7 +58,13 @@ resource: $(GRES)
 # giruntime/ui/note_editor.py) reads the compiled GResource, so it must exist before
 # discovery. Discovery uses `-t src` so `src` is the top-level dir and test
 # modules import as `config.test_paths` etc., now that `src` is not a package.
+# Two discovery passes, because the two trees have nothing in common but the
+# runner: `build-aux/` is display-free, GTK-free build tooling and runs first
+# and cheaply (it is also what makes test_check_version.py visible at all --
+# the `src` pass cannot see it); `src` is the application suite that needs the
+# compositor below.
 test: $(GRES)
+	python3 -B -m unittest discover -s build-aux -t build-aux -f
 	@export XDG_RUNTIME_DIR=$${XDG_RUNTIME_DIR:-$$(mktemp -d)}; \
 		chmod 700 "$$XDG_RUNTIME_DIR"; \
 		weston --backend headless --socket=test_notes --idle-time=0 >/dev/null 2>&1 & \
@@ -76,5 +96,65 @@ lint:
 pyz: $(GRES)
 	python3 build_pyz.py src $(PYZ) "$(SHEBANG)"
 
-clean:
+# --- Debian package ----------------------------------------------------------
+# The build never runs in the working tree: `git archive HEAD` is exported into
+# build/deb/ and dpkg-buildpackage runs there. That keeps debhelper's staging
+# litter out of the tree (no debian/files, debian/folio/, debian/*.substvars),
+# keeps every artifact inside the gitignored build/ directory rather than `..`,
+# and guarantees the package holds COMMITTED content only -- in particular never
+# the gitignored in-tree folio.gresource, which Meson compiles for itself.
+#
+# The version is NOT restated here: debian/changelog owns the Debian version,
+# and the upstream version is that string minus the -<revision> suffix. Both are
+# recursive (`=`, not `:=`) on purpose, so dpkg-parsechangelog runs only when a
+# deb target expands them -- `make test` on a host without dpkg-dev must not
+# shell out and fail.
+DEB_VERSION   = $(shell dpkg-parsechangelog -l debian/changelog -S Version)
+DEB_UPSTREAM  = $(shell dpkg-parsechangelog -l debian/changelog -S Version | sed 's/-[^-]*$$//')
+DEB_DIR      := build/deb
+DEB_STAGE     = $(DEB_DIR)/folio-$(DEB_UPSTREAM)
+
+# Binary-only (Architecture: all) and unsigned: dpkg-source never runs, so no
+# orig tarball is needed. Override to skip the build-dependency check on a host
+# that cannot satisfy python3 (>= 3.13):  make deb DEB_BUILD_FLAGS="-us -uc -b -d"
+DEB_BUILD_FLAGS ?= -us -uc -b
+
+DEB_TOOLS := git dpkg-parsechangelog dpkg-buildpackage
+
+deb-tools:
+	@for tool in $(DEB_TOOLS); do \
+		command -v $$tool >/dev/null 2>&1 || { \
+			echo "missing: $$tool - apt-get install dpkg-dev git"; exit 1; }; \
+	done
+
+# The four files that state the version must agree (README section 7's "one
+# release, three dialects" rule, made executable).
+version-check:
+	python3 -B build-aux/check_version.py
+
+# `deb` depends on neither validation nor `resource`: packaging and validation
+# stay orthogonal (`make all` composes them), and the .deb's GResource is the
+# one Meson compiles in its build dir, never the dev artifact in the tree.
+#
+# The package IS HEAD, so an uncommitted change is an error, not a warning: it
+# would otherwise be silently absent from the artifact. (`git diff --quiet HEAD`
+# does not see untracked files -- which `git archive` omits anyway, so the
+# artifact still equals HEAD.)
+deb: deb-tools version-check
+	@git diff --quiet HEAD || { \
+		echo "working tree is dirty - commit or stash: the .deb is built from HEAD"; \
+		exit 1; }
+	rm -rf $(DEB_DIR)
+	mkdir -p $(DEB_DIR)
+	git archive --prefix=folio-$(DEB_UPSTREAM)/ --format=tar HEAD | tar -x -C $(DEB_DIR)
+	cd $(DEB_STAGE) && dpkg-buildpackage $(DEB_BUILD_FLAGS)
+	@ls -1 $(DEB_DIR)/*.deb
+
+deb-lint: deb
+	lintian -i -I $(DEB_DIR)/*.deb
+
+deb-clean:
+	rm -rf $(DEB_DIR)
+
+clean: deb-clean
 	rm -f $(PYZ) $(GRES)
