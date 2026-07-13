@@ -130,3 +130,48 @@
     font-size: 11px;          /* match .sidebar-section-header → aligns with "Tags" */
     letter-spacing: 0.06em;   /* same tracking as the header */
 }
+
+/* Attachment cards (editor pane, ui/attachments_panel.py).
+ *
+ * The card is the unit the grid is made of: a frame is what makes its
+ * icon, filename, size and remove button read as ONE object rather
+ * than four widgets floating in the panel's whitespace. Without it the
+ * two-line cards blend into the pane and into each other.
+ *
+ * The card carries a border and no fill: the frame alone is enough to
+ * bound the object, and a background tint would fight the pane behind
+ * it (and the note-sheet vocabulary the read view already uses).
+ *
+ * Palette-safe like every other rule here: the border is derived from
+ * the theme's own foreground (`currentColor`) via `alpha()`, so the
+ * card tracks light/dark and any user accent — no colour is named.
+ * Geometry (radius, padding) is the only literal.
+ *
+ * The padding participates in the card's natural height, which is what
+ * `scroll_cap_height` measures, so the 2.5-row cap absorbs a change
+ * here automatically. */
+.attachment-card {
+    border: 1px solid alpha(currentColor, 0.15);
+    border-radius: 8px;
+    padding: 6px 8px;
+}
+
+/* The card's remove button is chrome inside chrome: a second frame
+ * around the trash icon competes with the card's own border and makes
+ * the button, not the file, the loudest thing on the card. So it is
+ * flat at rest — icon only — and grows a hover/active wash (again
+ * theme-derived) so it still reads as a button under the pointer. */
+.attachment-card-remove {
+    background: none;
+    border: none;
+    box-shadow: none;
+    padding: 4px;
+}
+
+.attachment-card-remove:hover {
+    background: alpha(currentColor, 0.10);
+}
+
+.attachment-card-remove:active {
+    background: alpha(currentColor, 0.18);
+}

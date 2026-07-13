@@ -269,7 +269,7 @@ with fake controllers/repositories.
 - **`note_list.py`** — middle pane: a `ListView` over `SingleSelection(SortListModel(FilterListModel(NoteListStore)))`, reusing the `search.note_filter` predicates. Selection is one source of truth (`AppState`).
 - **`note_view.py`** — read pane. `ArticleContainer` (a `Gtk.Widget` + `Gtk.Scrollable`) enforces the fixed-width column and owns scrolling; `ArticleTextView` paints the sheet + washes. Exposes the shared `build_article_surface()` and `make_cell_width_measurer()`. Renders from the in-memory store; parse errors render in-surface.
 - **`note_editor.py`** — source pane (`GtkSource.View`) with the `AttachmentsPanel` embedded below it. Debounced autosave routes through `NoteController.update_source`. Loads grammar via `_gresource.resource_path(...)`.
-- **`attachments_panel.py`** — per-note attachment management (header, add-file, one card per attachment). Add/remove route through `NoteController`; inserts nothing into the note body.
+- **`attachments_panel.py`** — per-note attachment management (header, add-file, one card per attachment). Cards are two-line (filename over size), framed by the `attachment-card` class in `css/app.css`, in a **capped card grid**: a `Gtk.FlowBox` inside a `Gtk.ScrolledWindow` whose height stops at 2.5 measured card rows (`scroll_cap_height`), so attachments cost grid *rows* and can never starve the editor above. Add/remove route through `NoteController`; inserts nothing into the note body.
 - **`toolbar.py`** — top `Gtk.HeaderBar`: *New*, *Delete*, a search toggle expanding a collapsible centre search (title ↔ full-width entry stack, pages named by `enums.HeaderCentrePage`; the entry is bound to `AppState:query`), the selected note's title in the centre, a View/Source toggle, and a *Help* button targeting `app.help`.
 - **`dialogs.py`** — shared modal dialogs (confirm-delete only). Production wires `Gtk.AlertDialog`; tests drive callbacks synchronously.
 - **`link_handler.py`** — `LinkHandler.install(...)` wiring motion/click controllers. Resolves a click to the renderer's closed `ActivationTarget` union and dispatches it: a `UrlTarget` to an injected launcher (allowlisted by `enums.LinkScheme`), an `AttachmentTarget` to an injected `AttachmentActivator`. Installed by both `note_view.py` and `help_window.py`.
@@ -277,7 +277,7 @@ with fake controllers/repositories.
 - **`_filesize.py`** — shared human-readable byte-size formatting (binary convention). Pure.
 - **`_dates.py`** — shared locale-independent date formatting (`format_date_short` / `format_date_long`). Pure.
 - **`_gresource.py`** — `resource_path(GResourceSubtree) -> str`, the only way to obtain a path into the compiled `folio.gresource`; registers the bundle idempotently as a side effect. A missing bundle raises `FileNotFoundError`.
-- **`css/app.css`** — application stylesheet, read via `importlib.resources`; ships in `folio.pyz`.
+- **`css/app.css`** — application stylesheet, read via `importlib.resources`; ships in `folio.pyz`. Holds the sidebar, note-list row, and attachment-card rules; colours are theme-derived (`opacity` / `alpha(currentColor, …)`), never named.
 - **`language_spec.lang`** — GtkSourceView 5 grammar; compiled into `folio.gresource` and loaded via a `resource:///` search path (build input only, not shipped raw).
 - **`folio.gresource.xml`** — committed GResource manifest publishing the grammar and the application icon; compiled by `glib-compile-resources`.
 

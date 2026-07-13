@@ -1,10 +1,15 @@
 """Tests for :mod:`ui.attachments_panel`.
 
-The panel builds its card list eagerly into a plain :class:`Gtk.Box`,
-so the tests inspect children directly — no window needs presenting.
+The panel builds its card list eagerly into a :class:`Gtk.FlowBox`
+(inside a height-capped :class:`Gtk.ScrolledWindow`), so the tests
+inspect children directly — no window needs presenting; they only
+unwrap the :class:`Gtk.FlowBoxChild` GTK inserts on ``append``.
 Construction follows the editor suite's shape: a fake attachment
 store, a fake file-dialog opener driven synchronously, and a real
 :class:`NoteController` over an in-memory store.
+
+:func:`scroll_cap_height` is pure arithmetic and is tested with no
+display at all.
 """
 
 from __future__ import annotations
@@ -20,7 +25,13 @@ from enums import AttachmentExportFailureReason, AttachmentRejectionReason
 from giruntime.controllers.app_state import AppState
 from giruntime.controllers.note_controller import NoteController
 from giruntime.controllers.note_list_store import NoteListStore
-from giruntime.ui.attachments_panel import AttachmentsPanel
+from giruntime.ui.attachments_panel import (
+    _CARD_CSS_CLASS,
+    _CARD_SPACING_PX,
+    _VISIBLE_ROWS,
+    AttachmentsPanel,
+    scroll_cap_height,
+)
 from models.attachment import Attachment
 from models.note import Note
 from storage.protocols import AttachmentExportFailed, AttachmentRejected
@@ -240,19 +251,42 @@ def _build_panel(
 
 
 def _card_boxes(panel: AttachmentsPanel) -> list[Gtk.Box]:
+    """The card boxes, in order, unwrapped from their flow-box children."""
     cards: list[Gtk.Box] = []
-    child = panel._cards_box.get_first_child()
+    child = panel._cards_flow.get_first_child()
     while child is not None:
-        assert isinstance(child, Gtk.Box)
-        cards.append(child)
+        assert isinstance(child, Gtk.FlowBoxChild)
+        card = child.get_child()
+        assert isinstance(card, Gtk.Box)
+        cards.append(card)
         child = child.get_next_sibling()
     return cards
 
 
-def _card_labels(card: Gtk.Box) -> list[str]:
-    """The text of every label on a card, left to right."""
-    labels: list[str] = []
+def _direct_children(widget: Gtk.Widget) -> list[Gtk.Widget]:
+    """Every immediate child of ``widget``, in order."""
+    children: list[Gtk.Widget] = []
+    child = widget.get_first_child()
+    while child is not None:
+        children.append(child)
+        child = child.get_next_sibling()
+    return children
+
+
+def _card_text_box(card: Gtk.Box) -> Gtk.Box:
+    """The card's inner vertical box — the filename/size pair."""
     child = card.get_first_child()
+    while child is not None:
+        if isinstance(child, Gtk.Box):
+            return child
+        child = child.get_next_sibling()
+    raise AssertionError("no text box on the card")
+
+
+def _card_labels(card: Gtk.Box) -> list[str]:
+    """The text of every label on a card, top to bottom."""
+    labels: list[str] = []
+    child = _card_text_box(card).get_first_child()
     while child is not None:
         if isinstance(child, Gtk.Label):
             labels.append(child.get_text())
@@ -267,6 +301,43 @@ def _card_remove_button(card: Gtk.Box) -> Gtk.Button:
             return child
         child = child.get_next_sibling()
     raise AssertionError("no remove button on the card")
+
+
+# ---------------------------------------------------------------------------
+# scroll_cap_height — pure arithmetic, no display
+# ---------------------------------------------------------------------------
+
+
+class ScrollCapHeightTests(unittest.TestCase):
+    def test_whole_rows_are_heights_plus_trailing_spacings(self) -> None:
+        # 2 rows: each contributes its height plus the spacing after it.
+        self.assertEqual(
+            scroll_cap_height(50, row_spacing=6, visible_rows=2.0),
+            2 * (50 + 6),
+        )
+
+    def test_fractional_row_adds_height_but_no_spacing(self) -> None:
+        # 2.5 rows of a 52 px card at 6 px spacing:
+        #   2 * (52 + 6) + 0.5 * 52 = 142.
+        self.assertEqual(
+            scroll_cap_height(52, row_spacing=6, visible_rows=2.5),
+            142,
+        )
+        whole = scroll_cap_height(52, row_spacing=6, visible_rows=2.0)
+        self.assertEqual(
+            scroll_cap_height(52, row_spacing=6, visible_rows=2.5) - whole,
+            26,
+        )
+
+    def test_zero_card_height_yields_zero(self) -> None:
+        # No card to show: no bare stack of spacings either.
+        self.assertEqual(scroll_cap_height(0, row_spacing=6), 0)
+
+    def test_default_visible_rows_is_the_module_constant(self) -> None:
+        self.assertEqual(
+            scroll_cap_height(52, row_spacing=6),
+            scroll_cap_height(52, row_spacing=6, visible_rows=_VISIBLE_ROWS),
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -359,6 +430,96 @@ class AttachmentsPanelRenderingTests(unittest.TestCase):
         self.assertTrue(panel.get_visible())
         self.assertEqual(panel._header_label.get_text(), "ATTACHMENTS · 0")
         self.assertEqual(_card_boxes(panel), [])
+
+
+# ---------------------------------------------------------------------------
+# The card grid and its height cap
+# ---------------------------------------------------------------------------
+
+
+@unittest.skipUnless(_display_available(), "no GDK display")
+class AttachmentsPanelGridTests(unittest.TestCase):
+    def test_card_pairs_the_name_and_size_in_one_child_box(self) -> None:
+        # The regression guard for the reported defect: the size is no
+        # longer a direct child of the card row (where hexpand on the
+        # name label exiled it to the far edge of the editor pane) but
+        # a sibling of the name inside the card's own vertical box.
+        panel, store, _, _, state = _build_panel(select_note=False)
+        store.seed("n1", "photo.png", byte_size=1024)
+        state.set_selected_note_id("n1")
+
+        card = _card_boxes(panel)[0]
+        text_box = _card_text_box(card)
+        self.assertEqual(
+            text_box.get_orientation(),
+            Gtk.Orientation.VERTICAL,
+        )
+        self.assertEqual(_card_labels(card), ["photo.png", "1 KB"])
+        # …and no label hangs off the card row itself.
+        row_labels = [
+            child
+            for child in _direct_children(card)
+            if isinstance(child, Gtk.Label)
+        ]
+        self.assertEqual(row_labels, [])
+
+    def test_every_card_carries_the_frame_css_class(self) -> None:
+        # The frame is what makes a card read as one object rather
+        # than four widgets in the panel's whitespace; the styling
+        # itself lives in css/app.css.
+        panel, store, _, _, state = _build_panel(select_note=False)
+        store.seed("n1", "a.png", byte_size=1)
+        store.seed("n1", "b.png", byte_size=1)
+        state.set_selected_note_id("n1")
+        for card in _card_boxes(panel):
+            self.assertTrue(card.has_css_class(_CARD_CSS_CLASS))
+
+    def test_scroller_is_configured_to_grow_then_scroll(self) -> None:
+        panel, store, _, _, state = _build_panel(select_note=False)
+        store.seed("n1", "a.png", byte_size=1)
+        state.set_selected_note_id("n1")
+
+        scroller = panel._cards_scroller
+        self.assertEqual(
+            scroller.get_policy().hscrollbar_policy,
+            Gtk.PolicyType.NEVER,
+        )
+        self.assertTrue(scroller.get_propagate_natural_height())
+        self.assertFalse(scroller.get_vexpand())
+        self.assertGreater(scroller.get_max_content_height(), 0)
+
+    def test_cap_matches_the_measured_card_height(self) -> None:
+        panel, store, _, _, state = _build_panel(select_note=False)
+        store.seed("n1", "a.png", byte_size=1)
+        state.set_selected_note_id("n1")
+
+        first_child = panel._cards_flow.get_first_child()
+        assert first_child is not None
+        natural = first_child.measure(Gtk.Orientation.VERTICAL, -1).natural
+        self.assertEqual(
+            panel._cards_scroller.get_max_content_height(),
+            scroll_cap_height(natural, _CARD_SPACING_PX),
+        )
+
+    def test_cap_does_not_grow_with_the_attachment_count(self) -> None:
+        # The test that pins the bug: the panel's height ceiling is a
+        # function of one card, not of how many there are.
+        panel, store, _, _, state = _build_panel(select_note=False)
+        for index in range(3):
+            store.seed("n1", f"f{index}.png", byte_size=1)
+        state.set_selected_note_id("n1")
+        cap_with_3 = panel._cards_scroller.get_max_content_height()
+
+        for index in range(3, 30):
+            store.seed("n1", f"f{index}.png", byte_size=1)
+        state.set_selected_note_id(None)
+        state.set_selected_note_id("n1")
+
+        self.assertEqual(len(_card_boxes(panel)), 30)
+        self.assertEqual(
+            panel._cards_scroller.get_max_content_height(),
+            cap_with_3,
+        )
 
 
 # ---------------------------------------------------------------------------
