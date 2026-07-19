@@ -54,7 +54,7 @@ class CountUntaggedTests(unittest.TestCase):
         self.assertEqual(count_untagged([]), 0)
 
     def test_counts_notes_with_empty_tags_tuple(self) -> None:
-        class _Stub:  # pylint: disable=too-few-public-methods
+        class _Stub:
             def __init__(self, tags: tuple[str, ...]) -> None:
                 self.tags = tags
 

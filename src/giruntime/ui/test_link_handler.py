@@ -363,7 +363,7 @@ class SetCursorToLinkTests(unittest.TestCase):
             call_count += 1
             original_set_cursor(cursor)
 
-        text_view.set_cursor = counting_set_cursor  # type: ignore[method-assign]
+        text_view.set_cursor = counting_set_cursor
         handler._set_cursor_to_link(True)
         handler._set_cursor_to_link(True)
         handler._set_cursor_to_link(True)
@@ -382,7 +382,7 @@ class SetCursorToLinkTests(unittest.TestCase):
             call_count += 1
             original_set_cursor(cursor)
 
-        text_view.set_cursor = counting_set_cursor  # type: ignore[method-assign]
+        text_view.set_cursor = counting_set_cursor
         handler._set_cursor_to_link(False)
         handler._set_cursor_to_link(False)
         handler._set_cursor_to_link(False)
@@ -400,7 +400,7 @@ class SetCursorToLinkTests(unittest.TestCase):
             call_count += 1
             original_set_cursor(cursor)
 
-        text_view.set_cursor = counting_set_cursor  # type: ignore[method-assign]
+        text_view.set_cursor = counting_set_cursor
         handler._set_cursor_to_link(True)
         handler._set_cursor_to_link(False)
         handler._set_cursor_to_link(True)
@@ -441,7 +441,7 @@ class LeaveCallbackTests(unittest.TestCase):
             call_count += 1
             original_set_cursor(cursor)
 
-        text_view.set_cursor = counting_set_cursor  # type: ignore[method-assign]
+        text_view.set_cursor = counting_set_cursor
         handler._on_leave(Gtk.EventControllerMotion.new())
         self.assertEqual(call_count, 0)
 
@@ -533,7 +533,7 @@ class ControllerCallbackUnrealisedFallbackTests(unittest.TestCase):
             call_count += 1
             original_set_cursor(cursor)
 
-        text_view.set_cursor = counting_set_cursor  # type: ignore[method-assign]
+        text_view.set_cursor = counting_set_cursor
         handler._on_motion(
             Gtk.EventControllerMotion.new(),
             10.0,

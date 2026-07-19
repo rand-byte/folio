@@ -29,10 +29,20 @@ dependencies = [
 # python/mypy#18587, fixed in 1.16. Below that floor ``make type`` reports
 # spurious ``NotebookIcon``-vs-``str`` errors in ``giruntime/ui/dialogs.py`` and
 # ``giruntime/ui/test_dialogs.py``; pinning the floor keeps it from regressing.
+#
+# ``pylint`` is capped below 4 (F-1). pylint 4 / astroid 4 changed branch
+# counting, so 4.0.6 fails the otherwise-clean ``note_view.py`` with a
+# spurious ``R0912: Too many branches (24/12)`` that pylint 3.3.9 does not
+# emit (it rates the file 10.00/10). pylint 4 is also the version that trips
+# the ``gi``-introspection false positives already noted in
+# ``dev-environment.md`` — ``E0611: No name 'Gtk'/'Gdk'/'Graphene'/… in module
+# 'gi.repository'`` and ``I0021: Useless suppression of 'arguments-differ'``.
+# ``generated-members`` below neutralises the ``gi`` ``no-member`` family
+# within the pinned major; this cap keeps the toolchain on a known-good one.
 [dependency-groups]
 dev = [
     "mypy>=1.16",
-    "pylint",
+    "pylint<4",
 ]
 
 [tool.pylint."MESSAGES CONTROL"]
@@ -40,12 +50,33 @@ disable = [
     "missing-module-docstring",
     "missing-function-docstring",
     "missing-class-docstring",
-    "too-many-arguments",
 ]
 enable = ["useless-suppression"]
 
 [tool.pylint.design]
 min-public-methods = 1
+
+# ``gi.repository`` members are generated at runtime by the GObject
+# introspection machinery, so pylint/astroid cannot see them statically and
+# would emit spurious ``no-member`` (E1101) at every GTK call site. Listing the
+# namespaces we import here suppresses that class of false positive centrally,
+# replacing the seven per-call-site ``# pylint: disable=no-member`` comments
+# that used to carry it. ``__gtype__`` is the GObject-metaclass-injected class
+# attribute (same story, but not namespaced).
+[tool.pylint.typecheck]
+generated-members = [
+    "gi.repository.*",
+    "GLib.*",
+    "GObject.*",
+    "Gdk.*",
+    "Gio.*",
+    "Graphene.*",
+    "Gsk.*",
+    "Gtk.*",
+    "GtkSource.*",
+    "Pango.*",
+    "__gtype__",
+]
 
 [tool.mypy]
 python_version = "3.13"
@@ -56,6 +87,10 @@ disallow_incomplete_defs = true
 check_untyped_defs = true
 no_implicit_optional = true
 strict_optional = true
+
+# Report ``# type: ignore`` comments that no longer suppress anything, so stale
+# ignores cannot silently reaccumulate once the errors they targeted are gone.
+warn_unused_ignores = true
 
 incremental = false
 cache_dir = "/dev/null"

@@ -763,9 +763,6 @@ class ImageRenderingTests(unittest.TestCase):
     def test_scaled_paintable_caps_intrinsic_width_at_column_width(self) -> None:
         # Construct the wrapper directly with a synthetic texture to
         # cover the scaling case without needing a large PNG fixture.
-        # GObject-introspected member; pylint cannot see it when Graphene
-        # is loaded alongside GLib (see the renderer's own use).
-        # pylint: disable-next=no-member
         texture = Gdk.Texture.new_from_bytes(GLib.Bytes.new(_PNG_1X1))
         wrapper = _ScaledImagePaintable(texture=texture, column_width_px=4)
         # Texture is 1×1, column is 4 → texture fits without scaling.
@@ -775,9 +772,6 @@ class ImageRenderingTests(unittest.TestCase):
     def test_scaled_paintable_scales_wide_image_proportionally(self) -> None:
         # 200×100 texture in a 50-pixel column → intrinsic width 50,
         # intrinsic height proportionally scaled to 25.
-        # GObject-introspected member; pylint cannot see it when Graphene
-        # is loaded alongside GLib (see the renderer's own use).
-        # pylint: disable-next=no-member
         texture = Gdk.Texture.new_from_bytes(GLib.Bytes.new(_PNG_200X100))
         wrapper = _ScaledImagePaintable(texture=texture, column_width_px=50)
         self.assertEqual(wrapper.get_intrinsic_width(), 50)
@@ -788,9 +782,6 @@ class ImageRenderingTests(unittest.TestCase):
         # the column-width resolver may return 0. The wrapper falls
         # back to the texture's natural dimensions in that case so the
         # paintable doesn't collapse to invisible.
-        # GObject-introspected member; pylint cannot see it when Graphene
-        # is loaded alongside GLib (see the renderer's own use).
-        # pylint: disable-next=no-member
         texture = Gdk.Texture.new_from_bytes(GLib.Bytes.new(_PNG_200X100))
         wrapper = _ScaledImagePaintable(texture=texture, column_width_px=0)
         self.assertEqual(wrapper.get_intrinsic_width(), 200)

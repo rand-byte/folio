@@ -308,7 +308,7 @@ class AddForNoteSizeCapTests(unittest.TestCase):
             if self == path:
                 # Build a tiny shim object exposing st_size only —
                 # AttachmentStore reads no other field.
-                class _ShimStat:  # pylint: disable=too-few-public-methods
+                class _ShimStat:
                     st_size = MAX_ATTACHMENT_BYTES + 1
                 return _ShimStat()
             return real
@@ -335,7 +335,7 @@ class AddForNoteSizeCapTests(unittest.TestCase):
         def fake_stat(self: Path, *args: object, **kwargs: object) -> object:
             real = original_stat(self, *args, **kwargs)  # type: ignore[arg-type]
             if self == path:
-                class _ShimStat:  # pylint: disable=too-few-public-methods
+                class _ShimStat:
                     st_size = MAX_ATTACHMENT_BYTES + 100
                 return _ShimStat()
             return real
@@ -374,7 +374,7 @@ class AddForNoteSizeCapTests(unittest.TestCase):
         def fake_stat(self: Path, *args: object, **kwargs: object) -> object:
             real = original_stat(self, *args, **kwargs)  # type: ignore[arg-type]
             if self == path:
-                class _ShimStat:  # pylint: disable=too-few-public-methods
+                class _ShimStat:
                     st_size = MAX_ATTACHMENT_BYTES
                 return _ShimStat()
             return real

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import unittest
+from collections.abc import Callable
 
 from giruntime.controllers.app_state import AppState
 from enums import SmartFilter, ViewMode
@@ -30,7 +31,7 @@ class _Recorder:
         ):
             state.connect(signal, self._make_handler(signal))
 
-    def _make_handler(self, signal: str):  # type: ignore[no-untyped-def]
+    def _make_handler(self, signal: str) -> Callable[..., None]:
         def handler(_obj: AppState, *args: object) -> None:
             self.events.append((signal, args))
         return handler

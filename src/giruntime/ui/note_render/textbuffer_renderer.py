@@ -364,7 +364,7 @@ class TextBufferRenderer:
     _activation_tags: dict[Gtk.TextTag, ActivationTarget]
     _table_tab_tags: list[Gtk.TextTag]
 
-    def __init__(
+    def __init__(  # pylint: disable=too-many-arguments
         self,
         *,
         image_bytes_for: ImageBytesResolver,
@@ -844,10 +844,6 @@ class TextBufferRenderer:
         column_width_px = self._column_width_px()
         data = self._image_bytes_for(image.filename)
         try:
-            # pylint trips on ``GLib.Bytes.new`` via gi-introspection
-            # when Graphene is loaded alongside GLib in the same module;
-            # the call is real, see PyGObject's GBytes binding.
-            # pylint: disable-next=no-member
             texture = Gdk.Texture.new_from_bytes(GLib.Bytes.new(data))
         except GLib.Error:
             paintable: Gdk.Paintable = _PlaceholderImagePaintable()
@@ -906,7 +902,7 @@ class TextBufferRenderer:
             )
         buffer.insert(buffer.get_end_iter(), "\n")
 
-    def _emit_table_row(
+    def _emit_table_row(  # pylint: disable=too-many-arguments
         self,
         buffer: Gtk.TextBuffer,
         row: TableRow,
@@ -976,7 +972,7 @@ class TextBufferRenderer:
             )
         return runs
 
-    def _flatten_inline(  # pylint: disable=too-many-return-statements
+    def _flatten_inline(  # pylint: disable=too-many-return-statements,too-many-arguments
         self,
         inline: InlineNode,
         *,
@@ -1096,7 +1092,7 @@ class TextBufferRenderer:
             return
         raise TypeError(f"unknown inline node: {type(inline).__name__}")
 
-    def _flatten_children(
+    def _flatten_children(  # pylint: disable=too-many-arguments
         self,
         children: tuple[InlineNode, ...],
         *,
@@ -1472,18 +1468,18 @@ class _ScaledImagePaintable(GObject.GObject, Gdk.Paintable):
             # to zero pixels for very small textures.
             self._intrinsic_height = max(1, int(tex_height * ratio))
 
-    def do_get_intrinsic_width(self) -> int:  # noqa: D401
+    def do_get_intrinsic_width(self) -> int:
         return self._intrinsic_width
 
-    def do_get_intrinsic_height(self) -> int:  # noqa: D401
+    def do_get_intrinsic_height(self) -> int:
         return self._intrinsic_height
 
-    def do_get_intrinsic_aspect_ratio(self) -> float:  # noqa: D401
+    def do_get_intrinsic_aspect_ratio(self) -> float:
         if self._intrinsic_height <= 0:
             return 0.0
         return self._intrinsic_width / self._intrinsic_height
 
-    def do_get_flags(self) -> Gdk.PaintableFlags:  # noqa: D401
+    def do_get_flags(self) -> Gdk.PaintableFlags:
         return Gdk.PaintableFlags.CONTENTS | Gdk.PaintableFlags.SIZE
 
     def do_snapshot(
@@ -1491,7 +1487,7 @@ class _ScaledImagePaintable(GObject.GObject, Gdk.Paintable):
         snapshot: Gtk.Snapshot,
         width: float,
         height: float,
-    ) -> None:  # noqa: D401
+    ) -> None:
         self._texture.snapshot(snapshot, width, height)
 
 
@@ -1504,18 +1500,18 @@ class _PlaceholderImagePaintable(GObject.GObject, Gdk.Paintable):
     one edit.
     """
 
-    def do_get_intrinsic_width(self) -> int:  # noqa: D401
+    def do_get_intrinsic_width(self) -> int:
         return _PLACEHOLDER_PAINTABLE_WIDTH_PX
 
-    def do_get_intrinsic_height(self) -> int:  # noqa: D401
+    def do_get_intrinsic_height(self) -> int:
         return _PLACEHOLDER_PAINTABLE_HEIGHT_PX
 
-    def do_get_intrinsic_aspect_ratio(self) -> float:  # noqa: D401
+    def do_get_intrinsic_aspect_ratio(self) -> float:
         return (
             _PLACEHOLDER_PAINTABLE_WIDTH_PX / _PLACEHOLDER_PAINTABLE_HEIGHT_PX
         )
 
-    def do_get_flags(self) -> Gdk.PaintableFlags:  # noqa: D401
+    def do_get_flags(self) -> Gdk.PaintableFlags:
         return Gdk.PaintableFlags.CONTENTS | Gdk.PaintableFlags.SIZE
 
     def do_snapshot(
@@ -1523,7 +1519,7 @@ class _PlaceholderImagePaintable(GObject.GObject, Gdk.Paintable):
         snapshot: Gtk.Snapshot,
         width: float,
         height: float,
-    ) -> None:  # noqa: D401
+    ) -> None:
         rgba = Gdk.RGBA()
         rgba.red, rgba.green, rgba.blue, rgba.alpha = _PLACEHOLDER_PAINTABLE_RGBA
         rect = Graphene.Rect.alloc()

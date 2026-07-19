@@ -88,9 +88,8 @@ class TagCountsModel(GObject.Object, Gio.ListModel):
     # ------------------------------------------------------------------
 
     def do_get_item_type(self) -> GObject.GType:
-        # ``__gtype__`` is injected by the GObject metaclass; pylint
-        # cannot see it statically.
-        return TagItem.__gtype__  # pylint: disable=no-member
+        # ``__gtype__`` is injected by the GObject metaclass.
+        return TagItem.__gtype__
 
     def do_get_n_items(self) -> int:
         return len(self._order)

@@ -142,9 +142,6 @@ class HelpContentTests(unittest.TestCase):
         # image, not the grey placeholder — so the bundled bytes must
         # decode through the same path the renderer uses.
         data = load_bytes(SystemDocument.HELP_DEMO_IMAGE)
-        # ``GLib.Bytes.new`` is a GObject-introspected member; the linter
-        # cannot always see it (same as the renderer's own decode path).
-        # pylint: disable-next=no-member
         texture = Gdk.Texture.new_from_bytes(GLib.Bytes.new(data))
         self.assertGreater(texture.get_width(), 0)
         self.assertGreater(texture.get_height(), 0)

@@ -86,7 +86,7 @@ class _RaisingOnDeleteRepository(_FakeRepository):
         raise sqlite3.OperationalError("simulated failure")
 
 
-class _ItemsChangedRecorder:  # pylint: disable=too-few-public-methods
+class _ItemsChangedRecorder:
     """Captures ``items-changed(position, removed, added)`` emissions."""
 
     events: list[tuple[int, int, int]]

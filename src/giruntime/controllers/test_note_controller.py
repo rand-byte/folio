@@ -5,7 +5,7 @@ from __future__ import annotations
 import sqlite3
 import unittest
 from tempfile import TemporaryDirectory
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -194,7 +194,7 @@ class _Recorder:
         ):
             controller.connect(signal, self._make_handler(signal))
 
-    def _make_handler(self, signal: str):  # type: ignore[no-untyped-def]
+    def _make_handler(self, signal: str) -> Callable[..., None]:
         def handler(_controller: NoteController, *args: object) -> None:
             self.events.append((signal, args))
         return handler

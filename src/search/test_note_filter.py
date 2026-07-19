@@ -24,7 +24,7 @@ from search.note_filter import (
 _FIXED_NOW: datetime = datetime(2026, 4, 27, 12, 0, 0, tzinfo=timezone.utc)
 
 
-def _make_note(
+def _make_note(  # pylint: disable=too-many-arguments
     *,
     note_id: str,
     title: str = "Untitled",

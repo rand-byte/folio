@@ -1054,7 +1054,7 @@ class ArticleContainerScrollableTests(unittest.TestCase):
         reallocations: list[int] = []
         # Shadow the GTK method so the test observes the request without a
         # main loop; the handler calls ``self.queue_allocate()``.
-        container.queue_allocate = lambda: reallocations.append(1)  # type: ignore[method-assign]
+        container.queue_allocate = lambda: reallocations.append(1)
 
         hadj.set_value(120.0)
 

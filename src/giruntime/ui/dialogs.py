@@ -124,7 +124,7 @@ def default_confirm_dialog_presenter(
         # GIO async-callback's first arg. Use ``source`` for the
         # finish call to mirror the GIO convention.
         try:
-            chosen = source.choose_finish(result)  # type: ignore[attr-defined]
+            chosen = source.choose_finish(result)
         except GLib.Error:
             on_result(False)
             return

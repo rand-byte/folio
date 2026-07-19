@@ -1710,7 +1710,7 @@ class NoteView(Gtk.Box):
     _error_message: str | None
     _outer_column_width_px: int
 
-    def __init__(
+    def __init__(  # pylint: disable=too-many-arguments
         self,
         *,
         note_store: NoteListStore,

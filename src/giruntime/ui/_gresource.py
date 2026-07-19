@@ -80,9 +80,8 @@ def _ensure_registered() -> None:
     global _GRESOURCE_REGISTERED  # pylint: disable=global-statement
     if _GRESOURCE_REGISTERED:
         return
-    # ``GLib.Bytes.new`` is provided by the gi metaclass; pylint's
-    # astroid introspection misses it in the full-source lint run.
-    blob = GLib.Bytes.new(  # pylint: disable=no-member
+    # ``GLib.Bytes.new`` is provided by the gi metaclass.
+    blob = GLib.Bytes.new(
         importlib.resources.files(_GRESOURCE_PACKAGE)
         .joinpath(_GRESOURCE_NAME)
         .read_bytes()

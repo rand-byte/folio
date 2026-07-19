@@ -979,7 +979,7 @@ class _Parser:
             # Any other token contributes its source line verbatim. The
             # lexer guarantees one token per source line, so token.line
             # is the right index into ``source_lines`` (1-based).
-            body_line_indices.append(current.line - 1)  # type: ignore[union-attr]
+            body_line_indices.append(current.line - 1)
             self.pos += 1
 
         # End of input without a closing fence.

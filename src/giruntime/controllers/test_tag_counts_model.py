@@ -36,7 +36,7 @@ def _counts(model: TagCountsModel) -> dict[str, int]:
     return out
 
 
-class _ItemsChangedRecorder:  # pylint: disable=too-few-public-methods
+class _ItemsChangedRecorder:
     events: list[tuple[int, int, int]]
 
     def __init__(self, model: TagCountsModel) -> None:
