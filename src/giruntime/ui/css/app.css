@@ -175,3 +175,23 @@
 .attachment-card-remove:active {
     background: alpha(currentColor, 0.18);
 }
+
+/* The header's add control is a circular icon-only "+" button. GTK's
+ * stock `.circular` gives the round shape, but its default fill is
+ * nearly invisible on the white panel, so this rule gives it a soft,
+ * theme-derived grey fill — a fraction of the current foreground, no
+ * named colour — that reads as a gentle button at rest (like the
+ * platform's +/- stepper controls) and deepens on hover/active. */
+.attachment-add-button {
+    background: alpha(currentColor, 0.08);
+    border: none;
+    box-shadow: none;
+}
+
+.attachment-add-button:hover {
+    background: alpha(currentColor, 0.13);
+}
+
+.attachment-add-button:active {
+    background: alpha(currentColor, 0.18);
+}

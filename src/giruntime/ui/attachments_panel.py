@@ -3,11 +3,25 @@
 Principles & invariants
 -----------------------
 * :class:`AttachmentsPanel` is the editor pane's attachment-management
-  strip — an ``ATTACHMENTS · N`` header with an *Add file* button and
-  one card per attachment (generic icon, filename above its
+  strip — an ``ATTACHMENTS · N`` header with an *add* button beside it
+  and one card per attachment (generic icon, filename above its
   human-readable size, remove button). It is a self-contained
   :class:`Gtk.Box` so :class:`NoteEditor` stays focused and under
   pylint's line ceiling.
+* The header's add control is a **single ``+`` icon button** — short
+  and self-evident, no ``Add file`` text to compete with the dimmed
+  ``ATTACHMENTS · N`` label. GTK's stock ``circular`` class gives the
+  round shape (like ``dim-label`` and the toolbar's title class, it is
+  used as a bare style hook); because that class's default fill is
+  nearly invisible on the white panel, a small ``attachment-add-button``
+  rule in ``css/app.css`` adds a soft, theme-derived grey wash so the
+  button reads at rest — like the platform's ``+``/``-`` steppers. It
+  sits **directly beside** the label — a left-aligned row with a small
+  gap, not pushed to the far edge — so the pair reads as one unit and
+  the button plainly belongs to the count it acts on. A tooltip carries
+  the ``Attach a file`` affordance the dropped text used to. The row
+  carries :data:`_HEADER_VPAD_PX` of vertical breathing room so the
+  full-height ``+`` is not squeezed against the panel edge.
 * A card is **two lines, not one row**: the filename sits directly
   above the size inside a shared vertical box, so the size always
   reads as metadata *about that file* however wide the window grows.
@@ -82,7 +96,7 @@ from storage.protocols import AttachmentStoreProtocol
 _HEADER_TEMPLATE: Final[str] = "ATTACHMENTS · {n}"
 """Header text — the selected note's attachment count."""
 
-_ADD_BUTTON_LABEL: Final[str] = "Add file"
+_ADD_BUTTON_ICON_NAME: Final[str] = "list-add-symbolic"
 _ADD_BUTTON_TOOLTIP: Final[str] = "Attach a file to this note"
 
 _REMOVE_BUTTON_TOOLTIP: Final[str] = "Remove attachment"
@@ -94,6 +108,24 @@ _ATTACHMENT_ICON_NAME: Final[str] = "mail-attachment-symbolic"
 _PANEL_SPACING_PX: Final[int] = 4
 _PANEL_PADDING_PX: Final[int] = 8
 _CARD_SPACING_PX: Final[int] = 6
+
+_HEADER_GAP_PX: Final[int] = 12
+"""Space between the ``ATTACHMENTS · N`` label and the Add-file button.
+
+The ``+`` button sits directly beside the label (not pushed to the far
+edge), so the pair reads as one unit; this gap keeps the round icon
+button clearly separated from the count while staying tight enough that
+it still plainly belongs to it.
+"""
+
+_HEADER_VPAD_PX: Final[int] = 6
+"""Extra space above and below the header row.
+
+The ``+`` is a full-height circular button; without breathing room
+above and below it looks squeezed against the panel edge and the
+divider. This margin (on top of the panel's own padding) gives the
+header row its own comfortable band.
+"""
 
 _CARD_MIN_WIDTH_PX: Final[int] = 200
 """Width floor for one card, so a long filename cannot squeeze it."""
@@ -120,6 +152,26 @@ also feeds the measured card height the scroll cap is derived from.
 
 _REMOVE_BUTTON_CSS_CLASS: Final[str] = "attachment-card-remove"
 """Flattens the per-card remove button — no frame inside the frame."""
+
+_ADD_BUTTON_CSS_CLASS: Final[str] = "circular"
+"""GTK's built-in round-button shape for the icon-only ``+`` add button.
+
+The header exposes *add* as a single ``+`` glyph — short and
+self-evident next to the ``ATTACHMENTS · N`` count. ``circular`` is a
+stock GTK/Adwaita style class (like ``dim-label`` above) that supplies
+the round shape and equal padding; its default fill is nearly invisible
+on the white panel, so :data:`_ADD_BUTTON_FILL_CSS_CLASS` supplies the
+soft grey wash that makes it read as a gentle button at rest.
+"""
+
+_ADD_BUTTON_FILL_CSS_CLASS: Final[str] = "attachment-add-button"
+"""Gives the circular ``+`` button its soft, theme-derived grey fill.
+
+Backed by ``css/app.css``: a fraction-of-foreground wash at rest that
+deepens on hover/active — like the platform's ``+``/``-`` stepper
+controls — so the round button is visible on the white panel without a
+named colour. Applied alongside :data:`_ADD_BUTTON_CSS_CLASS`.
+"""
 
 
 def scroll_cap_height(
@@ -231,18 +283,33 @@ class AttachmentsPanel(Gtk.Box):  # pylint: disable=too-many-instance-attributes
     # ------------------------------------------------------------------
 
     def _build_header(self) -> Gtk.Box:
-        """Build the header row: ``ATTACHMENTS · N`` + the Add button."""
-        header = Gtk.Box.new(Gtk.Orientation.HORIZONTAL, _CARD_SPACING_PX)
+        """Build the header row: ``ATTACHMENTS · N`` + the ``+`` button.
+
+        Add is a single ``+`` glyph (:data:`_ADD_BUTTON_ICON_NAME`) — a
+        compact, self-evident icon button rather than a labelled one. It
+        sits **directly beside** the label with a :data:`_HEADER_GAP_PX`
+        gap in a left-aligned row — *not* pushed to the far edge — so the
+        pair reads as one unit and the button plainly belongs to the
+        count it acts on. The label therefore does not expand; the row's
+        trailing space stays empty. :data:`_HEADER_VPAD_PX` gives the row
+        breathing room above and below so the full-height ``+`` button
+        does not look squeezed against the panel edge.
+        """
+        header = Gtk.Box.new(Gtk.Orientation.HORIZONTAL, _HEADER_GAP_PX)
+        header.set_halign(Gtk.Align.START)
+        header.set_margin_top(_HEADER_VPAD_PX)
+        header.set_margin_bottom(_HEADER_VPAD_PX)
 
         self._header_label = Gtk.Label.new(_HEADER_TEMPLATE.format(n=0))
         self._header_label.set_halign(Gtk.Align.START)
-        self._header_label.set_hexpand(True)
         self._header_label.add_css_class(_HEADER_CSS_CLASS)
         self._header_label.add_css_class(_SIZE_CSS_CLASS)
         header.append(self._header_label)
 
-        self._add_button = Gtk.Button.new_with_label(_ADD_BUTTON_LABEL)
+        self._add_button = Gtk.Button.new_from_icon_name(_ADD_BUTTON_ICON_NAME)
         self._add_button.set_tooltip_text(_ADD_BUTTON_TOOLTIP)
+        self._add_button.add_css_class(_ADD_BUTTON_CSS_CLASS)
+        self._add_button.add_css_class(_ADD_BUTTON_FILL_CSS_CLASS)
         self._add_button.connect(
             "clicked",
             lambda _b: self._on_add_button_clicked(),
