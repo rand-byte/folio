@@ -132,6 +132,7 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from dataclasses import dataclass, replace
+from typing import assert_never
 
 from gi.repository import Gdk, GLib, GObject, Graphene, Gtk, Pango
 
@@ -598,10 +599,12 @@ class TextBufferRenderer:
                 "AttachmentTable must be expanded before rendering",
             )
         else:
-            # Exhaustive over the current :data:`BlockNode` union. New
-            # block kinds must extend this dispatch — the ``else`` makes
-            # forgetting one a hard failure rather than silent omission.
-            raise TypeError(f"unknown block node: {type(block).__name__}")
+            # Statically exhaustive over :data:`BlockNode`: every member is
+            # handled above, so ``block`` narrows to ``Never`` here and a
+            # new block kind that is not added to this dispatch is a
+            # ``mypy`` error rather than a silent omission or a runtime
+            # failure.
+            assert_never(block)
 
     def _emit_section(
         self,
@@ -1090,7 +1093,11 @@ class TextBufferRenderer:
                 _CellRun(text=" ", bold=bold, monospace=monospace, tags=tags),
             )
             return
-        raise TypeError(f"unknown inline node: {type(inline).__name__}")
+        # Statically exhaustive over :data:`InlineNode`: mirrors
+        # ``_emit_inline`` so ``inline`` narrows to ``Never`` here and a new
+        # inline kind that is not added to this dispatch is a ``mypy``
+        # error rather than a runtime failure.
+        assert_never(inline)
 
     def _flatten_children(  # pylint: disable=too-many-arguments
         self,
@@ -1253,9 +1260,9 @@ class TextBufferRenderer:
     ) -> None:
         # One return per inline AST kind. The closed-union dispatch
         # is intentionally kept as an :func:`isinstance` cascade
-        # (rather than a class-keyed dispatch table) so adding a
-        # new inline node forces a static-typing visit here AND
-        # the final ``raise`` flags the omission at runtime.
+        # (rather than a class-keyed dispatch table) so that the final
+        # :func:`assert_never` makes adding a new inline node without
+        # extending this dispatch a ``mypy`` error.
         if isinstance(inline, Text):
             self._emit_text(buffer, inline, tag_stack)
             return
@@ -1296,8 +1303,11 @@ class TextBufferRenderer:
             # and the newline carries no inherited style.
             buffer.insert(buffer.get_end_iter(), "\n")
             return
-        # Closed union; new inline kinds must extend this dispatch.
-        raise TypeError(f"unknown inline node: {type(inline).__name__}")
+        # Statically exhaustive over :data:`InlineNode`: every member is
+        # handled above, so ``inline`` narrows to ``Never`` here and a new
+        # inline kind that is not added to this dispatch is a ``mypy``
+        # error rather than a runtime failure.
+        assert_never(inline)
 
     def _emit_monospace(
         self,

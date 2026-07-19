@@ -14,7 +14,24 @@ Principles & invariants
   :data:`BlockNode` — are *closed* over the constructs the parser
   produces. Adding a new construct is a deliberate change that must
   extend the relevant union, so every walker (renderer, future
-  transformers, tests) is forced to consider the new case.
+  transformers) is forced to consider the new case.
+* **Both facts a walker relies on are enforced statically, not by a
+  runtime test.** *Membership* — that a node class belongs to its union —
+  is forced by the parser's return types: the parser constructs the node
+  and returns it where an :data:`InlineNode` / :data:`BlockNode` is
+  expected, which only type-checks if the class is a union member.
+  *Handling completeness* — that every walker copes with every member —
+  is forced by walking the union with an exhaustive ``match`` (or
+  ``isinstance`` cascade) closed by :func:`typing.assert_never`; an
+  unhandled member narrows the sink's argument away from ``Never`` and is
+  a ``mypy`` error. There is therefore **no runtime test asserting a
+  class is "in the union"** — it would only duplicate what the type
+  checker already proves. This invariant holds only while *every*
+  node-union walker keeps this shape and keeping them exhaustive stays
+  cheap; if node behavior ever has to live on the node itself, or
+  exhaustive handling becomes impractical to keep in sync across
+  consumers, this decision must be revisited (see
+  ``node-modeling-assessment.md``).
 * Children are stored as ``tuple[..., ...]`` rather than ``list``. This
   means equality and hashing of nodes are well-defined, ``frozen=True``
   is meaningful, and a careless caller cannot accidentally mutate a
@@ -236,6 +253,12 @@ extends it with :class:`HardBreak`, the sibling joiner emitted for the
 ``+`` marker (soft → reflow to a space, hard → a forced newline).
 Future build steps extend this further if new inline constructs are
 added.
+
+Membership in this union and exhaustive handling of it are both
+enforced statically (parser return types + ``match``/``assert_never``
+walkers); there is no runtime membership test. See the module
+docstring's *Principles & invariants* for the full rule and the
+conditions under which it must be revisited.
 """
 
 
@@ -536,6 +559,12 @@ extends this union with :class:`Table`. Step 15 extends it further with
 :class:`Admonition` and :class:`Blockquote`. The attachment-links feature
 adds :class:`AttachmentTable`, the only node that is *expanded away*
 (into a :class:`Table`) before rendering rather than emitted directly.
+
+Membership in this union and exhaustive handling of it are both
+enforced statically (parser return types + ``match``/``assert_never``
+walkers); there is no runtime membership test. See the module
+docstring's *Principles & invariants* for the full rule and the
+conditions under which it must be revisited.
 """
 
 

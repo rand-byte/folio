@@ -9,7 +9,6 @@ rather than later in the parser.
 
 from __future__ import annotations
 
-import typing
 import unittest
 from dataclasses import FrozenInstanceError, fields, is_dataclass
 
@@ -17,14 +16,12 @@ from asciidoc.ast import (
     Admonition,
     AttachmentLink,
     AttachmentTable,
-    BlockNode,
     Blockquote,
     Bold,
     CodeBlock,
     Document,
     HardBreak,
     Image,
-    InlineNode,
     Italic,
     ListItem,
     OrderedList,
@@ -368,15 +365,6 @@ class AstConstructionTests(unittest.TestCase):
         self.assertEqual(quote.blocks, (para,))
 
 
-class InlineUnionMembershipTests(unittest.TestCase):
-    """The structural line-break joiners are members of the inline union."""
-
-    def test_break_joiners_are_inline_union_members(self) -> None:
-        members = set(typing.get_args(getattr(InlineNode, "__value__")))
-        self.assertIn(SoftBreak, members)
-        self.assertIn(HardBreak, members)
-
-
 class AstEqualityTests(unittest.TestCase):
     """Frozen tuples make AST equality structural and useful in tests."""
 
@@ -429,14 +417,6 @@ class AttachmentNodeTests(unittest.TestCase):
             )
 
         self.assertEqual(build(), build())
-
-    def test_attachment_link_is_in_the_inline_union(self) -> None:
-        members = {m.__name__ for m in typing.get_args(InlineNode.__value__)}
-        self.assertIn("AttachmentLink", members)
-
-    def test_attachment_table_is_in_the_block_union(self) -> None:
-        members = {m.__name__ for m in typing.get_args(BlockNode.__value__)}
-        self.assertIn("AttachmentTable", members)
 
     def test_attachment_link_fields(self) -> None:
         names = [f.name for f in fields(AttachmentLink)]

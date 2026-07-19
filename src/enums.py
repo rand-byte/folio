@@ -67,42 +67,6 @@ class SelectionKind(StrEnum):
     TAG = auto()
 
 
-class NodeKind(StrEnum):
-    """Discriminator for AST nodes in :mod:`asciidoc.ast`.
-
-    Block kinds describe document structure; inline kinds describe spans
-    inside a single line of text. Tooling that walks the AST may switch on
-    this kind rather than ``isinstance`` so that adding a new node type
-    forces every walker to be updated.
-    """
-
-    # Document root
-    DOCUMENT = auto()
-    # Block-level
-    SECTION = auto()
-    PARAGRAPH = auto()
-    LIST_ORDERED = auto()
-    LIST_UNORDERED = auto()
-    LIST_ITEM = auto()
-    CODE_BLOCK = auto()
-    IMAGE = auto()
-    TABLE = auto()
-    TABLE_ROW = auto()
-    TABLE_CELL = auto()
-    ADMONITION = auto()
-    BLOCKQUOTE = auto()
-    ATTACHMENT_TABLE = auto()
-    # Inline
-    TEXT = auto()
-    BOLD = auto()
-    ITALIC = auto()
-    STRIKETHROUGH = auto()
-    UNDERLINE = auto()
-    MONOSPACE = auto()
-    LINK = auto()
-    ATTACHMENT_LINK = auto()
-
-
 class TokenKind(StrEnum):
     """Lexer token classifications used by :mod:`asciidoc.lexer`."""
 
