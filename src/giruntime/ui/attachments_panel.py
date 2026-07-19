@@ -13,15 +13,18 @@ Principles & invariants
   ``ATTACHMENTS · N`` label. GTK's stock ``circular`` class gives the
   round shape (like ``dim-label`` and the toolbar's title class, it is
   used as a bare style hook); because that class's default fill is
-  nearly invisible on the white panel, a small ``attachment-add-button``
-  rule in ``css/app.css`` adds a soft, theme-derived grey wash so the
-  button reads at rest — like the platform's ``+``/``-`` steppers. It
-  sits **directly beside** the label — a left-aligned row with a small
-  gap, not pushed to the far edge — so the pair reads as one unit and
-  the button plainly belongs to the count it acts on. A tooltip carries
-  the ``Attach a file`` affordance the dropped text used to. The row
-  carries :data:`_HEADER_VPAD_PX` of vertical breathing room so the
-  full-height ``+`` is not squeezed against the panel edge.
+  nearly invisible on the white panel, the shared
+  ``attachment-icon-button`` rule in ``css/app.css`` adds a soft,
+  theme-derived grey wash so the button reads at rest — like the
+  platform's ``+``/``-`` steppers. The **same round, filled style is
+  shared with the per-card remove button** (:meth:`_make_card`), so add
+  and remove read as one visual family. It sits **directly beside** the
+  label — a left-aligned row with a small gap, not pushed to the far
+  edge — so the pair reads as one unit and the button plainly belongs to
+  the count it acts on. A tooltip carries the ``Attach a file``
+  affordance the dropped text used to. The row carries
+  :data:`_HEADER_VPAD_PX` of vertical breathing room so the full-height
+  ``+`` is not squeezed against the panel edge.
 * A card is **two lines, not one row**: the filename sits directly
   above the size inside a shared vertical box, so the size always
   reads as metadata *about that file* however wide the window grows.
@@ -30,9 +33,12 @@ Principles & invariants
   icon, name, size and remove button read as *one object* instead of
   four widgets adrift in the panel's whitespace. No fill — the frame
   bounds the card, the pane behind it stays the background. The remove
-  button is **flat** inside that frame (no frame within a frame); it
-  grows a wash on hover. Like every other rule in that stylesheet the
-  colours are theme-derived, never named here.
+  button (a ``user-trash-symbolic`` bin) wears the **same round, filled
+  ``attachment-icon-button`` style as the header's ``+``** so the two
+  controls read as a matched family; the fill is a faint theme-derived
+  wash, gentle enough inside the card's border to read as a stepper
+  rather than a competing second frame. Like every other rule in that
+  stylesheet the colours are theme-derived, never named here.
 * The cards are a :class:`Gtk.FlowBox` **grid inside a height-capped**
   :class:`Gtk.ScrolledWindow`. Attachments therefore cost *rows*, not
   one row each, and the panel's height is **bounded** at
@@ -150,27 +156,27 @@ The frame is what makes a card read as a single object; its padding
 also feeds the measured card height the scroll cap is derived from.
 """
 
-_REMOVE_BUTTON_CSS_CLASS: Final[str] = "attachment-card-remove"
-"""Flattens the per-card remove button — no frame inside the frame."""
+_ICON_BUTTON_SHAPE_CSS_CLASS: Final[str] = "circular"
+"""GTK's built-in round-button shape, shared by the ``+`` and remove.
 
-_ADD_BUTTON_CSS_CLASS: Final[str] = "circular"
-"""GTK's built-in round-button shape for the icon-only ``+`` add button.
-
-The header exposes *add* as a single ``+`` glyph — short and
-self-evident next to the ``ATTACHMENTS · N`` count. ``circular`` is a
-stock GTK/Adwaita style class (like ``dim-label`` above) that supplies
-the round shape and equal padding; its default fill is nearly invisible
-on the white panel, so :data:`_ADD_BUTTON_FILL_CSS_CLASS` supplies the
-soft grey wash that makes it read as a gentle button at rest.
+Both the header's *add* control and every card's *remove* control are
+icon-only buttons that read as a matched ``+``/``-`` stepper family.
+``circular`` is a stock GTK/Adwaita style class (like ``dim-label``
+above) that supplies the round shape and equal padding; its default
+fill is nearly invisible on the white panel, so
+:data:`_ICON_BUTTON_FILL_CSS_CLASS` supplies the soft grey wash that
+makes both read as gentle buttons at rest.
 """
 
-_ADD_BUTTON_FILL_CSS_CLASS: Final[str] = "attachment-add-button"
-"""Gives the circular ``+`` button its soft, theme-derived grey fill.
+_ICON_BUTTON_FILL_CSS_CLASS: Final[str] = "attachment-icon-button"
+"""Gives the circular icon buttons their soft, theme-derived grey fill.
 
 Backed by ``css/app.css``: a fraction-of-foreground wash at rest that
 deepens on hover/active — like the platform's ``+``/``-`` stepper
-controls — so the round button is visible on the white panel without a
-named colour. Applied alongside :data:`_ADD_BUTTON_CSS_CLASS`.
+controls — so the round buttons are visible on the white panel without
+a named colour. Applied to the header's ``+`` add button *and* every
+card's remove button (alongside :data:`_ICON_BUTTON_SHAPE_CSS_CLASS`),
+so the two controls share one style defined in exactly one place.
 """
 
 
@@ -308,8 +314,8 @@ class AttachmentsPanel(Gtk.Box):  # pylint: disable=too-many-instance-attributes
 
         self._add_button = Gtk.Button.new_from_icon_name(_ADD_BUTTON_ICON_NAME)
         self._add_button.set_tooltip_text(_ADD_BUTTON_TOOLTIP)
-        self._add_button.add_css_class(_ADD_BUTTON_CSS_CLASS)
-        self._add_button.add_css_class(_ADD_BUTTON_FILL_CSS_CLASS)
+        self._add_button.add_css_class(_ICON_BUTTON_SHAPE_CSS_CLASS)
+        self._add_button.add_css_class(_ICON_BUTTON_FILL_CSS_CLASS)
         self._add_button.connect(
             "clicked",
             lambda _b: self._on_add_button_clicked(),
@@ -381,7 +387,8 @@ class AttachmentsPanel(Gtk.Box):  # pylint: disable=too-many-instance-attributes
             _REMOVE_BUTTON_ICON_NAME,
         )
         remove_button.set_tooltip_text(_REMOVE_BUTTON_TOOLTIP)
-        remove_button.add_css_class(_REMOVE_BUTTON_CSS_CLASS)
+        remove_button.add_css_class(_ICON_BUTTON_SHAPE_CSS_CLASS)
+        remove_button.add_css_class(_ICON_BUTTON_FILL_CSS_CLASS)
         remove_button.set_valign(Gtk.Align.CENTER)
         remove_button.connect(
             "clicked",
