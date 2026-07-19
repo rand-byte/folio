@@ -13,6 +13,8 @@ from __future__ import annotations
 
 import unittest
 from collections.abc import Callable
+from dataclasses import dataclass
+from enum import Enum, auto
 from pathlib import Path
 from unittest.mock import patch
 
@@ -64,7 +66,52 @@ class FileDialogOpenerTypeAliasTests(unittest.TestCase):
 # ---------------------------------------------------------------------------
 
 
-class _DialogProbe:  # pylint: disable=too-many-instance-attributes
+class _FinishKind(Enum):
+    """What a probe's asynchronous ``*_finish`` call should do when fired."""
+
+    RAISES = auto()  # raise GLib.Error (user cancel / backend error)
+    RETURNS_NONE = auto()  # return None (open_finish yielded no file)
+    RETURNS_FILE = auto()  # return a Gio.File-like whose get_path() is `path`
+
+
+@dataclass(frozen=True)
+class _FinishOutcome:
+    """One terminal outcome of a probe's asynchronous finish call.
+
+    A single value replacing the former three co-dependent fields. ``path``
+    is only meaningful for :attr:`_FinishKind.RETURNS_FILE`: a string models a
+    local pick, :data:`None` models a remote URI whose ``Gio.File.get_path()``
+    yields :data:`None`.
+    """
+
+    kind: _FinishKind
+    path: str | None = None
+
+
+class _StubFile:
+    """Minimal :class:`Gio.File` stand-in exposing only ``get_path()``."""
+
+    _path: str | None
+
+    def __init__(self, path: str | None) -> None:
+        self._path = path
+
+    def get_path(self) -> str | None:
+        return self._path
+
+
+def _resolve_finish(outcome: _FinishOutcome) -> object:
+    """Produce the value a ``*_finish`` call returns, or raise for the
+    cancellation branch — the shared body both probes delegate to.
+    """
+    if outcome.kind is _FinishKind.RAISES:
+        raise GLib.Error("user cancelled")
+    if outcome.kind is _FinishKind.RETURNS_NONE:
+        return None
+    return _StubFile(outcome.path)
+
+
+class _DialogProbe:
     """Minimal stand-in for :class:`Gtk.FileDialog`.
 
     Records the configuration the opener applies (title, modal,
@@ -82,9 +129,7 @@ class _DialogProbe:  # pylint: disable=too-many-instance-attributes
     set_filters_calls: list[object]
     open_calls: list[tuple[Gtk.Window | None, object, Callable[..., None]]]
     _last_callback: Callable[[object, object], None] | None
-    _finish_raises: bool
-    _finish_returns_path: str | None
-    _finish_returns_none: bool
+    _outcome: _FinishOutcome | None
 
     def __init__(self) -> None:
         self.title = None
@@ -93,9 +138,7 @@ class _DialogProbe:  # pylint: disable=too-many-instance-attributes
         self.set_filters_calls = []
         self.open_calls = []
         self._last_callback = None
-        self._finish_raises = False
-        self._finish_returns_path = None
-        self._finish_returns_none = False
+        self._outcome = None
 
     # --- methods Gtk.FileDialog exposes that the opener may call ---
 
@@ -125,45 +168,31 @@ class _DialogProbe:  # pylint: disable=too-many-instance-attributes
     def deliver_path(self, path: str) -> None:
         # Configure open_finish to return a Gio.File-like with this
         # path, then trigger the callback.
-        self._finish_returns_path = path
-        self._finish_returns_none = False
-        self._finish_raises = False
+        self._outcome = _FinishOutcome(_FinishKind.RETURNS_FILE, path)
         self._fire()
 
     def deliver_cancel_via_glib_error(self) -> None:
-        self._finish_raises = True
+        self._outcome = _FinishOutcome(_FinishKind.RAISES)
         self._fire()
 
     def deliver_non_local_uri(self) -> None:
         # Gio.File.get_path() returns None for remote URIs.
-        self._finish_returns_path = None
-        self._finish_returns_none = False
-        self._finish_raises = False
+        self._outcome = _FinishOutcome(_FinishKind.RETURNS_FILE, None)
         self._fire()
 
     def deliver_none_file(self) -> None:
-        self._finish_returns_none = True
-        self._finish_raises = False
+        self._outcome = _FinishOutcome(_FinishKind.RETURNS_NONE)
         self._fire()
 
     # --- glue ---
 
     def open_finish(self, _result: object) -> object:
-        # Called by the opener's _on_open_finished. Returns either
-        # the configured Gio.File-like or raises GLib.Error.
-        if self._finish_raises:
-            raise GLib.Error("user cancelled")
-        if self._finish_returns_none:
-            return None
-        # A tiny stub that exposes get_path() the way Gio.File does.
-
-        path_value = self._finish_returns_path
-
-        class _StubFile:
-            def get_path(self) -> str | None:
-                return path_value
-
-        return _StubFile()
+        # Called by the opener's _on_open_finished. Returns the
+        # configured Gio.File-like or raises GLib.Error.
+        outcome = self._outcome
+        if outcome is None:
+            raise AssertionError("a deliver_* helper must run before open_finish")
+        return _resolve_finish(outcome)
 
     def _fire(self) -> None:
         callback = self._last_callback
@@ -260,9 +289,7 @@ class _SaveDialogProbe:
     initial_name: str | None
     save_calls: list[tuple[Gtk.Window | None, object, Callable[..., None]]]
     _last_callback: Callable[[object, object], None] | None
-    _finish_raises: bool
-    _finish_returns_path: str | None
-    _finish_returns_none: bool
+    _outcome: _FinishOutcome | None
 
     def __init__(self) -> None:
         self.title = None
@@ -270,9 +297,7 @@ class _SaveDialogProbe:
         self.initial_name = None
         self.save_calls = []
         self._last_callback = None
-        self._finish_raises = False
-        self._finish_returns_path = None
-        self._finish_returns_none = False
+        self._outcome = None
 
     def set_title(self, title: str) -> None:
         self.title = title
@@ -293,39 +318,26 @@ class _SaveDialogProbe:
         self._last_callback = callback
 
     def deliver_path(self, path: str) -> None:
-        self._finish_returns_path = path
-        self._finish_returns_none = False
-        self._finish_raises = False
+        self._outcome = _FinishOutcome(_FinishKind.RETURNS_FILE, path)
         self._fire()
 
     def deliver_cancel_via_glib_error(self) -> None:
-        self._finish_raises = True
+        self._outcome = _FinishOutcome(_FinishKind.RAISES)
         self._fire()
 
     def deliver_non_local_uri(self) -> None:
-        self._finish_returns_path = None
-        self._finish_returns_none = False
-        self._finish_raises = False
+        self._outcome = _FinishOutcome(_FinishKind.RETURNS_FILE, None)
         self._fire()
 
     def deliver_none_file(self) -> None:
-        self._finish_returns_none = True
-        self._finish_raises = False
+        self._outcome = _FinishOutcome(_FinishKind.RETURNS_NONE)
         self._fire()
 
     def save_finish(self, _result: object) -> object:
-        if self._finish_raises:
-            raise GLib.Error("user cancelled")
-        if self._finish_returns_none:
-            return None
-
-        path_value = self._finish_returns_path
-
-        class _StubFile:
-            def get_path(self) -> str | None:
-                return path_value
-
-        return _StubFile()
+        outcome = self._outcome
+        if outcome is None:
+            raise AssertionError("a deliver_* helper must run before save_finish")
+        return _resolve_finish(outcome)
 
     def _fire(self) -> None:
         callback = self._last_callback
