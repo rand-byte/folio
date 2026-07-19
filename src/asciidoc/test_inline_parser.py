@@ -973,6 +973,11 @@ class LinkMacroPassthroughTests(unittest.TestCase):
 class AttachmentMacroTests(unittest.TestCase):
     """``attachment:FILE[label]`` — the inline save link."""
 
+    # False positive: astroid infers parse_inline() -> _parse_until()'s
+    # empty-list literal as length 0 and flags ``(node,) = parse_inline(...)``.
+    # The unpacking is a deliberate "exactly one node" assertion.
+    # pylint: disable=unbalanced-tuple-unpacking
+
     def test_macro_with_label_parses(self) -> None:
         (node,) = parse_inline("attachment:report.pdf[the report]", 1)
         self.assertEqual(

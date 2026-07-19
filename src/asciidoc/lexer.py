@@ -527,11 +527,10 @@ def tokenize(source: str) -> list[Token]:
     returned tokens are 1-indexed and match what the user sees in the
     editor's gutter.
     """
-    tokens: list[Token] = []
-    for line_index, raw_line in enumerate(source.splitlines()):
-        line_number = line_index + 1
-        tokens.append(_classify_line(raw_line, line_number))
-    return tokens
+    return [
+        _classify_line(raw_line, line_index + 1)
+        for line_index, raw_line in enumerate(source.splitlines())
+    ]
 
 
 def source_lines(source: str) -> list[str]:
