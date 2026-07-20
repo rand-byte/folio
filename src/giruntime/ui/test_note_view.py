@@ -12,7 +12,7 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from unittest import mock
 
-from gi.repository import Gdk, GLib, GObject, Gsk, Gtk
+from gi.repository import Gdk, GLib, GObject, Graphene, Gsk, Gtk
 
 from config.defaults import (
     ARTICLE_BOTTOM_MARGIN_LINES,
@@ -1958,6 +1958,77 @@ def _apply_tag_across_line(
     buffer.apply_tag_by_name(tag_name, start, end)
 
 
+def _all_wash_rects(
+    text_view: ArticleTextView,
+) -> list[tuple[Gdk.RGBA, Graphene.Rect]]:
+    """Wash rects for the whole buffer, bypassing the visible-span clip.
+
+    :meth:`ArticleTextView._compute_wash_rects` clips to the visible
+    line span, which needs a realised viewport; the per-line seam
+    :meth:`ArticleTextView._wash_rects_for_span` takes an explicit span,
+    so these tests probe per-line geometry and the mutual-exclusion
+    guard over the *whole* buffer without windowing or a live paint —
+    the same unwindowed, display-gated shape the wash tests always had.
+    The visible-span clip itself (off-screen lines dropped) is covered
+    by :class:`ArticleTextViewWashClipTests`.
+    """
+    buffer = text_view.get_buffer()
+    return text_view._wash_rects_for_span(
+        buffer, 0, buffer.get_line_count() - 1,
+    )
+
+
+def _teardown_window(window: Gtk.Window) -> None:
+    """Unparent the child and destroy ``window``, then let teardown settle.
+
+    Mirrors the teardown the windowed regression tests use: dropping the
+    child before ``destroy`` keeps GTK from warning about leftover children,
+    and a short real-loop settle lets the frame clock finish the unmap.
+    """
+    window.set_child(None)
+    window.destroy()
+    _settle_real_main_loop(timeout_ms=50)
+
+
+def _present_scrolled_for_wash(
+    test_case: unittest.TestCase,
+    text_view: ArticleTextView,
+    *,
+    width_px: int,
+    height_px: int,
+) -> None:
+    """Realise ``text_view`` inside a fixed-size :class:`Gtk.ScrolledWindow`.
+
+    The scroller constrains the viewport to ``height_px``, so a buffer
+    taller than that is only partly visible — which is what the clip
+    tests need in order to see off-screen lines dropped. The
+    view keeps ownership of the vertical adjustment (Option C, no
+    interposed viewport), so :func:`_scroll_wash_view_to` drives it
+    directly. Call after populating the buffer; teardown is registered
+    on ``test_case``.
+    """
+    window = Gtk.Window()
+    window.set_default_size(width_px, height_px)
+    scrolled = Gtk.ScrolledWindow()
+    scrolled.set_policy(Gtk.PolicyType.AUTOMATIC, Gtk.PolicyType.AUTOMATIC)
+    scrolled.set_child(text_view)
+    window.set_child(scrolled)
+    window.present()
+    _settle_real_main_loop()
+    test_case.addCleanup(_teardown_window, window)
+
+
+def _scroll_wash_view_to(text_view: ArticleTextView, value: float) -> None:
+    """Set the view's vertical scroll position and let a real loop settle.
+
+    The visible rect only reflects the new position after the frame
+    clock ticks, so this settles the real main loop (a pumped context
+    does not advance the clock — see :func:`_settle_real_main_loop`).
+    """
+    text_view.get_vadjustment().set_value(value)
+    _settle_real_main_loop(timeout_ms=200)
+
+
 @unittest.skipUnless(_display_available(), "no GDK display")
 class BuildArticleSurfaceTests(unittest.TestCase):
     """The shared article-surface constructor.
@@ -2066,7 +2137,7 @@ class ArticleTextViewWashRectTests(unittest.TestCase):
         # gets nothing painted behind it.
         text_view, buffer, _table = _build_article_text_view_with_buffer()
         buffer.set_text("just a plain paragraph with no tags\n")
-        self.assertEqual(text_view._compute_wash_rects(), [])
+        self.assertEqual(_all_wash_rects(text_view), [])
 
     def test_one_admonition_body_paragraph_produces_one_rect(self) -> None:
         text_view, buffer, _table = _build_article_text_view_with_buffer()
@@ -2074,7 +2145,7 @@ class ArticleTextViewWashRectTests(unittest.TestCase):
         _apply_tag_across_line(
             buffer, 0, admonition_body_tag_name(AdmonitionKind.NOTE).value,
         )
-        rects = text_view._compute_wash_rects()
+        rects = _all_wash_rects(text_view)
         self.assertEqual(len(rects), 1)
         # The colour must match the NOTE admonition's tint — the
         # painter uses the spec's tint verbatim.
@@ -2102,7 +2173,7 @@ class ArticleTextViewWashRectTests(unittest.TestCase):
             buffer, 0, admonition_body_tag_name(AdmonitionKind.NOTE).value,
         )
         _apply_tag_across_line(buffer, 1, TagName.BLOCKQUOTE_BODY.value)
-        rects = text_view._compute_wash_rects()
+        rects = _all_wash_rects(text_view)
         self.assertEqual(len(rects), 2)
         color_a, _rect_a = rects[0]
         color_b, _rect_b = rects[1]
@@ -2120,7 +2191,7 @@ class ArticleTextViewWashRectTests(unittest.TestCase):
         text_view, buffer, _table = _build_article_text_view_with_buffer()
         buffer.set_text("— Author, Source\n")
         _apply_tag_across_line(buffer, 0, TagName.BLOCKQUOTE_ATTRIBUTION.value)
-        self.assertEqual(text_view._compute_wash_rects(), [])
+        self.assertEqual(_all_wash_rects(text_view), [])
 
     def test_no_wash_specs_installed_produces_no_rects(self) -> None:
         # The default state of :class:`ArticleTextView` (before
@@ -2149,7 +2220,7 @@ class ArticleTextViewWashRectTests(unittest.TestCase):
         text_view, buffer, _table = _build_article_text_view_with_buffer()
         buffer.set_text("Created Apr 28, 2026  \u00b7  Modified Apr 28, 2026\n")
         _apply_tag_across_line(buffer, 0, TagName.METADATA.value)
-        rects = text_view._compute_wash_rects()
+        rects = _all_wash_rects(text_view)
         self.assertEqual(len(rects), 1)
         _color, rect = rects[0]
         self.assertEqual(rect.get_height(), float(_HAIRLINE_THICKNESS_PX))
@@ -2173,7 +2244,7 @@ class ArticleTextViewWashRectTests(unittest.TestCase):
         text_view, buffer, _table = _build_article_text_view_with_buffer()
         buffer.set_text("Ingredient\tGrams\n")
         _apply_tag_across_line(buffer, 0, TagName.TABLE_HEADER.value)
-        rects = text_view._compute_wash_rects()
+        rects = _all_wash_rects(text_view)
         self.assertEqual(len(rects), 1)
         color, rect = rects[0]
         self.assertEqual(
@@ -2194,7 +2265,7 @@ class ArticleTextViewWashRectTests(unittest.TestCase):
         buffer.set_text("Flour\t400\nSugar\t200\n")
         _apply_tag_across_line(buffer, 0, TagName.TABLE_ROW.value)
         _apply_tag_across_line(buffer, 1, TagName.TABLE_ROW.value)
-        rects = text_view._compute_wash_rects()
+        rects = _all_wash_rects(text_view)
         self.assertEqual(len(rects), 2)
         for line_no, (_color, rect) in enumerate(rects):
             with self.subTest(line=line_no):
@@ -2213,7 +2284,7 @@ class ArticleTextViewWashRectTests(unittest.TestCase):
         buffer.set_text("Ingredient\tGrams\nFlour\t400\n")
         _apply_tag_across_line(buffer, 0, TagName.TABLE_HEADER.value)
         _apply_tag_across_line(buffer, 1, TagName.TABLE_ROW.value)
-        rects = text_view._compute_wash_rects()
+        rects = _all_wash_rects(text_view)
         self.assertEqual(len(rects), 2)
         specs = build_wash_specs()
         header_color, _header_rect = rects[0]
@@ -2238,7 +2309,7 @@ class ArticleTextViewWashRectTests(unittest.TestCase):
         text_view, buffer, _table = _build_article_text_view_with_buffer()
         buffer.set_text("quoted body text\n")
         _apply_tag_across_line(buffer, 0, TagName.BLOCKQUOTE_BODY.value)
-        rects = text_view._compute_wash_rects()
+        rects = _all_wash_rects(text_view)
         self.assertEqual(len(rects), 1)
         spec = build_wash_specs()[TagName.BLOCKQUOTE_BODY]
         color, rect = rects[0]
@@ -2248,6 +2319,144 @@ class ArticleTextViewWashRectTests(unittest.TestCase):
         self.assertTrue(ok)
         _line_y_buffer, line_h = text_view.get_line_yrange(line_iter)
         self.assertEqual(rect.get_height(), float(line_h))
+
+
+@unittest.skipUnless(_display_available(), "no GDK display")
+class ArticleTextViewWashClipTests(unittest.TestCase):
+    """The wash walk is clipped to the visible line span (perf, §2.1).
+
+    :meth:`ArticleTextView._compute_wash_rects` runs on every frame, so
+    it must not walk the whole document: it iterates only the logical
+    lines intersecting the viewport. These tests constrain the viewport
+    with a :class:`Gtk.ScrolledWindow` shorter than the buffer and
+    assert that off-screen wash lines are excluded while on-screen ones
+    are painted — the behaviour that turns per-frame cost from
+    O(document) into O(viewport).
+
+    A tall buffer (`_CLIP_LINE_COUNT` short lines) rendered into a small
+    viewport keeps only a slice on screen. A note-admonition wash on the
+    first line and a blockquote wash on the last give the two ends
+    distinct tints, so a single rect's colour says which end produced
+    it.
+    """
+
+    # Comfortably taller than the viewport below, so top and bottom are
+    # never simultaneously visible.
+    _CLIP_LINE_COUNT = 80
+    _CLIP_VIEW_WIDTH_PX = 400
+    _CLIP_VIEW_HEIGHT_PX = 240
+
+    def _build_tall_two_ended_view(
+        self,
+    ) -> tuple[ArticleTextView, Gtk.TextBuffer]:
+        text_view, buffer, _table = _build_article_text_view_with_buffer()
+        buffer.set_text(
+            "".join(f"line {i}\n" for i in range(self._CLIP_LINE_COUNT)),
+        )
+        _apply_tag_across_line(
+            buffer, 0, admonition_body_tag_name(AdmonitionKind.NOTE).value,
+        )
+        _apply_tag_across_line(
+            buffer, self._CLIP_LINE_COUNT - 1, TagName.BLOCKQUOTE_BODY.value,
+        )
+        _present_scrolled_for_wash(
+            self, text_view,
+            width_px=self._CLIP_VIEW_WIDTH_PX,
+            height_px=self._CLIP_VIEW_HEIGHT_PX,
+        )
+        return text_view, buffer
+
+    def _admonition_tint(self) -> tuple[float, float, float, float]:
+        return _tuple_of(
+            _rgba_from_tint(
+                build_wash_specs()[
+                    admonition_body_tag_name(AdmonitionKind.NOTE)
+                ].tint
+            )
+        )
+
+    def _blockquote_tint(self) -> tuple[float, float, float, float]:
+        return _tuple_of(
+            _rgba_from_tint(build_wash_specs()[TagName.BLOCKQUOTE_BODY].tint)
+        )
+
+    def test_scrolled_to_top_paints_only_the_on_screen_wash(self) -> None:
+        # At the top the first-line admonition is visible and the
+        # last-line blockquote is far below the viewport: exactly one
+        # rect, carrying the admonition tint.
+        text_view, _buffer = self._build_tall_two_ended_view()
+        _scroll_wash_view_to(text_view, 0.0)
+        rects = text_view._compute_wash_rects()
+        self.assertEqual(len(rects), 1)
+        color, _rect = rects[0]
+        self.assertEqual(_tuple_of(color), self._admonition_tint())
+
+    def test_scrolled_to_bottom_paints_only_the_on_screen_wash(self) -> None:
+        # Scrolled to the end the last-line blockquote is visible and the
+        # first-line admonition is above the viewport: exactly one rect,
+        # carrying the blockquote tint. This is the exclusion the clip
+        # buys — before it, both ends painted every frame.
+        text_view, _buffer = self._build_tall_two_ended_view()
+        adjustment = text_view.get_vadjustment()
+        _scroll_wash_view_to(text_view, adjustment.get_upper())
+        rects = text_view._compute_wash_rects()
+        self.assertEqual(len(rects), 1)
+        color, _rect = rects[0]
+        self.assertEqual(_tuple_of(color), self._blockquote_tint())
+
+    def test_block_taller_than_viewport_paints_fewer_rects_than_its_lines(
+        self,
+    ) -> None:
+        # A single wash block taller than the viewport must not paint a
+        # rect per line of the whole block — only per visible line. This
+        # is the O(viewport) property stated directly: the rect count is
+        # bounded by the viewport, not the block length.
+        text_view, buffer, _table = _build_article_text_view_with_buffer()
+        buffer.set_text(
+            "".join(f"quote {i}\n" for i in range(self._CLIP_LINE_COUNT)),
+        )
+        for line_no in range(self._CLIP_LINE_COUNT):
+            _apply_tag_across_line(
+                buffer, line_no, TagName.BLOCKQUOTE_BODY.value,
+            )
+        _present_scrolled_for_wash(
+            self, text_view,
+            width_px=self._CLIP_VIEW_WIDTH_PX,
+            height_px=self._CLIP_VIEW_HEIGHT_PX,
+        )
+        _scroll_wash_view_to(text_view, 0.0)
+        rects = text_view._compute_wash_rects()
+        self.assertGreater(len(rects), 0)
+        self.assertLess(len(rects), self._CLIP_LINE_COUNT)
+
+    def test_partial_block_scrolled_from_top_still_paints(self) -> None:
+        # A wash block whose start has scrolled above the viewport still
+        # washes its visible lines: clipping by line number keeps the
+        # lines straddling/after the top edge, and each paints its own
+        # rect (the band fills down from the clipped top).
+        text_view, buffer, _table = _build_article_text_view_with_buffer()
+        buffer.set_text(
+            "".join(f"quote {i}\n" for i in range(self._CLIP_LINE_COUNT)),
+        )
+        for line_no in range(self._CLIP_LINE_COUNT):
+            _apply_tag_across_line(
+                buffer, line_no, TagName.BLOCKQUOTE_BODY.value,
+            )
+        _present_scrolled_for_wash(
+            self, text_view,
+            width_px=self._CLIP_VIEW_WIDTH_PX,
+            height_px=self._CLIP_VIEW_HEIGHT_PX,
+        )
+        adjustment = text_view.get_vadjustment()
+        _scroll_wash_view_to(text_view, adjustment.get_upper() / 2)
+        rects = text_view._compute_wash_rects()
+        self.assertGreater(len(rects), 0)
+        self.assertTrue(
+            all(
+                _tuple_of(color) == self._blockquote_tint()
+                for color, _rect in rects
+            )
+        )
 
 
 class SheetRectTests(unittest.TestCase):
@@ -2492,8 +2701,12 @@ class ArticleTextViewMutualExclusionTests(unittest.TestCase):
             buffer, 0, admonition_body_tag_name(AdmonitionKind.NOTE).value,
         )
         _apply_tag_across_line(buffer, 0, TagName.BLOCKQUOTE_BODY.value)
+        # Reach the guard through the per-line seam over the whole buffer:
+        # it does not need a realised viewport, and avoids driving an
+        # invalid-tag state through a live snapshot (which would surface
+        # the ValueError as a GTK paint-time traceback rather than here).
         with self.assertRaises(ValueError):
-            text_view._compute_wash_rects()
+            _all_wash_rects(text_view)
 
 
 def _buffer_text(buffer: Gtk.TextBuffer) -> str:

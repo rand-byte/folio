@@ -795,14 +795,26 @@ class ArticleTextView(Gtk.TextView):
     def _compute_wash_rects(
         self,
     ) -> list[tuple[Gdk.RGBA, Graphene.Rect]]:
-        """Return one ``(colour, rect)`` per wash-bearing logical line.
+        """Return one ``(colour, rect)`` per *visible* wash-bearing logical line.
 
-        Walks the buffer one logical line at a time. For every line
-        whose first iter carries a tag in :attr:`_wash_specs_by_tag`,
-        records a coloured rect that spans the full vertical extent
-        of the logical line (i.e. all of its visual wraps, returned
-        by :meth:`Gtk.TextView.get_line_yrange`) and is one M-width
-        wider than the text column on each side.
+        Walks only the logical lines intersecting the viewport (see
+        :meth:`_visible_line_span`), one at a time, rather than the
+        whole buffer: :meth:`do_snapshot` calls this every frame, so
+        the cost is bounded to what is on screen (O(viewport)) instead
+        of O(document). For every walked line whose first iter carries
+        a tag in :attr:`_wash_specs_by_tag`, records a coloured rect
+        that spans the full vertical extent of the logical line (i.e.
+        all of its visual wraps, returned by
+        :meth:`Gtk.TextView.get_line_yrange`) and is one M-width wider
+        than the text column on each side.
+
+        Clipping to the visible span is safe because each wash is a
+        per-logical-line rect: a paragraph that begins above the
+        viewport still qualifies on every line of it that is on screen
+        (its band fills down from the clipped top), and a multi-line
+        blockquote's :data:`WashShape.LEFT_BAR` rule stays continuous
+        because each visible line contributes its own bar. Lines off
+        screen were only ever clipped away by the snapshot anyway.
 
         Mutual exclusion: paragraph-level wash-bearing tags are
         mutually exclusive by parser construction — admonition label,
@@ -813,22 +825,71 @@ class ArticleTextView(Gtk.TextView):
         rather than silently picking one, so a future code path that
         violates the invariant fails loudly.
         """
-        rects: list[tuple[Gdk.RGBA, Graphene.Rect]] = []
         if not self._wash_specs_by_tag:
-            return rects
+            return []
         buffer = self.get_buffer()
+        span = self._visible_line_span(buffer)
+        if span is None:
+            return []
+        first_line, last_line = span
+        return self._wash_rects_for_span(buffer, first_line, last_line)
+
+    def _wash_rects_for_span(
+        self, buffer: Gtk.TextBuffer, first_line: int, last_line: int,
+    ) -> list[tuple[Gdk.RGBA, Graphene.Rect]]:
+        """Collect wash rects for the inclusive ``[first_line, last_line]`` span.
+
+        The per-line seam, split from :meth:`_compute_wash_rects` so the
+        per-line geometry and the mutual-exclusion guard can be exercised
+        over an explicit span without a realised viewport (the caller
+        supplies the visible span from :meth:`_visible_line_span`, which
+        *does* need one). Walks the span one logical line at a time and
+        records one rect per wash-bearing line — see
+        :meth:`_wash_rect_for_line` for the per-line shape and
+        :meth:`_spec_at_iter` for the mutual-exclusion :class:`ValueError`.
+        """
+        rects: list[tuple[Gdk.RGBA, Graphene.Rect]] = []
         metrics = _WidgetXMetrics(
             width=self.get_width(),
             left_margin=self.get_left_margin(),
             right_margin=self.get_right_margin(),
         )
-        for line_no in range(buffer.get_line_count()):
+        for line_no in range(first_line, last_line + 1):
             rect_with_color = self._wash_rect_for_line(
                 buffer, line_no, metrics,
             )
             if rect_with_color is not None:
                 rects.append(rect_with_color)
         return rects
+
+    def _visible_line_span(
+        self, buffer: Gtk.TextBuffer,
+    ) -> tuple[int, int] | None:
+        """Return the inclusive ``(first, last)`` logical-line span on screen.
+
+        Derives the span from the view's own viewport:
+        :meth:`Gtk.TextView.get_visible_rect` gives the visible region
+        in buffer coordinates, and :meth:`Gtk.TextView.get_line_at_y`
+        maps its top and bottom edges to the enclosing logical lines.
+        Both bounds are inclusive — a line straddling either edge is
+        partly visible and must be painted — so the caller iterates
+        ``range(first, last + 1)``.
+
+        Returns ``None`` (nothing to paint this frame) when the buffer
+        is empty, or when the view has no positive-height viewport yet.
+        The latter is the pre-allocation state: before the widget is
+        sized, ``get_visible_rect`` reports a zero-height rect and
+        ``get_line_at_y`` cannot resolve a meaningful line, so there is
+        genuinely nothing on screen to wash.
+        """
+        if buffer.get_char_count() == 0:
+            return None
+        visible = self.get_visible_rect()
+        if visible.height <= 0:
+            return None
+        top_iter, _ = self.get_line_at_y(visible.y)
+        bottom_iter, _ = self.get_line_at_y(visible.y + visible.height)
+        return top_iter.get_line(), bottom_iter.get_line()
 
     def _wash_rect_for_line(
         self,
