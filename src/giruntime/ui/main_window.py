@@ -33,6 +33,14 @@ Principles & invariants
   EDIT→VIEW direction — keeps the dispatch branch-free without paying
   any extra cost on the no-op path.
 
+  The same flush is exposed as :meth:`flush_editor` for the
+  application-shutdown path: window close ends the process, so a save
+  still inside the editor's debounce window would be lost without it.
+  :class:`giruntime.ui.application.NotesApplication` calls it from its
+  ``close-request`` handler before quitting. The window keeps the flush
+  behind a named method rather than reaching into the editor from the
+  application, so the editor stays the window's private child.
+
   There is no longer a ``NoteController::notes-changed`` fan-out: the
   note list, the rendered view, and the sidebar all update by observing
   the store's ``items-changed`` (directly or through the derived
@@ -472,3 +480,21 @@ class MainWindow(  # pylint: disable=too-many-instance-attributes
         self._right_pane_stack.set_visible_child_name(
             _stack_name_for_mode(self._app_state.view_mode),
         )
+
+    def flush_editor(self) -> None:
+        """Force any pending debounced autosave to disk immediately.
+
+        Exposed for the application-shutdown path. Closing the window
+        ends the process, so a save still sitting in the editor's
+        :data:`giruntime.ui.note_editor.AUTOSAVE_DEBOUNCE_MS` window (the
+        last-typed keystrokes) would otherwise be lost.
+        :class:`giruntime.ui.application.NotesApplication` calls this from
+        its ``close-request`` handler before quitting.
+
+        Idempotent — a no-op when no save is pending — so it is safe to
+        call unconditionally, exactly like the flush already performed on
+        every view-mode change. Keeping it a named method on the window
+        (rather than having the application reach into the editor) keeps
+        :attr:`_note_editor` a private child of this window.
+        """
+        self._note_editor.flush_pending_save()

@@ -50,6 +50,12 @@ resource: $(GRES)
 #      GTK opens no display and every UI test silently SKIPS.
 #   3. The socket is not created instantly, so we wait for it before launching
 #      python, and we kill Weston on exit so it does not leak.
+#   4. GSK_RENDERER=cairo forces the software renderer. The UI tests present
+#      real toplevels; the cairo renderer never touches GL/Vulkan/EGL, so it
+#      cannot segfault inside a missing/broken GPU driver. This is mandatory,
+#      not cosmetic (see src/README.md section 5 and dev-environment.md) --
+#      the suite may pass on a host with no GPU stack, but on one with a
+#      half-working driver the crash it guards against is live.
 #
 # Make runs each recipe line in its own shell, so the whole thing is one
 # logical line joined with `\`.
@@ -74,7 +80,7 @@ test: $(GRES)
 			[ -S "$$XDG_RUNTIME_DIR/test_notes" ] && break; \
 			sleep 0.1; \
 		done; \
-		WAYLAND_DISPLAY=test_notes GDK_BACKEND=wayland \
+		WAYLAND_DISPLAY=test_notes GDK_BACKEND=wayland GSK_RENDERER=cairo \
 			python3 -B -m unittest discover -s src -t src -f
 
 type:

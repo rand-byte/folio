@@ -756,6 +756,97 @@ class MainWindowViewModeChangeFlushAndRefreshTests(unittest.TestCase):
 
 
 @unittest.skipUnless(_display_available(), "no GDK display")
+class MainWindowFlushEditorTests(unittest.TestCase):
+    """`MainWindow.flush_editor` forces a pending debounced autosave to
+    the store.
+
+    This is the seam :class:`NotesApplication`'s ``close-request``
+    handler calls before quitting: window close ends the process, so a
+    save still inside the editor's 300 ms debounce window would be lost.
+    The tests pin the end-to-end path type-into-editor → ``flush_editor``
+    → store row updated — exactly the "typed → closed within the debounce
+    window → row updated" case that previously survived unnoticed because
+    nothing exercised the close path end to end.
+    """
+
+    def _build_window_with_note(
+        self,
+        *,
+        note_id: str = "n1",
+        source: str = "= Hello\n\nbody.\n",
+    ) -> tuple[MainWindow, NoteListStore]:
+        """Build a window in EDIT mode already pointing at one note.
+
+        Mirrors the view-mode class's builder: seed the repository and
+        move :class:`AppState` to the note *before* constructing the
+        window, so the editor's constructor-time load picks it up. The
+        store is returned so tests can assert the write-through row
+        without reaching into private editor state.
+        """
+        application = _test_application()
+        notes = _FakeNoteRepository()
+        notes.notes[note_id] = Note(
+            id=note_id,
+            title="Hello",
+            source=source,
+            snippet="body.",
+            tags=(),
+            created_at=_FIXED_NOW,
+            modified_at=_FIXED_NOW,
+        )
+        state = AppState(initial_view_mode=ViewMode.EDIT)
+        state.set_selected_note_id(note_id)
+        store = NoteListStore(repository=notes)
+        store.load()
+        controller = NoteController(
+            note_store=store,
+            attachments=_FakeAttachmentStore(),
+            app_state=state,
+        )
+        window = MainWindow(
+            application=application,
+            note_store=store,
+            note_controller=controller,
+            app_state=state,
+        )
+        return window, store
+
+    def test_flush_editor_writes_pending_save_to_store(self) -> None:
+        """Typing then flushing (no mode change, no timer) updates the row.
+
+        No GLib loop runs during the test, so the debounced 300 ms save
+        never fires on its own; the store update can therefore only come
+        from the synchronous flush. This is the close-path guarantee —
+        keystrokes typed within the debounce window survive the close.
+        """
+        window, store = self._build_window_with_note(source="= Hello\n")
+        # Nothing saved yet: the store still holds the seeded source.
+        self.assertEqual(store.get_note("n1").source, "= Hello\n")
+
+        # Simulate the user typing — a programmatic insert produces the
+        # same ``changed`` signal that arms the debounced autosave.
+        editor_buffer = window._note_editor._buffer
+        editor_buffer.insert(editor_buffer.get_end_iter(), "MORE")
+
+        window.flush_editor()
+
+        self.assertEqual(store.get_note("n1").source, "= Hello\nMORE")
+
+    def test_flush_editor_is_a_noop_when_nothing_pending(self) -> None:
+        """A flush with no armed save must not write to the store.
+
+        ``flush_editor`` is called unconditionally on close, so it has to
+        be safe when the user typed nothing since the last save. The
+        seeded row must be left exactly as it was.
+        """
+        window, store = self._build_window_with_note(source="= Hello\n")
+
+        window.flush_editor()
+
+        self.assertEqual(store.get_note("n1").source, "= Hello\n")
+
+
+@unittest.skipUnless(_display_available(), "no GDK display")
 class MainWindowStorePropagationTests(unittest.TestCase):
     """A store mutation propagates to the data-driven panes.
 

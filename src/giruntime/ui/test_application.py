@@ -21,6 +21,7 @@ duck-typed fake (:class:`_FakeMainWindow`) rather than a real
 from __future__ import annotations
 
 import unittest
+from collections.abc import Callable
 from datetime import UTC, datetime
 from pathlib import Path
 from tempfile import TemporaryDirectory
@@ -112,23 +113,42 @@ class _FakeNoteRepository:
 class _FakeMainWindow:
     """Duck-typed stand-in for :class:`MainWindow`.
 
-    ``_save_session_state`` only ever calls
-    :meth:`Gtk.Window.get_default_size` and
-    :meth:`Gtk.Window.is_maximized` on the window it is given — this
-    fixture supplies exactly those two, with no GTK dependency, so the
-    save path is testable without a display.
+    ``_save_session_state`` calls :meth:`Gtk.Window.get_default_size`
+    and :meth:`Gtk.Window.is_maximized`; ``_on_main_window_close_request``
+    additionally calls :meth:`MainWindow.flush_editor`. This fixture
+    supplies exactly those three, with no GTK dependency, so both the
+    session-save and the close-flush paths are testable without a
+    display. The optional ``on_flush`` hook lets a test observe the flush
+    (and its ordering relative to ``quit``); it defaults to a no-op so the
+    geometry-only tests need not supply it.
     """
 
-    def __init__(self, *, width: int, height: int, maximized: bool) -> None:
+    _width: int
+    _height: int
+    _maximized: bool
+    _on_flush: Callable[[], None]
+
+    def __init__(
+        self,
+        *,
+        width: int,
+        height: int,
+        maximized: bool,
+        on_flush: Callable[[], None] = lambda: None,
+    ) -> None:
         self._width = width
         self._height = height
         self._maximized = maximized
+        self._on_flush = on_flush
 
     def get_default_size(self) -> tuple[int, int]:
         return (self._width, self._height)
 
     def is_maximized(self) -> bool:
         return self._maximized
+
+    def flush_editor(self) -> None:
+        self._on_flush()
 
 
 def _store_from(notes: dict[str, Note]) -> NoteListStore:
@@ -200,6 +220,30 @@ class MainWindowCloseRequestTests(unittest.TestCase):
             proceed = application._on_main_window_close_request(window)
 
         self.assertFalse(proceed)
+
+    def test_close_request_flushes_editor_before_quitting(self) -> None:
+        """The handler flushes the editor's pending autosave, before quit.
+
+        The editor debounces saves, so a save may still be pending when
+        the window closes; without a flush those just-typed edits are
+        lost. ``quit`` tears the window (and its editor) down, so the
+        flush must run first — the recorded order pins both facts.
+        """
+        application, _store = _application_with_temp_session_store(self)
+        events: list[str] = []
+        window = _FakeMainWindow(
+            width=1000,
+            height=700,
+            maximized=False,
+            on_flush=lambda: events.append("flush"),
+        )
+
+        with patch.object(
+            application, "quit", side_effect=lambda: events.append("quit")
+        ):
+            application._on_main_window_close_request(window)
+
+        self.assertEqual(events, ["flush", "quit"])
 
     def test_close_request_saves_session_state_before_quitting(self) -> None:
         application, store = _application_with_temp_session_store(self)

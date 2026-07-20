@@ -261,7 +261,7 @@ controller's narrow per-note `attachments-changed` signal instead.
 The only layer that owns widget trees. Every widget is thin and unit-testable
 with fake controllers/repositories.
 
-- **`application.py`** — `NotesApplication(Gtk.Application)`: composes the storage/controller stack, presents `MainWindow`, loads/saves `SessionState`, selects the initial note, registers the `help` action (`F1`) and the bundled application icon. App lifetime is bound to the main window.
+- **`application.py`** — `NotesApplication(Gtk.Application)`: composes the storage/controller stack, presents `MainWindow`, loads/saves `SessionState`, selects the initial note, registers the `help` action (`F1`) and the bundled application icon. App lifetime is bound to the main window; its `close-request` handler flushes the editor's pending autosave (`MainWindow.flush_editor`) before quitting, so keystrokes still inside the debounce window are not lost on close.
 - **`help_window.py`** — `HelpWindow`, the standalone non-modal help reference. Builds its reading pane from the shared `note_view.build_article_surface()` so help renders identically to a note. Hide-on-close (one cached instance).
 - **`main_window.py`** — the three-pane shell (sidebar │ note list │ `Gtk.Stack(view ↔ editor)`). Takes an optional `restored_state`. Owns a **single** subscription, `AppState:notify::view-mode`.
 - **`sidebar.py`** — flat library navigation: a **Library** section (`All notes` / `Untagged`) and a model-driven **Tags** section (multi-select, AND semantics). Selection rules owned by `AppState`; counts update live off the store.

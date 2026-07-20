@@ -102,6 +102,13 @@ Principles & invariants
   (see :meth:`_on_main_window_close_request`), which also tears down the
   hidden help window. This is sound precisely because of the single-window
   assumption above: there is only ever one primary window to key off.
+* The main window's ``close-request`` also flushes the editor's pending
+  autosave (:meth:`MainWindow.flush_editor`) before quitting. The editor
+  debounces saves, so without this the keystrokes typed in the final
+  debounce window are lost when the window closes. Close is the one
+  boundary with the same "buffer about to disappear" property as a
+  selection or view-mode change — both of which already flush — so it
+  flushes too.
 """
 
 from __future__ import annotations
@@ -191,6 +198,26 @@ class _WindowGeometryProtocol(Protocol):
     def get_default_size(self) -> tuple[int, int]: ...
 
     def is_maximized(self) -> bool: ...
+
+
+class _MainWindowProtocol(_WindowGeometryProtocol, Protocol):
+    """The main-window surface
+    :meth:`NotesApplication._on_main_window_close_request` needs.
+
+    The close handler needs the two geometry getters
+    :meth:`NotesApplication._save_session_state` reads *plus*
+    :meth:`MainWindow.flush_editor`, which forces the editor's pending
+    debounced autosave to disk before the process exits (otherwise the
+    last-typed keystrokes are lost on close). Naming it as a superset of
+    :class:`_WindowGeometryProtocol` keeps ``_save_session_state``'s
+    parameter at the narrower geometry-only surface (a
+    ``_MainWindowProtocol`` is substitutable for it) per the project's
+    "minimum necessary type" rule, while letting the handler pass the
+    same window on to both. Real :class:`MainWindow` satisfies it
+    structurally; tests substitute a display-free fake.
+    """
+
+    def flush_editor(self) -> None: ...
 
 
 class NotesApplication(  # pylint: disable=too-many-instance-attributes
@@ -366,7 +393,7 @@ class NotesApplication(  # pylint: disable=too-many-instance-attributes
 
     def _on_main_window_close_request(
         self,
-        window: _WindowGeometryProtocol,
+        window: _MainWindowProtocol,
     ) -> bool:
         """Save session state, then quit the application.
 
@@ -394,10 +421,22 @@ class NotesApplication(  # pylint: disable=too-many-instance-attributes
         the process exits, so there is nothing later to capture and
         nothing earlier that would need re-saving.
 
+        The editor flush happens for the same reason the save does — this
+        is the last moment before the process ends. The editor debounces
+        autosaves, so keystrokes typed within the last debounce window
+        (or any queued save) are still pending when the user closes the
+        window; :meth:`MainWindow.flush_editor` forces them to disk under
+        the current note id. Without it those edits are silently lost.
+        It is ordered before :meth:`quit`, which tears the window (and
+        its editor) down; it is idempotent, and independent of the
+        session-state save (they write different stores), so their
+        relative order does not matter.
+
         Returns ``False`` so GTK's default handler still runs and
         destroys the window — the veto path (returning ``True``) is never
         wanted here.
         """
+        window.flush_editor()
         self._save_session_state(window)
         self.quit()
         return False
