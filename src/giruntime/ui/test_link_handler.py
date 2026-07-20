@@ -17,6 +17,7 @@ from giruntime.ui.note_render.textbuffer_renderer import (
 )
 from giruntime.ui.link_handler import (
     LinkHandler,
+    TagTargetResolverProtocol,
     UriLauncherProtocol,
     default_launcher_factory,
 )
@@ -91,7 +92,7 @@ class _RecordingLauncherFactory:
         return launcher
 
 
-class _FakeRenderer:
+class _FakeRenderer(TagTargetResolverProtocol):
     """Minimal stand-in for :class:`TextBufferRenderer`.
 
     The link handler only ever calls
@@ -139,7 +140,7 @@ def _make_handler(
     text_view = Gtk.TextView.new()
     handler = LinkHandler(
         text_view=text_view,
-        renderer=fake_renderer,  # type: ignore[arg-type]
+        renderer=fake_renderer,
         launcher_factory=factory,
         attachment_activator=_RecordingActivator(),
     )
@@ -764,7 +765,7 @@ def _make_attachment_handler() -> tuple[
     text_view = Gtk.TextView.new()
     handler = LinkHandler(
         text_view=text_view,
-        renderer=fake_renderer,  # type: ignore[arg-type]
+        renderer=fake_renderer,
         launcher_factory=factory,
         attachment_activator=activator,
     )

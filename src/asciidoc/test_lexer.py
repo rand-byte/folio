@@ -28,11 +28,18 @@ from asciidoc.lexer import (
     QuoteFenceToken,
     SingleAdmonitionToken,
     TableFenceToken,
-    Token,
     source_lines,
     tokenize,
 )
 from enums import AdmonitionKind, TokenKind
+
+# The list-marker token union, named once and reused below both as a type
+# (``type[_ListToken]`` in the ``cases`` annotations) and as a runtime value
+# (``isinstance(token, _ListToken)`` in the narrowing guards). It is a plain
+# assignment, *not* a PEP 695 ``type _ListToken = ...`` alias: a ``type``
+# statement produces a ``TypeAliasType`` that ``isinstance`` rejects at runtime,
+# whereas ``A | B`` is a ``types.UnionType`` that ``isinstance`` accepts.
+_ListToken = ListBulletToken | ListNumberToken
 
 
 # ---------------------------------------------------------------------------
@@ -105,7 +112,7 @@ class ListTokenizationTests(unittest.TestCase):
 
     def test_table(self) -> None:
         # (description, source, expected_token_class, expected_text)
-        cases: tuple[tuple[str, str, type[Token], str], ...] = (
+        cases: tuple[tuple[str, str, type[_ListToken], str], ...] = (
             ("unordered with text", "* item one", ListBulletToken, "item one"),
             (
                 "unordered with inline markup",
@@ -132,8 +139,10 @@ class ListTokenizationTests(unittest.TestCase):
                 tokens = tokenize(source)
                 self.assertEqual(len(tokens), 1)
                 token = tokens[0]
+                if not isinstance(token, _ListToken):
+                    self.fail(f"expected a list token, got {type(token).__name__}")
                 self.assertIsInstance(token, token_class)
-                self.assertEqual(token.text, expected_text)  # type: ignore[union-attr]
+                self.assertEqual(token.text, expected_text)
 
     def test_no_space_after_marker_is_not_a_bullet(self) -> None:
         # ``*foo`` is bold-without-close, ``.foo`` is text starting
@@ -148,7 +157,7 @@ class ListTokenizationTests(unittest.TestCase):
         # The count of repeated marker characters is the nesting depth;
         # the run plus its single separating space is stripped from
         # ``text``.
-        cases: tuple[tuple[str, type[Token], int, str], ...] = (
+        cases: tuple[tuple[str, type[_ListToken], int, str], ...] = (
             ("* a", ListBulletToken, 1, "a"),
             ("** b", ListBulletToken, 2, "b"),
             ("*** c", ListBulletToken, 3, "c"),
@@ -161,9 +170,11 @@ class ListTokenizationTests(unittest.TestCase):
                 tokens = tokenize(source)
                 self.assertEqual(len(tokens), 1)
                 token = tokens[0]
+                if not isinstance(token, _ListToken):
+                    self.fail(f"expected a list token, got {type(token).__name__}")
                 self.assertIsInstance(token, token_class)
-                self.assertEqual(token.depth, depth)  # type: ignore[union-attr]
-                self.assertEqual(token.text, text)  # type: ignore[union-attr]
+                self.assertEqual(token.depth, depth)
+                self.assertEqual(token.text, text)
 
     def test_deeper_run_than_the_cap_still_lexes(self) -> None:
         # The lexer is depth-policy-free: a depth-4 run is a perfectly
@@ -175,8 +186,10 @@ class ListTokenizationTests(unittest.TestCase):
         ):
             with self.subTest(source=source):
                 token = tokenize(source)[0]
+                if not isinstance(token, _ListToken):
+                    self.fail(f"expected a list token, got {type(token).__name__}")
                 self.assertIsInstance(token, token_class)
-                self.assertEqual(token.depth, depth)  # type: ignore[union-attr]
+                self.assertEqual(token.depth, depth)
 
     def test_run_with_no_following_space_is_not_a_bullet(self) -> None:
         # A bare marker run with no separating whitespace (``**``,

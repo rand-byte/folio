@@ -79,7 +79,6 @@ from gi.repository import Gdk, Gio, Gtk
 from giruntime.ui.note_render.textbuffer_renderer import (
     ActivationTarget,
     AttachmentTarget,
-    TextBufferRenderer,
     UrlTarget,
 )
 
@@ -161,6 +160,30 @@ def default_launcher_factory(url: str) -> UriLauncherProtocol:
     return launcher
 
 
+class TagTargetResolverProtocol(Protocol):
+    """The renderer surface :class:`LinkHandler` consumes.
+
+    :class:`LinkHandler` only ever asks the renderer to resolve the tags
+    at a click position to an :data:`ActivationTarget`; declaring just
+    that method as a :class:`typing.Protocol` (mirroring
+    :class:`UriLauncherProtocol`) keeps the handler decoupled from the
+    concrete :class:`~giruntime.ui.note_render.textbuffer_renderer.TextBufferRenderer`,
+    which satisfies this surface without an adapter, and lets test fakes
+    stand in structurally.
+
+    This is a deliberately narrower, distinct surface from
+    :class:`storage.protocols.RendererProtocol` (which describes
+    ``render_into``): a consumer depends only on the calls it actually
+    makes, so the two renderer surfaces are kept separate.
+    """
+
+    def target_for_tags(
+        self,
+        tags: list[Gtk.TextTag],
+    ) -> ActivationTarget | None:
+        """Return the activation target for ``tags``, or ``None``."""
+
+
 class LinkHandler:
     """Wires a :class:`Gtk.TextView`'s link tags to cursor + launcher.
 
@@ -175,10 +198,12 @@ class LinkHandler:
     * ``text_view`` — the read-only :class:`Gtk.TextView` whose buffer
       the controller targets. The handler reads its iter-at-location
       and writes its cursor.
-    * ``renderer`` — the :class:`TextBufferRenderer` whose
-      :meth:`target_for_tags` is consulted to resolve a click position
-      to an :data:`ActivationTarget`. The handler does *not* render; it
-      only reads tags.
+    * ``renderer`` — any :class:`TagTargetResolverProtocol` (in
+      production the concrete
+      :class:`~giruntime.ui.note_render.textbuffer_renderer.TextBufferRenderer`)
+      whose :meth:`target_for_tags` is consulted to resolve a click
+      position to an :data:`ActivationTarget`. The handler does *not*
+      render; it only reads tags.
     * ``launcher_factory`` — the :data:`UriLauncherFactory` that
       builds a launcher for a URL. Production passes
       :func:`default_launcher_factory`; tests pass a recording fake.
@@ -188,7 +213,7 @@ class LinkHandler:
     """
 
     _text_view: Gtk.TextView
-    _renderer: TextBufferRenderer
+    _renderer: TagTargetResolverProtocol
     _launcher_factory: UriLauncherFactory
     _attachment_activator: AttachmentActivator
     _link_cursor: Gdk.Cursor
@@ -199,7 +224,7 @@ class LinkHandler:
         self,
         *,
         text_view: Gtk.TextView,
-        renderer: TextBufferRenderer,
+        renderer: TagTargetResolverProtocol,
         launcher_factory: UriLauncherFactory,
         attachment_activator: AttachmentActivator,
     ) -> None:
