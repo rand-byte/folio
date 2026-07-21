@@ -10,6 +10,21 @@ Principles & invariants
   :class:`AttachmentStoreProtocol`. It re-renders on
   ``notify::selected-note-id`` and on a store ``items-changed`` that
   touches the displayed note (an edit replaces that note's row).
+* **The ``items-changed`` re-render is deferred while the pane is not
+  visible.** In EDIT mode the pane is the hidden child of the right-pane
+  ``Gtk.Stack``, yet the editor's debounced autosave splices a fresh row
+  every ~300 ms of typing; rendering there would re-parse and rebuild a
+  buffer nobody is looking at (and re-decode its images) on every pause.
+  Instead, when the injected :data:`PaneVisibilityPredicate` reports the
+  pane hidden, ``items-changed`` sets :attr:`_render_pending` rather than
+  rendering, and the pane renders exactly once on becoming visible again
+  (its ``map`` handler, plus the unconditional :meth:`refresh` the
+  view-mode toggle already performs). The *selection-change* re-render is
+  **not** gated — switching notes is a one-shot event, not a per-keystroke
+  storm — so the pane always shows the selected note the instant it is
+  shown. :meth:`refresh` stays the unconditional "render now" primitive
+  and clears :attr:`_render_pending`, so no combination leaves an owed
+  render outstanding after a render has happened.
 * **Clicks in the read pane run through one :class:`LinkHandler`.** The
   renderer tags every clickable range with a closed
   :data:`~giruntime.ui.note_render.textbuffer_renderer.ActivationTarget`;
@@ -292,6 +307,21 @@ fixed integer; production wires a Pango-layout-based measurer that lays
 out a single glyph and returns ``log_rect.height``. The result is
 cached after the first call alongside the M-width measurement — see
 :meth:`ArticleContainer.line_height_px`.
+"""
+
+
+type PaneVisibilityPredicate = Callable[[], bool]
+"""Callable answering "is the read pane currently on screen?".
+
+Injected at construction of :class:`NoteView` (same dependency-injection
+seam as :data:`CharWidthMeasurer` and the renderer's resolvers) so the
+pane can gate its store-driven re-render on visibility without knowing it
+lives in a :class:`Gtk.Stack`. Production defaults it to the pane's own
+:meth:`Gtk.Widget.get_mapped` — a widget is *mapped* only when it is the
+stack's shown child *and* its window is on screen, which is exactly the
+"nobody is looking" test the deferral needs. Tests pass a synchronous
+fake reporting visible / hidden deterministically, since a directly
+constructed widget is never mapped.
 """
 
 
@@ -1736,10 +1766,12 @@ class NoteView(Gtk.Box):
     seven because step 11 introduced two fields
     (:attr:`_attachments`, :attr:`_current_note_id`) on top of the
     five already required to wire the renderer + selection plumbing,
-    and the parse-error notice adds :attr:`_error_message` (the message
-    currently shown in the surface, or ``None``).
-    Splitting these into a helper class would obscure the obvious
-    "the view holds the things it needs to render" relationship.
+    the parse-error notice adds :attr:`_error_message` (the message
+    currently shown in the surface, or ``None``), and the hidden-pane
+    render deferral adds :attr:`_pane_is_visible` (the injected
+    visibility predicate) and :attr:`_render_pending` (whether a render
+    is owed). Splitting these into a helper class would obscure the
+    obvious "the view holds the things it needs to render" relationship.
     """
 
     # Only fields used outside ``__init__`` are stored on ``self``.
@@ -1770,6 +1802,16 @@ class NoteView(Gtk.Box):
     _current_note: Note | None
     _error_message: str | None
     _outer_column_width_px: int
+    # "Is the pane on screen?" — injected so the store-driven re-render
+    # can be skipped while the pane is the hidden stack child, and so the
+    # deferral is testable without a real mapped window. Defaults to this
+    # widget's ``get_mapped``; see :data:`PaneVisibilityPredicate`.
+    _pane_is_visible: PaneVisibilityPredicate
+    # Set true when a store ``items-changed`` arrived while the pane was
+    # hidden, meaning a render is owed. Consulted (and cleared) on the
+    # next map; also cleared whenever :meth:`refresh` renders, so a
+    # visible render never leaves a stale "owed" flag behind.
+    _render_pending: bool
 
     def __init__(  # pylint: disable=too-many-arguments
         self,
@@ -1782,10 +1824,25 @@ class NoteView(Gtk.Box):
             default_file_save_dialog_opener
         ),
         launcher_factory: UriLauncherFactory = default_launcher_factory,
+        pane_is_visible: PaneVisibilityPredicate | None = None,
     ) -> None:
         super().__init__(orientation=Gtk.Orientation.VERTICAL, spacing=0)
         self._note_store = note_store
         self._attachments = attachments
+        # The visibility predicate defaults to this widget's own
+        # ``get_mapped``. It cannot be a module-level default value
+        # because it is a bound method that only exists once ``self``
+        # does, so the ``None`` sentinel selects the production default
+        # here — the established pattern for "the default is a bound
+        # method of the instance". Tests inject a fake; see
+        # :data:`PaneVisibilityPredicate`.
+        self._pane_is_visible = (
+            pane_is_visible if pane_is_visible is not None else self.get_mapped
+        )
+        # No render is owed until a hidden-pane ``items-changed`` records
+        # one. The initial ``refresh`` below renders unconditionally and
+        # leaves this false.
+        self._render_pending = False
         # The controller performs the export (storage owns the file I/O);
         # the opener asks the user where to put it. Both are ``None`` /
         # defaulted on the same contract as ``attachments``: a view built
@@ -1888,7 +1945,7 @@ class NoteView(Gtk.Box):
         self.refresh()
 
     def _subscribe_to_state_and_store(self) -> None:
-        """Wire the two re-render triggers: selection and store edits."""
+        """Wire the re-render triggers: selection, store edits, and map."""
         self._app_state.connect(
             "notify::selected-note-id",
             self._on_selected_note_changed,
@@ -1901,6 +1958,14 @@ class NoteView(Gtk.Box):
             "items-changed",
             self._on_store_items_changed,
         )
+        # When the pane becomes visible again (the stack reveals it),
+        # perform any render deferred while it was hidden. The common
+        # EDIT->VIEW toggle also drives an unconditional
+        # :meth:`refresh` from ``MainWindow``, so this handler is the
+        # self-contained belt-and-braces path for any other reveal — and
+        # it renders only when one is actually owed, so it never
+        # double-renders on top of that toggle's refresh.
+        self.connect("map", self._on_mapped)
 
     # ------------------------------------------------------------------
     # Public API
@@ -1947,7 +2012,17 @@ class NoteView(Gtk.Box):
         The surface and :attr:`_error_message` are kept in lockstep —
         there is no combination "stale buffer + cleared flag" or
         "notice in buffer + ``None`` flag" produced by this method.
+
+        This is the unconditional "render now" primitive: it always
+        renders regardless of pane visibility and clears
+        :attr:`_render_pending`, so any render deferred while the pane
+        was hidden is satisfied and never re-fires on a later map. The
+        visibility-gated entry point is :meth:`_refresh_or_defer`.
         """
+        # A render is happening now, so nothing is owed afterwards.
+        # Cleared up front so every early-return path below leaves the
+        # flag false.
+        self._render_pending = False
         note_id = self._app_state.selected_note_id
         if note_id is None:
             self._current_note_id = None
@@ -2065,7 +2140,13 @@ class NoteView(Gtk.Box):
         _app_state: AppState,
         _pspec: GObject.ParamSpec,
     ) -> None:
-        """Refresh on a selection change. Notify-only handler."""
+        """Refresh on a selection change. Notify-only handler.
+
+        Rendered immediately, *not* deferred on visibility: selecting a
+        different note is a one-shot event, not the per-keystroke storm
+        the hidden-pane deferral targets, and rendering it now keeps the
+        buffer correct for the moment the pane is next shown.
+        """
         self.refresh()
 
     def _on_store_items_changed(
@@ -2082,6 +2163,16 @@ class NoteView(Gtk.Box):
         view ignores changes that don't touch the displayed note — it
         compares the freshly-read value against the rendered one — so
         editing or creating *other* notes never disturbs the reader.
+
+        The re-render is routed through :meth:`_refresh_or_defer`, so
+        when the pane is hidden (EDIT mode) the debounced autosave that
+        drives this signal only marks a render owed instead of rebuilding
+        an off-screen buffer every ~300 ms — the reveal render catches it
+        up. Both the deleted-note branch and the content-changed branch
+        defer identically: while hidden nothing is on screen to fall out
+        of lockstep, and the reveal render restores it before anything is
+        shown (on a delete the controller has also cleared the selection,
+        so that render clears the buffer).
         """
         if self._current_note_id is None:
             return
@@ -2089,12 +2180,38 @@ class NoteView(Gtk.Box):
             latest = self._note_store.get_note(self._current_note_id)
         except KeyError:
             # The displayed note was deleted; the controller also clears
-            # the selection, but refreshing here keeps the buffer and
-            # the error-notice state in lockstep without depending on
-            # signal ordering.
-            self.refresh()
+            # the selection. Deferring while hidden keeps the buffer and
+            # the error-notice state in lockstep on the next reveal
+            # without depending on signal ordering.
+            self._refresh_or_defer()
             return
         if latest != self._current_note:
+            self._refresh_or_defer()
+
+    def _refresh_or_defer(self) -> None:
+        """Render now if the pane is visible, else mark a render owed.
+
+        The visibility-gated entry point for the store-driven re-render.
+        When :attr:`_pane_is_visible` reports the pane on screen it
+        renders immediately via :meth:`refresh`; otherwise it records the
+        owed render on :attr:`_render_pending`, which :meth:`_on_mapped`
+        (or the view-mode toggle's unconditional :meth:`refresh`) drains
+        when the pane is next shown.
+        """
+        if self._pane_is_visible():
+            self.refresh()
+        else:
+            self._render_pending = True
+
+    def _on_mapped(self, _widget: Gtk.Widget) -> None:
+        """Drain a deferred render when the pane becomes visible.
+
+        Renders iff one was owed (:attr:`_render_pending`), so on the
+        common EDIT->VIEW path — where ``MainWindow`` already called
+        :meth:`refresh` (which cleared the flag) before the stack mapped
+        this pane — it is a no-op and there is no double render.
+        """
+        if self._render_pending:
             self.refresh()
 
     # ------------------------------------------------------------------

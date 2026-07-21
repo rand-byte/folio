@@ -195,9 +195,11 @@ def _settle_real_main_loop(timeout_ms: int = 400) -> None:
 class _FakeNoteRepository:
     """Minimal :class:`NoteRepositoryProtocol` impl for view tests.
 
-    Only the methods :class:`NoteView` actually calls are filled in;
-    the rest raise :class:`NotImplementedError` so a future test that
-    invokes one by accident fails loudly rather than silently.
+    The methods the view tests exercise are filled in — the view's read
+    path, plus the single ``update_source`` write the §2.2 hidden-pane
+    deferral tests drive through :meth:`NoteListStore.update`. The rest
+    raise :class:`NotImplementedError` so a future test that invokes one
+    by accident fails loudly rather than silently.
     """
 
     notes: dict[str, Note]
@@ -226,11 +228,29 @@ class _FakeNoteRepository:
 
     def update_source(
         self,
-        _note_id: str,
-        _source: str,
-        _modified_at: datetime,
+        note_id: str,
+        source: str,
+        modified_at: datetime,
     ) -> Note:
-        raise NotImplementedError
+        """Return an edited copy of ``note_id`` carrying the new source.
+
+        Implemented (unlike the other write stubs) because the §2.2
+        hidden-pane re-render tests drive a real edit through
+        :meth:`NoteListStore.update`, which persists via this method
+        before splicing the fresh row back into the store.
+        """
+        existing = self.notes[note_id]
+        edited = Note(
+            id=existing.id,
+            title=existing.title,
+            source=source,
+            snippet=existing.snippet,
+            tags=existing.tags,
+            created_at=existing.created_at,
+            modified_at=modified_at,
+        )
+        self.notes[note_id] = edited
+        return edited
 
     def delete(self, _note_id: str) -> None:
         raise NotImplementedError
@@ -1260,6 +1280,174 @@ class NoteViewSmokeTests(unittest.TestCase):
             ),
             "",
         )
+
+
+@unittest.skipUnless(_display_available(), "no GDK display")
+class NoteViewHiddenPaneRerenderTests(unittest.TestCase):
+    """§2.2: the store-driven (``items-changed``) re-render is deferred
+    while the pane is hidden and performed exactly once on reveal; the
+    selection-change render is never deferred.
+
+    Visibility is driven through the injected ``pane_is_visible``
+    predicate so both branches are exercised without a real mapped
+    window. The two reveal-via-``map`` cases present a real window so the
+    ``map`` signal wiring is covered end to end.
+    """
+
+    _ORIGINAL_SOURCE = "= Original\n\noriginal body.\n"
+    _EDITED_SOURCE = "= Edited\n\nedited body.\n"
+
+    @staticmethod
+    def _buffer_text(view: NoteView) -> str:
+        buffer = _find_text_view_buffer(view)
+        text: str = buffer.get_text(
+            buffer.get_start_iter(),
+            buffer.get_end_iter(),
+            False,
+        )
+        return text
+
+    def _view_on_note_a(
+        self,
+        visible: list[bool],
+    ) -> tuple[NoteView, _TrackingNoteListStore]:
+        """Build a view rendering ``note-A`` with an injected visibility flag.
+
+        ``visible`` is a one-element list used as a mutable flag the test
+        controls: ``visible[0]`` is what the injected predicate reports.
+        Returns ``(view, store)``; the initial (unconditional) render has
+        already run, so the buffer holds the original source.
+        """
+        repo = _FakeNoteRepository()
+        repo.notes["note-A"] = _make_note(
+            "note-A", source=self._ORIGINAL_SOURCE,
+        )
+        store = _build_tracking_store(repo)
+        app_state = AppState()
+        app_state.set_selected_note_id("note-A")
+        view = NoteView(
+            note_store=store,
+            app_state=app_state,
+            pane_is_visible=lambda: visible[0],
+        )
+        return view, store
+
+    def test_edit_while_hidden_defers_render(self) -> None:
+        # Given a hidden pane showing the original source
+        visible = [False]
+        view, store = self._view_on_note_a(visible)
+        self.assertIn("Original", self._buffer_text(view))
+
+        # When the displayed note is edited in the store
+        store.update("note-A", self._EDITED_SOURCE)
+
+        # Then no render happened: the buffer still shows the original,
+        # and a render is recorded as owed.
+        text = self._buffer_text(view)
+        self.assertIn("Original", text)
+        self.assertNotIn("Edited", text)
+        self.assertTrue(view._render_pending)
+
+    def test_view_mode_reveal_renders_deferred_edit(self) -> None:
+        # Given a hidden pane with a deferred edit
+        visible = [False]
+        view, store = self._view_on_note_a(visible)
+        store.update("note-A", self._EDITED_SOURCE)
+        self.assertNotIn("Edited", self._buffer_text(view))
+
+        # When the view-mode toggle reveals the pane (MainWindow calls
+        # refresh() unconditionally on EDIT->VIEW)
+        visible[0] = True
+        view.refresh()
+
+        # Then the edited source is now rendered and nothing is owed.
+        self.assertIn("Edited", self._buffer_text(view))
+        self.assertFalse(view._render_pending)
+
+    def test_map_flushes_deferred_render(self) -> None:
+        # Given a hidden pane with a deferred edit
+        visible = [False]
+        view, store = self._view_on_note_a(visible)
+        store.update("note-A", self._EDITED_SOURCE)
+        self.assertNotIn("Edited", self._buffer_text(view))
+
+        # When the pane is actually mapped (the stack reveals it)
+        window = Gtk.Window()
+        window.set_default_size(900, 600)
+        window.set_child(view)
+        window.present()
+        try:
+            _settle_real_main_loop()
+            # Then the map handler drained the owed render.
+            self.assertIn("Edited", self._buffer_text(view))
+            self.assertFalse(view._render_pending)
+        finally:
+            window.set_child(None)
+            window.destroy()
+            _settle_real_main_loop(timeout_ms=50)
+
+    def test_map_without_pending_render_does_not_re_render(self) -> None:
+        # Given a *visible* pane with no deferred edit — the initial
+        # render read the note exactly once.
+        visible = [True]
+        view, store = self._view_on_note_a(visible)
+        self.assertEqual(store.get_calls, ["note-A"])
+
+        # When the pane is mapped with nothing owed
+        window = Gtk.Window()
+        window.set_default_size(900, 600)
+        window.set_child(view)
+        window.present()
+        try:
+            _settle_real_main_loop()
+            # Then the map handler is a no-op: no extra render (no extra
+            # store read), guarding against a double render on the common
+            # EDIT->VIEW path where refresh() already ran before the map.
+            self.assertEqual(store.get_calls, ["note-A"])
+        finally:
+            window.set_child(None)
+            window.destroy()
+            _settle_real_main_loop(timeout_ms=50)
+
+    def test_edit_while_visible_renders_immediately(self) -> None:
+        # Given a visible pane showing the original source
+        visible = [True]
+        view, store = self._view_on_note_a(visible)
+
+        # When the displayed note is edited
+        store.update("note-A", self._EDITED_SOURCE)
+
+        # Then it re-renders at once (deferral is gated strictly on
+        # visibility), and nothing is left owed.
+        self.assertIn("Edited", self._buffer_text(view))
+        self.assertFalse(view._render_pending)
+
+    def test_selection_change_while_hidden_renders_immediately(self) -> None:
+        # Given a hidden pane, with a second note available
+        repo = _FakeNoteRepository()
+        repo.notes["note-A"] = _make_note(
+            "note-A", source=self._ORIGINAL_SOURCE,
+        )
+        repo.notes["note-B"] = _make_note(
+            "note-B", source="= Second\n\nsecond body.\n",
+        )
+        store = _build_tracking_store(repo)
+        app_state = AppState()
+        app_state.set_selected_note_id("note-A")
+        view = NoteView(
+            note_store=store,
+            app_state=app_state,
+            pane_is_visible=lambda: False,
+        )
+
+        # When the selection changes while hidden
+        app_state.set_selected_note_id("note-B")
+
+        # Then the selection render is NOT deferred — the newly selected
+        # note is rendered immediately so the pane is correct the instant
+        # it is shown.
+        self.assertIn("Second", self._buffer_text(view))
+        self.assertFalse(view._render_pending)
 
 
 # ---------------------------------------------------------------------------
