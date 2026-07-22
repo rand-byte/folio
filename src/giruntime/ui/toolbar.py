@@ -124,6 +124,18 @@ Principles & invariants
   the window under the ``app.`` prefix, so the reference resolves once
   the toolbar is in the window's hierarchy.
 
+* **Keyboard accelerators reuse the button behaviours, they do not copy
+  them.** *New*, the search toggle, and *Delete* are also reachable from
+  the keyboard (``Ctrl+N``, ``Ctrl+F``, and a focus-local ``Delete`` on the
+  note list). The accelerators are wired as ``win.*`` actions by
+  :class:`giruntime.ui.main_window.MainWindow`, whose handlers call the
+  public :meth:`create_note`, :meth:`focus_search`, and
+  :meth:`delete_selected` on this toolbar — the very methods the button
+  ``clicked`` handlers call — so a key and its button can never diverge.
+  Mode toggling (``Ctrl+E``) instead writes :attr:`AppState.view_mode`
+  directly, which this toolbar already observes to keep the View / Source
+  segmented toggle in sync.
+
 * GTK 4 currency: :class:`Gtk.HeaderBar`, :class:`Gtk.SearchEntry`,
   :class:`Gtk.Stack`, :class:`Gtk.Button`,
   :meth:`Gtk.Button.set_icon_name`, :meth:`Gtk.Editable.set_width_chars`,
@@ -478,10 +490,37 @@ class Toolbar(  # pylint: disable=too-many-instance-attributes
     # ------------------------------------------------------------------
 
     def _on_new_clicked(self, _button: Gtk.Button) -> None:
-        """Create a note pre-filled from the current selection."""
+        self.create_note()
+
+    def create_note(self) -> None:
+        """Create a note pre-filled from the current selection and edit it.
+
+        The single implementation behind both the *New* button and the
+        ``win.new-note`` accelerator
+        (:class:`giruntime.ui.main_window.MainWindow` routes the action
+        here), so the two entry points cannot diverge. The seed source is
+        :func:`make_initial_source`, which pre-fills ``:tags:`` from an
+        active :class:`TagSelection`; the new note is then switched into
+        :data:`ViewMode.EDIT`.
+        """
         initial = make_initial_source(self._app_state.selection)
         self._note_controller.create_note(initial)
         self._app_state.set_view_mode(ViewMode.EDIT)
+
+    def focus_search(self) -> None:
+        """Open the header search and focus its entry.
+
+        Behind the ``win.focus-search`` accelerator. Idempotent: if search
+        is already expanded it just re-focuses the entry; otherwise it
+        presses the toggle, whose handler expands the centre stack and
+        grabs focus. Routing through the toggle keeps its pressed state and
+        the visible centre page in lock-step, exactly as a pointer click
+        would.
+        """
+        if self._search_toggle.get_active():
+            self._expand_search()
+        else:
+            self._search_toggle.set_active(True)
 
     def _on_view_toggle_changed(self, button: Gtk.ToggleButton) -> None:
         if self._suppress_signal_writeback:
@@ -514,6 +553,19 @@ class Toolbar(  # pylint: disable=too-many-instance-attributes
         self._collapse_search()
 
     def _on_delete_clicked(self, _button: Gtk.Button) -> None:
+        self.delete_selected()
+
+    def delete_selected(self) -> None:
+        """Confirm, then delete the selected note.
+
+        The single implementation behind both the *Delete* button and the
+        note list's focus-local ``Delete`` shortcut (routed through
+        ``win.delete-note`` on
+        :class:`giruntime.ui.main_window.MainWindow`), so the key and the
+        button share one confirm-then-delete path. A no-op when nothing is
+        selected, so it is safe to invoke from the accelerator even though
+        the action is also disabled in that state.
+        """
         note_id = self._app_state.selected_note_id
         if note_id is None:
             return

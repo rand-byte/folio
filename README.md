@@ -264,6 +264,22 @@ note (up to 10 MB each) and never clutter the note body.
 **Don't think about saving.** Folio autosaves continuously, so there is no save
 step and no lost work if you close the window mid-sentence.
 
+**Keyboard shortcuts.** The common actions all have keys, so you rarely need the
+mouse:
+
+| Shortcut | Action |
+| --- | --- |
+| `Ctrl+N` | New note (inherits the selected tags, opens in Source) |
+| `Ctrl+F` | Focus the search box |
+| `Ctrl+E` | Toggle between View and Source |
+| `Delete` | Delete the selected note (when the note list is focused) — asks first |
+| `Esc` | Clear the search and close the search box |
+| `F1` | Open the syntax help |
+| `Ctrl+Q` | Quit |
+
+`Delete` only fires while the note list has focus, so it never eats a character
+while you are editing in Source.
+
 **Back up by copying one folder.** Because everything is in
 `~/.local/share/folio/`, a backup is `cp -r` (or a sync tool of your choice
 pointed at that directory). Restoring is copying it back.

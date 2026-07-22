@@ -37,9 +37,11 @@ run without a GDK display skips rather than fails.
 from __future__ import annotations
 
 import unittest
+from collections.abc import Callable
 from dataclasses import replace
 from datetime import UTC, datetime
 from pathlib import Path
+from unittest.mock import patch
 
 from gi.repository import Gdk, Gtk, Pango
 
@@ -456,6 +458,112 @@ def _iter_descendants(widget: Gtk.Widget) -> list[Gtk.Widget]:
         found.extend(_iter_descendants(child))
         child = child.get_next_sibling()
     return found
+
+
+@unittest.skipUnless(_display_available(), "no GDK display")
+class KeyboardActionMethodTests(unittest.TestCase):
+    """The public methods the window's ``win.*`` actions delegate to —
+    :meth:`Toolbar.focus_search` and :meth:`Toolbar.delete_selected`.
+
+    (:meth:`Toolbar.create_note` is exercised end-to-end through the
+    ``win.new-note`` action in :mod:`ui.test_main_window`, where the store
+    can actually persist the new note.)
+    """
+
+    def test_focus_search_opens_and_focuses_the_entry(self) -> None:
+        toolbar = _build_toolbar(AppState())
+
+        toolbar.focus_search()
+
+        self.assertTrue(toolbar.search_toggle.get_active())
+        self.assertEqual(toolbar.centre_page, HeaderCentrePage.SEARCH)
+
+    def test_focus_search_is_idempotent_when_already_open(self) -> None:
+        toolbar = _build_toolbar(AppState())
+
+        toolbar.focus_search()
+        toolbar.focus_search()
+
+        self.assertTrue(toolbar.search_toggle.get_active())
+        self.assertEqual(toolbar.centre_page, HeaderCentrePage.SEARCH)
+
+    def test_delete_selected_confirms_then_requests_delete(self) -> None:
+        app_state = AppState()
+        repository = _FakeNoteRepository()
+        repository.notes["n1"] = _make_note("n1", "Keep me")
+        store = NoteListStore(
+            repository=repository,
+            clock=lambda: _FIXED_NOW,
+            id_factory=lambda: "id",
+        )
+        store.load()
+        controller = NoteController(
+            note_store=store,
+            attachments=_FakeAttachmentStore(),
+            app_state=app_state,
+        )
+        captured: dict[str, str] = {}
+
+        def presenter(
+            _parent: Gtk.Window | None,
+            title: str,
+            _detail: str,
+            _confirm_label: str,
+            on_result: Callable[[bool], None],
+        ) -> None:
+            captured["title"] = title
+            on_result(True)
+
+        toolbar = Toolbar(
+            note_store=store,
+            note_controller=controller,
+            app_state=app_state,
+            confirm_dialog_presenter=presenter,
+        )
+        app_state.set_selected_note_id("n1")
+
+        with patch.object(controller, "request_delete") as request_delete:
+            toolbar.delete_selected()
+
+        self.assertIn("Keep me", captured["title"])
+        request_delete.assert_called_once_with("n1")
+
+    def test_delete_selected_is_a_noop_without_selection(self) -> None:
+        # Safe to invoke from the accelerator with nothing selected — the
+        # confirm dialog must not even open.
+        app_state = AppState()
+        presenter_calls: list[int] = []
+
+        def presenter(
+            _parent: Gtk.Window | None,
+            _title: str,
+            _detail: str,
+            _confirm_label: str,
+            _on_result: Callable[[bool], None],
+        ) -> None:
+            presenter_calls.append(1)
+
+        store = NoteListStore(
+            repository=_FakeNoteRepository(),
+            clock=lambda: _FIXED_NOW,
+            id_factory=lambda: "id",
+        )
+        store.load()
+        controller = NoteController(
+            note_store=store,
+            attachments=_FakeAttachmentStore(),
+            app_state=app_state,
+        )
+        toolbar = Toolbar(
+            note_store=store,
+            note_controller=controller,
+            app_state=app_state,
+            confirm_dialog_presenter=presenter,
+        )
+
+        toolbar.delete_selected()
+
+        self.assertEqual(presenter_calls, [])
 
 
 if __name__ == "__main__":

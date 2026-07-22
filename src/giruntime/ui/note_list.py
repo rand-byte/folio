@@ -49,10 +49,19 @@ Principles & invariants
 * Date formatting lives in the shared :mod:`ui._dates` helper
   (:func:`ui._dates.format_date_short`) so the note-list meta line and
   the rendered-view metadata line agree without cross-importing.
+* The ``Delete`` key deletes the selected note, but only while this pane
+  holds focus: it is a :class:`Gtk.ShortcutController` at
+  :data:`Gtk.ShortcutScope.LOCAL` scope activating the window's
+  ``win.delete-note`` action, **not** an application accelerator — so it
+  never fires inside the source editor. The action itself (and the
+  confirm-then-delete behaviour it shares with the toolbar button) lives on
+  :class:`giruntime.ui.main_window.MainWindow` / :class:`Toolbar`; this pane
+  only owns the focus-scoped key binding.
 * GTK 4 currency: :class:`Gtk.ListView`, :class:`Gtk.SignalListItemFactory`,
   :class:`Gtk.FilterListModel`, :class:`Gtk.SortListModel`,
   :class:`Gtk.SingleSelection`, :class:`Gtk.CustomFilter`,
-  :class:`Gtk.CustomSorter`, and ``notify::<prop>`` observation.
+  :class:`Gtk.CustomSorter`, :class:`Gtk.ShortcutController`,
+  :class:`Gtk.NamedAction`, and ``notify::<prop>`` observation.
 """
 
 from __future__ import annotations
@@ -62,7 +71,7 @@ from typing import Final
 
 from gi.repository import GObject, Gtk, Pango
 
-from enums import NoteSortKey
+from enums import NoteSortKey, WindowAction, window_action_detailed_name
 from giruntime.controllers.app_state import AppState
 from giruntime.controllers.note_controller import NoteController
 from giruntime.controllers.note_item import NoteItem
@@ -117,6 +126,14 @@ _META_SEPARATOR: Final[str] = "|"
 
 _NOTES_LABEL_TEMPLATE: Final[str] = "{n} notes"
 """Header text on the left — ``"N notes"`` (count of the filtered set)."""
+
+_DELETE_SHORTCUT_TRIGGER: Final[str] = "Delete"
+"""The key that deletes the selected note **while this pane has focus**.
+
+In :meth:`Gtk.ShortcutTrigger.parse_string` form. Installed as a
+focus-local (:data:`Gtk.ShortcutScope.LOCAL`) shortcut so it fires only
+when the list — or one of its rows — holds focus, never inside the source
+editor; a window-global ``Delete`` would eat characters there."""
 
 
 # ---------------------------------------------------------------------------
@@ -177,6 +194,7 @@ class NoteList(Gtk.Box):  # pylint: disable=too-many-instance-attributes
         self.append(self._build_header())
         self._build_model_chain(note_store)
         self.append(self._build_list_view())
+        self._install_delete_shortcut()
 
         self._empty_label = Gtk.Label.new("No notes here yet.")
         self._empty_label.set_margin_top(_ROW_PADDING_PX * 4)
@@ -203,6 +221,34 @@ class NoteList(Gtk.Box):  # pylint: disable=too-many-instance-attributes
 
         self._update_count()
         self._sync_selection_from_app_state()
+
+    def _install_delete_shortcut(self) -> None:
+        """Attach the focus-local ``Delete`` shortcut for the selected note.
+
+        The scope is :data:`Gtk.ShortcutScope.LOCAL` (the controller
+        default, set explicitly for clarity) so the shortcut triggers only
+        when this pane — or one of its list rows — holds focus, and never
+        while the source editor is focused; a window-global ``Delete`` would
+        eat keystrokes in the editor. The shortcut activates the
+        window-scoped ``win.delete-note`` action (registered by
+        :class:`giruntime.ui.main_window.MainWindow`), which routes to the
+        same confirm-then-delete path as the toolbar's *Delete* button, so
+        the key and the button cannot diverge. :class:`Gtk.NamedAction`
+        resolves the name against the widget's action groups at activation
+        time, so it does not require the window to exist when this pane is
+        built (it does when the key is pressed).
+        """
+        controller = Gtk.ShortcutController.new()
+        controller.set_scope(Gtk.ShortcutScope.LOCAL)
+        controller.add_shortcut(
+            Gtk.Shortcut.new(
+                Gtk.ShortcutTrigger.parse_string(_DELETE_SHORTCUT_TRIGGER),
+                Gtk.NamedAction.new(
+                    window_action_detailed_name(WindowAction.DELETE_NOTE),
+                ),
+            ),
+        )
+        self.add_controller(controller)
 
     def _build_header(self) -> Gtk.Box:
         """Build the header row: filtered count on the left, sort on right."""

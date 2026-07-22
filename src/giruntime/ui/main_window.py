@@ -114,11 +114,12 @@ Principles & invariants
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from typing import Final
 
-from gi.repository import GObject, Gtk
+from gi.repository import Gio, GObject, Gtk
 
-from enums import ViewMode
+from enums import ViewMode, WindowAction, window_action_detailed_name
 from giruntime.controllers.app_state import AppState
 from giruntime.controllers.note_controller import NoteController
 from giruntime.controllers.note_list_store import NoteListStore
@@ -232,6 +233,25 @@ def _stack_name_for_mode(mode: ViewMode) -> str:
     return _MODE_TO_STACK_NAME[mode]
 
 
+_WINDOW_ACTION_ACCELERATORS: Final[dict[WindowAction, str]] = {
+    WindowAction.NEW_NOTE: "<Control>n",
+    WindowAction.FOCUS_SEARCH: "<Control>f",
+    WindowAction.TOGGLE_MODE: "<Control>e",
+}
+"""Application accelerators for the window actions that get one.
+
+:class:`WindowAction.DELETE_NOTE` is intentionally **absent**: binding
+``Delete`` as an application accelerator would swallow the key inside the
+source editor. The note list installs it as a focus-local shortcut instead
+(see :class:`giruntime.ui.note_list.NoteList`), so ``Delete`` only fires
+when a list row has focus. Accelerator strings are in
+:func:`Gtk.accelerator_parse` form; they are registered against the
+``win.``-prefixed detailed names via
+:meth:`Gtk.Application.set_accels_for_action`, which is an application-level
+call even for window-scoped actions.
+"""
+
+
 def _default_window_width(article_column_px: int) -> int:
     """Compute the initial window width that fits the article column.
 
@@ -299,6 +319,7 @@ class MainWindow(  # pylint: disable=too-many-instance-attributes
     _note_view: NoteView
     _note_editor: NoteEditor
     _right_pane_stack: Gtk.Stack
+    _delete_note_action: Gio.SimpleAction
 
     def __init__(  # pylint: disable=too-many-arguments
         self,
@@ -452,6 +473,119 @@ class MainWindow(  # pylint: disable=too-many-instance-attributes
         self._app_state.connect(
             "notify::view-mode",
             self._on_view_mode_changed,
+        )
+
+        # Register the window-scoped keyboard actions (New / focus search /
+        # toggle mode / delete) and their accelerators. Done last, once the
+        # toolbar the actions delegate to exists.
+        self._install_window_actions(application)
+
+    def _install_window_actions(self, application: Gtk.Application) -> None:
+        """Register the ``win.*`` keyboard actions and their accelerators.
+
+        One :class:`Gio.SimpleAction` per :class:`WindowAction`, added to
+        this window's action group so each is addressable as ``win.<name>``.
+        The behaviour each action performs lives in exactly one place —
+        :class:`Toolbar` (New / focus-search / delete) or :class:`AppState`
+        (toggle-mode) — so the accelerator and the matching toolbar button
+        drive identical code and cannot drift.
+
+        Accelerators come from :data:`_WINDOW_ACTION_ACCELERATORS`, which
+        omits :attr:`WindowAction.DELETE_NOTE` on purpose: the note list
+        binds ``Delete`` as a focus-local shortcut instead, so it never
+        fires while the editor is focused.
+        :meth:`Gtk.Application.set_accels_for_action` is an application-level
+        call even for window actions, hence the ``application`` handle.
+
+        The delete action's *enabled* state tracks the selection (disabled
+        when no note is selected), so the accelerator is inert with nothing
+        to delete, mirroring the toolbar's insensitive *Delete* button.
+        """
+        handlers: dict[
+            WindowAction, Callable[[Gio.SimpleAction, object], None]
+        ] = {
+            WindowAction.NEW_NOTE: self._on_new_note_action,
+            WindowAction.FOCUS_SEARCH: self._on_focus_search_action,
+            WindowAction.TOGGLE_MODE: self._on_toggle_mode_action,
+            WindowAction.DELETE_NOTE: self._on_delete_note_action,
+        }
+        for window_action, handler in handlers.items():
+            action = Gio.SimpleAction.new(window_action, None)
+            action.connect("activate", handler)
+            self.add_action(action)
+            if window_action is WindowAction.DELETE_NOTE:
+                self._delete_note_action = action
+
+        for window_action, accelerator in _WINDOW_ACTION_ACCELERATORS.items():
+            application.set_accels_for_action(
+                window_action_detailed_name(window_action),
+                [accelerator],
+            )
+
+        # Keep the delete action's enabled state in step with the
+        # selection, exactly as the toolbar keeps its Delete button.
+        self._app_state.connect(
+            "notify::selected-note-id",
+            self._on_selected_note_id_changed,
+        )
+        self._refresh_delete_action_enabled()
+
+    def _on_new_note_action(
+        self,
+        _action: Gio.SimpleAction,
+        _parameter: object,
+    ) -> None:
+        """``win.new-note``: create a note pre-filled from the selection."""
+        self._toolbar.create_note()
+
+    def _on_focus_search_action(
+        self,
+        _action: Gio.SimpleAction,
+        _parameter: object,
+    ) -> None:
+        """``win.focus-search``: open the header search and focus it."""
+        self._toolbar.focus_search()
+
+    def _on_toggle_mode_action(
+        self,
+        _action: Gio.SimpleAction,
+        _parameter: object,
+    ) -> None:
+        """``win.toggle-mode``: flip between the rendered view and source.
+
+        Writes :class:`AppState` directly — the same property the toolbar's
+        View / Source toggle and the stack dispatch already observe — so the
+        segmented toggle updates itself in response, with no extra wiring.
+        """
+        current = self._app_state.view_mode
+        other = ViewMode.EDIT if current == ViewMode.VIEW else ViewMode.VIEW
+        self._app_state.set_view_mode(other)
+
+    def _on_delete_note_action(
+        self,
+        _action: Gio.SimpleAction,
+        _parameter: object,
+    ) -> None:
+        """``win.delete-note``: confirm-then-delete the selected note.
+
+        The same path as the toolbar's *Delete* button. Triggered by the
+        note list's focus-local ``Delete`` shortcut (never an application
+        accelerator). A no-op when nothing is selected, and the action is
+        additionally disabled in that state.
+        """
+        self._toolbar.delete_selected()
+
+    def _on_selected_note_id_changed(
+        self,
+        _app_state: AppState,
+        _pspec: GObject.ParamSpec,
+    ) -> None:
+        self._refresh_delete_action_enabled()
+
+    def _refresh_delete_action_enabled(self) -> None:
+        """Enable ``win.delete-note`` iff a note is selected."""
+        self._delete_note_action.set_enabled(
+            self._app_state.selected_note_id is not None,
         )
 
     def _on_view_mode_changed(

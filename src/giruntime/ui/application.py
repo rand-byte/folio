@@ -102,6 +102,14 @@ Principles & invariants
   (see :meth:`_on_main_window_close_request`), which also tears down the
   hidden help window. This is sound precisely because of the single-window
   assumption above: there is only ever one primary window to key off.
+* A second app-scoped action, ``quit`` (``Ctrl+Q``), is registered
+  alongside ``help``. It does not call :meth:`Gtk.Application.quit`
+  directly; it closes the stored main window, funnelling through the very
+  ``close-request`` handler above so the flush + session-save guarantees
+  hold for the keyboard path exactly as for the close button. (The
+  window-scoped editing accelerators — New, focus-search, toggle-mode, and
+  the note list's focus-local Delete — are registered on
+  :class:`MainWindow` instead, since each acts on that window's state.)
 * The main window's ``close-request`` also flushes the editor's pending
   autosave (:meth:`MainWindow.flush_editor`) before quitting. The editor
   debounces saves, so without this the keystrokes typed in the final
@@ -182,6 +190,22 @@ _HELP_ACCELERATOR: str = "F1"
 convention for help."""
 
 
+_QUIT_ACTION_NAME: str = "quit"
+"""Name of the application-level action that quits the app.
+
+Registered as ``app.quit`` and bound to :data:`_QUIT_ACCELERATOR`.
+App-scoped like :data:`_HELP_ACTION_NAME`: quitting is window-independent,
+and routing through the main window's close path (below) is what keeps the
+editor-flush + session-save guarantees the close button already has."""
+
+_QUIT_ACTION_DETAILED_NAME: str = "app.quit"
+"""The detailed action name used for the accelerator binding."""
+
+_QUIT_ACCELERATOR: str = "<Control>q"
+"""The keyboard accelerator that triggers ``app.quit`` — the platform
+convention for quit."""
+
+
 class _WindowGeometryProtocol(Protocol):
     """The two read-only bits of window state
     :meth:`NotesApplication._save_session_state` needs.
@@ -239,6 +263,7 @@ class NotesApplication(  # pylint: disable=too-many-instance-attributes
     _note_controller: NoteController | None
     _help_window: HelpWindow | None
     _session_state_store: SessionStateStore | None
+    _main_window: MainWindow | None
 
     def __init__(self) -> None:
         super().__init__(
@@ -253,6 +278,7 @@ class NotesApplication(  # pylint: disable=too-many-instance-attributes
         self._note_controller = None
         self._help_window = None
         self._session_state_store = None
+        self._main_window = None
 
     def do_activate(self) -> None:  # pylint: disable=arguments-differ
         """Build the world if it does not yet exist, then present a
@@ -316,6 +342,7 @@ class NotesApplication(  # pylint: disable=too-many-instance-attributes
         )
         self._session_state_store = SessionStateStore(session_state_path())
         self._install_help_action()
+        self._install_quit_action()
         _load_application_css()
         _register_application_icon_resources()
 
@@ -334,6 +361,42 @@ class NotesApplication(  # pylint: disable=too-many-instance-attributes
             _HELP_ACTION_DETAILED_NAME,
             [_HELP_ACCELERATOR],
         )
+
+    def _install_quit_action(self) -> None:
+        """Register the app-level ``quit`` action and its ``Ctrl+Q`` accel.
+
+        App-scoped like Help, and registered in the same one-time runtime
+        setup. The action does **not** call :meth:`Gtk.Application.quit`
+        directly: it closes the main window, which fires the same
+        ``close-request`` handler the window's close button does — so the
+        editor's pending autosave is flushed and session state saved before
+        the loop stops. Closing the stored main window (rather than
+        :meth:`get_active_window`) means ``Ctrl+Q`` quits the application
+        even when the hide-on-close help window happens to be focused.
+        """
+        quit_action = Gio.SimpleAction.new(_QUIT_ACTION_NAME, None)
+        quit_action.connect("activate", self._on_quit_activated)
+        self.add_action(quit_action)
+        self.set_accels_for_action(
+            _QUIT_ACTION_DETAILED_NAME,
+            [_QUIT_ACCELERATOR],
+        )
+
+    def _on_quit_activated(
+        self,
+        _action: Gio.SimpleAction,
+        _parameter: object,
+    ) -> None:
+        """Quit via the main window's close path (flush + save + quit).
+
+        Wired to both the ``Ctrl+Q`` accelerator and the ``app.quit``
+        action. Closing the window emits ``close-request``, which
+        :meth:`_on_main_window_close_request` handles. A ``None`` main
+        window (quit requested before the first window was built) is a
+        no-op.
+        """
+        if self._main_window is not None:
+            self._main_window.close()
 
     def _build_initial_window(self) -> MainWindow:
         """Construct the first :class:`MainWindow` and seed the
@@ -384,6 +447,10 @@ class NotesApplication(  # pylint: disable=too-many-instance-attributes
         # still registered (and merely hidden). See
         # :meth:`_on_main_window_close_request`.
         window.connect("close-request", self._on_main_window_close_request)
+        # Kept so the app-scoped ``app.quit`` action can close *this*
+        # window (and thus run the flush + save close path) regardless of
+        # which window currently has focus.
+        self._main_window = window
         self._select_initial_note(
             self._note_store,
             self._app_state,

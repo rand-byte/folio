@@ -348,5 +348,50 @@ class NoteListAttachmentBadgeTests(unittest.TestCase):
         self.controller.emit("attachments-changed", "not-bound")
 
 
+@unittest.skipUnless(_display_available(), "no GDK display")
+class NoteListDeleteShortcutTests(unittest.TestCase):
+    """The ``Delete`` key is a *focus-local* shortcut on the note list
+    that activates ``win.delete-note`` — never an application accelerator,
+    so it cannot fire while the source editor is focused."""
+
+    def _shortcut_controllers(
+        self,
+        note_list: NoteList,
+    ) -> list[Gtk.ShortcutController]:
+        controllers = note_list.observe_controllers()
+        found: list[Gtk.ShortcutController] = []
+        for i in range(controllers.get_n_items()):
+            controller = controllers.get_item(i)
+            if isinstance(controller, Gtk.ShortcutController):
+                found.append(controller)
+        return found
+
+    def test_delete_key_is_local_and_targets_the_delete_action(self) -> None:
+        note_list = _build_note_list([], AppState())
+        expected_trigger = Gtk.ShortcutTrigger.parse_string("Delete").to_string()
+
+        matches: list[tuple[Gtk.ShortcutController, Gtk.ShortcutAction]] = []
+        for controller in self._shortcut_controllers(note_list):
+            for j in range(controller.get_n_items()):
+                shortcut = controller.get_item(j)
+                assert isinstance(shortcut, Gtk.Shortcut)
+                trigger = shortcut.get_trigger()
+                action = shortcut.get_action()
+                if (
+                    trigger is not None
+                    and action is not None
+                    and trigger.to_string() == expected_trigger
+                ):
+                    matches.append((controller, action))
+
+        self.assertEqual(len(matches), 1)
+        controller, action = matches[0]
+        # LOCAL scope is what makes it fire only while the list (or a row)
+        # holds focus, never inside the editor.
+        self.assertEqual(controller.get_scope(), Gtk.ShortcutScope.LOCAL)
+        assert isinstance(action, Gtk.NamedAction)
+        self.assertEqual(action.get_action_name(), "win.delete-note")
+
+
 if __name__ == "__main__":
     unittest.main()

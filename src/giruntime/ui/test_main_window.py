@@ -11,7 +11,7 @@ from pathlib import Path
 from gi.repository import Gdk, Gio, GLib, Gtk
 
 from asciidoc.summary import derive_summary
-from enums import AttachmentExportFailureReason, ViewMode
+from enums import AttachmentExportFailureReason, ViewMode, WindowAction
 from storage.protocols import AttachmentExportFailed
 from models.attachment import Attachment
 from models.note import Note
@@ -945,6 +945,111 @@ class MainWindowStorePropagationTests(unittest.TestCase):
         window._note_controller.request_delete("n1")
 
         self.assertIsNone(selection.get_selected_item())
+
+
+@unittest.skipUnless(_display_available(), "no GDK display")
+class MainWindowKeyboardActionTests(unittest.TestCase):
+    """The window-scoped ``win.*`` keyboard actions: that they are
+    registered, carry the right accelerators (and that Delete carries
+    *none*), and drive the same behaviour as their toolbar buttons."""
+
+    def _build_window(self, *, app_state: AppState) -> MainWindow:
+        application = _test_application()
+        notes = _FakeNoteRepository()
+        notes.notes["n1"] = Note(
+            id="n1",
+            title="Hello",
+            source="= Hello\n\nbody.\n",
+            snippet="body.",
+            tags=(),
+            created_at=_FIXED_NOW,
+            modified_at=_FIXED_NOW,
+        )
+        store = NoteListStore(repository=notes)
+        store.load()
+        controller = NoteController(
+            note_store=store,
+            attachments=_FakeAttachmentStore(),
+            app_state=app_state,
+        )
+        return MainWindow(
+            application=application,
+            note_store=store,
+            note_controller=controller,
+            app_state=app_state,
+        )
+
+    def test_all_window_actions_are_registered(self) -> None:
+        window = self._build_window(app_state=AppState())
+        for window_action in WindowAction:
+            self.assertIsNotNone(
+                window.lookup_action(window_action.value),
+                f"missing window action: {window_action.value}",
+            )
+
+    def test_letter_actions_carry_control_accelerators(self) -> None:
+        application = _test_application()
+        self._build_window(app_state=AppState())
+        self.assertEqual(
+            application.get_accels_for_action("win.new-note"),
+            ["<Control>n"],
+        )
+        self.assertEqual(
+            application.get_accels_for_action("win.focus-search"),
+            ["<Control>f"],
+        )
+        self.assertEqual(
+            application.get_accels_for_action("win.toggle-mode"),
+            ["<Control>e"],
+        )
+
+    def test_delete_has_no_application_accelerator(self) -> None:
+        # The tripwire for the "Delete eats editor text" failure mode:
+        # delete must be a focus-local shortcut on the note list, never a
+        # window/application accelerator that fires while editing source.
+        application = _test_application()
+        self._build_window(app_state=AppState())
+        self.assertEqual(
+            application.get_accels_for_action("win.delete-note"),
+            [],
+        )
+
+    def test_new_note_action_creates_a_note_and_enters_edit(self) -> None:
+        app_state = AppState()
+        window = self._build_window(app_state=app_state)
+        before = window._note_store.get_n_items()
+
+        action = window.lookup_action("new-note")
+        assert action is not None
+        action.activate(None)
+
+        self.assertEqual(window._note_store.get_n_items(), before + 1)
+        self.assertEqual(app_state.view_mode, ViewMode.EDIT)
+
+    def test_toggle_mode_action_flips_between_view_and_edit(self) -> None:
+        app_state = AppState(initial_view_mode=ViewMode.VIEW)
+        window = self._build_window(app_state=app_state)
+
+        action = window.lookup_action("toggle-mode")
+        assert action is not None
+
+        action.activate(None)
+        self.assertEqual(app_state.view_mode, ViewMode.EDIT)
+        action.activate(None)
+        self.assertEqual(app_state.view_mode, ViewMode.VIEW)
+
+    def test_delete_action_enabled_tracks_selection(self) -> None:
+        app_state = AppState()
+        window = self._build_window(app_state=app_state)
+
+        action = window.lookup_action("delete-note")
+        assert action is not None
+
+        self.assertFalse(action.get_enabled())
+        app_state.set_selected_note_id("n1")
+        self.assertTrue(action.get_enabled())
+        app_state.set_selected_note_id(None)
+        self.assertFalse(action.get_enabled())
 
 
 if __name__ == "__main__":

@@ -25,9 +25,10 @@ from collections.abc import Callable
 from datetime import UTC, datetime
 from pathlib import Path
 from tempfile import TemporaryDirectory
+from typing import cast
 from unittest.mock import patch
 
-from gi.repository import Gdk, Gtk
+from gi.repository import Gdk, Gio, Gtk
 
 from config.defaults import SEED_WELCOME_NOTE_ID
 from giruntime.controllers.app_state import AppState
@@ -37,6 +38,7 @@ from giruntime.ui.application import (
     NotesApplication,
     _register_application_icon_resources,
 )
+from giruntime.ui.main_window import MainWindow
 from models.note import Note
 from storage.session_state_store import SessionStateStore
 
@@ -258,6 +260,36 @@ class MainWindowCloseRequestTests(unittest.TestCase):
         self.assertEqual(saved.selected_note_id, "n1")
         self.assertEqual(saved.window_size, (1400, 900))
         self.assertTrue(saved.window_maximized)
+
+
+class QuitActionTests(unittest.TestCase):
+    """The app-scoped ``quit`` action (``Ctrl+Q``) routes through the main
+    window's close path rather than calling :meth:`Gtk.Application.quit`
+    directly, so the editor flush + session save the close button already
+    performs also happen on the keyboard quit."""
+
+    def test_quit_closes_the_stored_main_window(self) -> None:
+        # Closing the window (not calling quit() directly) is what runs
+        # the flush + save close-request handler; this pins that route.
+        application = NotesApplication()
+        close_calls: list[int] = []
+
+        class _FakeQuitWindow:
+            def close(self) -> None:
+                close_calls.append(1)
+
+        application._main_window = cast(MainWindow, _FakeQuitWindow())
+
+        application._on_quit_activated(cast(Gio.SimpleAction, None), None)
+
+        self.assertEqual(close_calls, [1])
+
+    def test_quit_is_a_noop_before_a_window_exists(self) -> None:
+        # Activating quit before the first window is built must not raise.
+        application = NotesApplication()
+        application._main_window = None
+
+        application._on_quit_activated(cast(Gio.SimpleAction, None), None)
 
 
 class SaveSessionStateTests(unittest.TestCase):

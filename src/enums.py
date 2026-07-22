@@ -22,6 +22,7 @@ Principles & invariants
 from __future__ import annotations
 
 from enum import Enum, StrEnum, auto
+from typing import Final
 
 
 class ViewMode(StrEnum):
@@ -29,6 +30,59 @@ class ViewMode(StrEnum):
 
     VIEW = auto()
     EDIT = auto()
+
+
+class WindowAction(StrEnum):
+    """Window-scoped ``Gio.Action`` names for the main window's key actions.
+
+    Each member's *value is the bare action name* registered on
+    :class:`giruntime.ui.main_window.MainWindow` via
+    :meth:`Gio.ActionMap.add_action`. The window action group exposes it to
+    accelerators, and to :class:`Gtk.NamedAction`, under the ``win.`` prefix
+    (``win.new-note`` and so on — build the full name with
+    :func:`window_action_detailed_name`). Keeping the names here — not as
+    scattered string literals — is what lets the accelerator table, the
+    action registration, and the note list's ``Delete`` shortcut all refer
+    to the same identifier and never drift.
+
+    These are *window*-scoped on purpose: each acts on the current window's
+    selection, editor, or search entry. The two *app*-scoped actions (help,
+    quit) are window-independent and stay as module constants in
+    :mod:`giruntime.ui.application`, addressed under the ``app.`` prefix.
+
+    :attr:`DELETE_NOTE` deliberately carries **no** application accelerator:
+    a window-global ``Delete`` would fire while the user is editing source
+    text. It is triggered only by a focus-local shortcut on the note list
+    (see :class:`giruntime.ui.note_list.NoteList`), so it activates when a
+    list row has focus and never inside the editor.
+
+    Values are in-memory only (never persisted), so they carry no migration
+    implication.
+    """
+
+    NEW_NOTE = "new-note"
+    FOCUS_SEARCH = "focus-search"
+    TOGGLE_MODE = "toggle-mode"
+    DELETE_NOTE = "delete-note"
+
+
+WINDOW_ACTION_PREFIX: Final[str] = "win."
+"""GTK action-group prefix under which a :class:`Gtk.ApplicationWindow`
+exposes the actions added to it. Fixed by GTK — the detailed name of a
+window action is ``win.`` followed by its bare name. Named here so no call
+site has to hardcode the literal when addressing a :class:`WindowAction`."""
+
+
+def window_action_detailed_name(action: WindowAction) -> str:
+    """Return the ``win.``-prefixed detailed name of ``action``.
+
+    The single formatter for a window action's detailed name, shared by the
+    action registration / accelerator wiring in
+    :class:`giruntime.ui.main_window.MainWindow` and the note list's
+    focus-local ``Delete`` shortcut, so the two cannot spell the name
+    differently.
+    """
+    return f"{WINDOW_ACTION_PREFIX}{action}"
 
 
 class HeaderCentrePage(StrEnum):
