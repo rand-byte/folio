@@ -336,53 +336,6 @@ class CreateNoteTests(unittest.TestCase):
 
 
 # ---------------------------------------------------------------------------
-# duplicate_note
-# ---------------------------------------------------------------------------
-
-
-class DuplicateNoteTests(unittest.TestCase):
-    def setUp(self) -> None:
-        self.controller, self.store, self.repo, _, self.state = (
-            _build_controller()
-        )
-        # Seed with one note (tags live in the source so the duplicate
-        # inherits them through the re-derive on insert).
-        self.repo.insert(Note(
-            id="seed-1",
-            title="Original",
-            source="= Original\n:tags: baking\n\nbody",
-            snippet="body",
-            tags=("baking",),
-            created_at=datetime(2025, 1, 1, tzinfo=UTC),
-            modified_at=datetime(2025, 1, 1, tzinfo=UTC),
-        ))
-        self.store.load()
-
-    def test_duplicate_appends_copy_suffix(self) -> None:
-        duplicate = self.controller.duplicate_note("seed-1")
-        self.assertEqual(duplicate.title, "Original (copy)")
-        self.assertIn("= Original (copy)", duplicate.source)
-
-    def test_duplicate_inherits_tags_from_original(self) -> None:
-        duplicate = self.controller.duplicate_note("seed-1")
-        self.assertEqual(duplicate.tags, ("baking",))
-
-    def test_duplicate_gets_fresh_id_and_timestamps(self) -> None:
-        duplicate = self.controller.duplicate_note("seed-1")
-        self.assertNotEqual(duplicate.id, "seed-1")
-        self.assertEqual(duplicate.created_at, _FIXED_NOW)
-        self.assertEqual(duplicate.modified_at, _FIXED_NOW)
-
-    def test_duplicate_selects_new_note(self) -> None:
-        duplicate = self.controller.duplicate_note("seed-1")
-        self.assertEqual(self.state.selected_note_id, duplicate.id)
-
-    def test_duplicate_lands_in_store(self) -> None:
-        duplicate = self.controller.duplicate_note("seed-1")
-        self.assertEqual(self.store.get_note(duplicate.id).id, duplicate.id)
-
-
-# ---------------------------------------------------------------------------
 # request_delete
 # ---------------------------------------------------------------------------
 

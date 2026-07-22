@@ -3,8 +3,8 @@
 Principles & invariants
 -----------------------
 * :class:`NoteController` is the single mediator between widgets that
-  request a note-level action (create, duplicate, delete, save,
-  add/remove attachment) and the layer that performs it. Widgets never
+  request a note-level action (create, delete, save, add/remove
+  attachment) and the layer that performs it. Widgets never
   reach past it; doing so would scatter the signal-emission and
   error-handling discipline below across every call site.
 * Persistence is delegated to the injected
@@ -60,6 +60,7 @@ from typing import Final
 
 from gi.repository import GObject
 
+from config.defaults import UNTITLED
 from giruntime.controllers._storage_errors import capturing_storage_errors
 from giruntime.controllers.app_state import AppState
 from giruntime.controllers.note_list_store import NoteListStore
@@ -73,13 +74,13 @@ from storage.protocols import (
 )
 
 
-_BLANK_NOTE_TITLE: Final[str] = "Untitled"
-"""Title placed at the top of a freshly-created blank note."""
+_TITLE_LINE: Final[str] = f"= {UNTITLED}\n"
+"""Title line placed at the top of a freshly-created blank note.
 
-_TITLE_LINE: Final[str] = f"= {_BLANK_NOTE_TITLE}\n"
-
-_DUPLICATE_TITLE_SUFFIX: Final[str] = " (copy)"
-"""Suffix appended to a duplicated note's title."""
+Uses the shared :data:`config.defaults.UNTITLED` so the seed title and
+the store's advisory blank title (which also derives from ``UNTITLED``)
+can never drift apart.
+"""
 
 
 def make_initial_source(selection: Selection) -> str:
@@ -101,26 +102,6 @@ def make_initial_source(selection: Selection) -> str:
             return f"{_TITLE_LINE}:tags: {tag_csv}\n\n"
         case SmartSelection():
             return title_block
-
-
-def _suffix_title_in_source(source: str, suffix: str) -> str:
-    """Append ``suffix`` to the first level-0 heading line in ``source``."""
-    lines = source.splitlines(keepends=True)
-    for index, raw_line in enumerate(lines):
-        stripped = raw_line.strip()
-        if not stripped:
-            continue
-        if stripped.startswith("= "):
-            terminator = ""
-            content = raw_line
-            for end in ("\r\n", "\n", "\r"):
-                if content.endswith(end):
-                    terminator = end
-                    content = content[: -len(end)]
-                    break
-            lines[index] = content.rstrip() + suffix + terminator
-        return "".join(lines)
-    return source
 
 
 class NoteController(GObject.Object):
@@ -206,18 +187,6 @@ class NoteController(GObject.Object):
             note = self._store.create(initial_source)
         self._app_state.set_selected_note_id(note.id)
         return note
-
-    def duplicate_note(self, note_id: str) -> Note:
-        """Duplicate ``note_id`` with " (copy)" suffixed to its title."""
-        original = self._store.get_note(note_id)
-        new_source = _suffix_title_in_source(
-            original.source,
-            _DUPLICATE_TITLE_SUFFIX,
-        )
-        with capturing_storage_errors(self._emit_storage_error, "duplicate note"):
-            duplicate = self._store.create(new_source)
-        self._app_state.set_selected_note_id(duplicate.id)
-        return duplicate
 
     def request_delete(self, note_id: str) -> None:
         """Delete ``note_id``; clear the selection if it matched."""
