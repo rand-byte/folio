@@ -214,14 +214,8 @@ class _FakeNoteRepository:
         self.get_calls.append(note_id)
         return self.notes[note_id]
 
-    def list_modified_since(self, _since: datetime) -> list[Note]:
-        raise NotImplementedError
-
     def list_all(self) -> list[Note]:
         return list(self.notes.values())
-
-    def search(self, _query: str) -> list[Note]:
-        raise NotImplementedError
 
     def insert(self, _note: Note) -> Note:
         raise NotImplementedError
@@ -254,9 +248,6 @@ class _FakeNoteRepository:
 
     def delete(self, _note_id: str) -> None:
         raise NotImplementedError
-
-    def list_tags(self) -> tuple[tuple[str, int], ...]:
-        return ()
 
 
 class _TrackingNoteListStore(NoteListStore):

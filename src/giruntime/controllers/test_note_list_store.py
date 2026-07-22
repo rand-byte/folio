@@ -31,16 +31,10 @@ class _FakeRepository:
     def get(self, note_id: str) -> Note:
         return self.notes[note_id]
 
-    def list_modified_since(self, since: datetime) -> list[Note]:
-        return [n for n in self.notes.values() if n.modified_at >= since]
-
     def list_all(self) -> list[Note]:
         return sorted(
             self.notes.values(), key=lambda n: n.modified_at, reverse=True,
         )
-
-    def search(self, _query: str) -> list[Note]:
-        return list(self.notes.values())
 
     def insert(self, note: Note) -> Note:
         self.notes[note.id] = note
@@ -64,9 +58,6 @@ class _FakeRepository:
 
     def delete(self, note_id: str) -> None:
         del self.notes[note_id]
-
-    def list_tags(self) -> tuple[tuple[str, int], ...]:
-        return ()
 
 
 class _RaisingOnInsertRepository(_FakeRepository):

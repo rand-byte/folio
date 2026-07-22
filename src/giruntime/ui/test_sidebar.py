@@ -91,37 +91,21 @@ class TagsHeaderAccentTextTests(unittest.TestCase):
 class _FakeNoteRepository:
     """Minimal :class:`NoteRepositoryProtocol` for the sidebar.
 
-    The sidebar only reads :meth:`list_all` (for the Library counts) and
-    :meth:`list_tags` (for the Tags rows) during ``refresh``; every other
-    method raising :class:`NotImplementedError` makes any inadvertent
-    call a loud test bug rather than a silent pass.
+    The sidebar only reads :meth:`list_all` (which seeds the store that
+    both the Library counts and the derived Tags rows are computed from);
+    every other method raising :class:`NotImplementedError` makes any
+    inadvertent call a loud test bug rather than a silent pass.
     """
 
     notes: list[Note]
-    tag_pairs: tuple[tuple[str, int], ...]
 
-    def __init__(
-        self,
-        *,
-        notes: list[Note],
-        tag_pairs: tuple[tuple[str, int], ...],
-    ) -> None:
+    def __init__(self, *, notes: list[Note]) -> None:
         self.notes = notes
-        self.tag_pairs = tag_pairs
 
     def list_all(self) -> list[Note]:
         return list(self.notes)
 
-    def list_tags(self) -> tuple[tuple[str, int], ...]:
-        return self.tag_pairs
-
     def get(self, note_id: str) -> Note:
-        raise NotImplementedError
-
-    def list_modified_since(self, since: datetime) -> list[Note]:
-        raise NotImplementedError
-
-    def search(self, query: str) -> list[Note]:
         raise NotImplementedError
 
     def insert(self, note: Note) -> Note:
@@ -186,7 +170,6 @@ class SidebarSelectionRenderingTests(unittest.TestCase):
                 _note_with_tags("1", ("baking", "bread")),
                 _note_with_tags("2", ("bread",)),
             ],
-            tag_pairs=(("baking", 1), ("bread", 2)),
         )
         store = NoteListStore(repository=repository)
         store.load()
@@ -254,7 +237,6 @@ class SidebarMultiSelectTests(unittest.TestCase):
                 _note_with_tags("1", ("baking", "bread")),
                 _note_with_tags("2", ("bread",)),
             ],
-            tag_pairs=(("baking", 1), ("bread", 2)),
         )
         store = NoteListStore(repository=repository)
         store.load()
@@ -351,16 +333,7 @@ class _WritableNoteRepository:
         self._notes.append(persisted)
         return persisted
 
-    def list_tags(self) -> tuple[tuple[str, int], ...]:
-        raise NotImplementedError
-
     def get(self, note_id: str) -> Note:
-        raise NotImplementedError
-
-    def list_modified_since(self, since: datetime) -> list[Note]:
-        raise NotImplementedError
-
-    def search(self, query: str) -> list[Note]:
         raise NotImplementedError
 
     def update_source(

@@ -145,12 +145,6 @@ class _FakeNoteRepository:
         return self.notes[note_id]
 
 
-    def list_modified_since(self, _since: datetime) -> list[Note]:
-        raise NotImplementedError
-
-    def search(self, _query: str) -> list[Note]:
-        raise NotImplementedError
-
     def insert(self, note: Note) -> Note:
         summary = derive_summary(note.source)
         persisted = Note(
@@ -192,9 +186,6 @@ class _FakeNoteRepository:
 
     def delete(self, note_id: str) -> None:
         del self.notes[note_id]
-
-    def list_tags(self) -> tuple[tuple[str, int], ...]:
-        return self.tag_pairs
 
 
 class _FakeAttachmentStore:

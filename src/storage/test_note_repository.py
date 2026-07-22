@@ -132,67 +132,8 @@ class ListingTests(_NoteRepoTestBase):
             ["new", "mid", "old"],
         )
 
-    def test_list_modified_since_filters_inclusively(self) -> None:
-        a = datetime(2026, 1, 1, tzinfo=UTC)
-        b = datetime(2026, 1, 5, tzinfo=UTC)
-        c = datetime(2026, 1, 10, tzinfo=UTC)
-        self.repo.insert(_make_note(note_id="a", modified_at=a))
-        self.repo.insert(_make_note(note_id="b", modified_at=b))
-        self.repo.insert(_make_note(note_id="c", modified_at=c))
-        ids = [n.id for n in self.repo.list_modified_since(b)]
-        self.assertEqual(ids, ["c", "b"])
-
     def test_listings_return_empty_on_empty_table(self) -> None:
         self.assertEqual(self.repo.list_all(), [])
-
-
-# ---------------------------------------------------------------------------
-# Search
-# ---------------------------------------------------------------------------
-
-
-class SearchTests(_NoteRepoTestBase):
-    def test_search_finds_match_in_title(self) -> None:
-        self.repo.insert(_make_note(
-            note_id="n1", source="= Quick Brown Fox\n\nbody"))
-        self.repo.insert(_make_note(
-            note_id="n2", source="= Other\n\nbody"))
-        results = self.repo.search("brown")
-        self.assertEqual([n.id for n in results], ["n1"])
-
-    def test_search_finds_match_in_snippet(self) -> None:
-        self.repo.insert(_make_note(
-            note_id="n1", source="= Title\n\nUnique snippet body."))
-        results = self.repo.search("snippet")
-        self.assertEqual([n.id for n in results], ["n1"])
-
-    def test_search_finds_match_in_source(self) -> None:
-        source = "= Title\n\nshort\n\n----\nDeep_token here\n----\n"
-        self.repo.insert(_make_note(note_id="n1", source=source))
-        results = self.repo.search("Deep_token")
-        self.assertEqual([n.id for n in results], ["n1"])
-
-    def test_search_is_case_insensitive_for_ascii(self) -> None:
-        self.repo.insert(_make_note(
-            note_id="n1", source="= MIXED case TITLE\n\nbody"))
-        results = self.repo.search("mixed")
-        self.assertEqual([n.id for n in results], ["n1"])
-
-    def test_search_escapes_percent_wildcard(self) -> None:
-        self.repo.insert(_make_note(
-            note_id="literal", source="= Discount\n\nNow 20% off."))
-        self.repo.insert(_make_note(
-            note_id="not_literal", source="= Plain\n\n20 dollars and nothing"))
-        results = self.repo.search("20%")
-        ids = {n.id for n in results}
-        self.assertIn("literal", ids)
-        self.assertNotIn("not_literal", ids)
-
-    def test_search_empty_string_matches_all(self) -> None:
-        self.repo.insert(_make_note(note_id="a"))
-        self.repo.insert(_make_note(note_id="b"))
-        ids = {n.id for n in self.repo.search("")}
-        self.assertEqual(ids, {"a", "b"})
 
 
 # ---------------------------------------------------------------------------
@@ -338,27 +279,6 @@ class InsertTagsRoundTripTests(_NoteRepoTestBase):
         self.assertEqual(notes[0].tags, ("bread",))
         self.assertEqual(notes[1].id, "b")
         self.assertEqual(notes[1].tags, ("baking", "bread"))
-
-
-class ListTagsTests(_NoteRepoTestBase):
-    def test_list_tags_returns_empty_when_no_tag_rows(self) -> None:
-        self.repo.insert(_make_note(note_id="n1"))
-        self.assertEqual(self.repo.list_tags(), ())
-
-    def test_list_tags_counts_correctly_and_sorts_alphabetically(self) -> None:
-        self.repo.insert(_make_note(
-            note_id="n1", source="= A\n:tags: zeta, baking\n\nbody",
-        ))
-        self.repo.insert(_make_note(
-            note_id="n2", source="= B\n:tags: baking, bread\n\nbody",
-        ))
-        self.repo.insert(_make_note(
-            note_id="n3", source="= C\n:tags: baking\n\nbody",
-        ))
-        self.assertEqual(
-            self.repo.list_tags(),
-            (("baking", 3), ("bread", 1), ("zeta", 1)),
-        )
 
 
 if __name__ == "__main__":

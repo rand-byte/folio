@@ -145,24 +145,12 @@ class _FakeNoteRepository:
     def get(self, note_id: str) -> Note:
         return self.notes[note_id]
 
-    def list_modified_since(self, since: datetime) -> list[Note]:
-        return [n for n in self.notes.values() if n.modified_at >= since]
-
     def list_all(self) -> list[Note]:
         return sorted(
             self.notes.values(),
             key=lambda n: n.modified_at,
             reverse=True,
         )
-
-    def search(self, query: str) -> list[Note]:
-        needle = query.lower()
-        return [
-            n for n in self.notes.values()
-            if needle in n.title.lower()
-            or needle in n.snippet.lower()
-            or needle in n.source.lower()
-        ]
 
     def insert(self, note: Note) -> Note:
         self.notes[note.id] = note
@@ -190,13 +178,6 @@ class _FakeNoteRepository:
     def delete(self, note_id: str) -> None:
         del self.notes[note_id]
 
-    def list_tags(self) -> tuple[tuple[str, int], ...]:
-        counts: dict[str, int] = {}
-        for note in self.notes.values():
-            for tag in note.tags:
-                counts[tag] = counts.get(tag, 0) + 1
-        return tuple(sorted(counts.items()))
-
 
 class FakeNoteRepositorySanityTests(unittest.TestCase):
     """Confirms the fake actually satisfies the protocol surface."""
@@ -207,30 +188,8 @@ class FakeNoteRepositorySanityTests(unittest.TestCase):
         fetched = fake.get("n1")
         self.assertEqual(fetched.id, "n1")
         self.assertEqual(fake.list_all(), [fetched])
-        self.assertEqual(fake.search("t"), [fetched])
         fake.delete("n1")
         self.assertEqual(fake.list_all(), [])
-
-    def test_list_tags_returns_expected_shape(self) -> None:
-        fake = _FakeNoteRepository()
-        a = Note(
-            id="a", title="A", source="", snippet="",
-            tags=("baking", "bread"),
-            created_at=datetime(2026, 1, 1, tzinfo=UTC),
-            modified_at=datetime(2026, 1, 1, tzinfo=UTC),
-        )
-        b = Note(
-            id="b", title="B", source="", snippet="",
-            tags=("baking",),
-            created_at=datetime(2026, 1, 1, tzinfo=UTC),
-            modified_at=datetime(2026, 1, 1, tzinfo=UTC),
-        )
-        fake.insert(a)
-        fake.insert(b)
-        self.assertEqual(
-            fake.list_tags(),
-            (("baking", 2), ("bread", 1)),
-        )
 
 
 class _FakeAttachmentStore:

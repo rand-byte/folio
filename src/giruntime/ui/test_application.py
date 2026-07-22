@@ -85,14 +85,8 @@ class _FakeNoteRepository:
     def get(self, note_id: str) -> Note:
         return self.notes[note_id]
 
-    def list_modified_since(self, _since: datetime) -> list[Note]:
-        raise NotImplementedError
-
     def list_all(self) -> list[Note]:
         return list(self.notes.values())
-
-    def search(self, _query: str) -> list[Note]:
-        raise NotImplementedError
 
     def insert(self, note: Note) -> Note:
         raise NotImplementedError
@@ -107,9 +101,6 @@ class _FakeNoteRepository:
 
     def delete(self, note_id: str) -> None:
         raise NotImplementedError
-
-    def list_tags(self) -> tuple[tuple[str, int], ...]:
-        return ()
 
 
 class _FakeMainWindow:

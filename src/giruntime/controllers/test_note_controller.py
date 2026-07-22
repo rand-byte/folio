@@ -54,22 +54,12 @@ class _FakeNoteRepository:
     def get(self, note_id: str) -> Note:
         return self.notes[note_id]
 
-    def list_modified_since(self, since: datetime) -> list[Note]:
-        return [n for n in self.notes.values() if n.modified_at >= since]
-
     def list_all(self) -> list[Note]:
         return sorted(
             self.notes.values(),
             key=lambda n: n.modified_at,
             reverse=True,
         )
-
-    def search(self, query: str) -> list[Note]:
-        needle = query.lower()
-        return [
-            n for n in self.notes.values()
-            if needle in n.title.lower() or needle in n.source.lower()
-        ]
 
     def insert(self, note: Note) -> Note:
         if note.id in self.notes:
@@ -109,13 +99,6 @@ class _FakeNoteRepository:
 
     def delete(self, note_id: str) -> None:
         del self.notes[note_id]
-
-    def list_tags(self) -> tuple[tuple[str, int], ...]:
-        counts: dict[str, int] = {}
-        for note in self.notes.values():
-            for tag in note.tags:
-                counts[tag] = counts.get(tag, 0) + 1
-        return tuple(sorted(counts.items()))
 
 
 class _FakeAttachmentStore:

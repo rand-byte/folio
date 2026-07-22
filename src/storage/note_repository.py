@@ -31,29 +31,19 @@ Principles & invariants
   :meth:`update_source` recovers the one field it does not already hold,
   ``created_at``, via ``UPDATE ... RETURNING created_at`` in the same
   round trip.
-* :meth:`search`, :meth:`list_modified_since`, and :meth:`list_tags`
-  are **no longer on any UI path** after the write-through model
-  migration (the note list filters in memory; the sidebar derives tag
-  counts from the in-memory store). They remain for legacy callers and
-  their own tests; do not add new consumers.
 * :meth:`get`, :meth:`update_source`, :meth:`delete` raise
   :class:`KeyError` on an unknown id, matching the dict-like in-memory
   fake used by controller tests so production and test code paths are
   interchangeable.
-* Listing methods sort by ``modified_at DESC`` (the indexed column) so
-  the most-recently-edited note is first. Further sorting (created date,
-  title) is the responsibility of :mod:`search.note_filter`, which
-  composes on the materialised list.
+* :meth:`list_all` sorts by ``modified_at DESC`` (the indexed column) so
+  the most-recently-edited note is first. All further composition
+  (filtering, substring search, tag counts, alternate sort orders) is
+  the responsibility of the controllers / :mod:`search.note_filter`
+  layers, which operate on this materialised list rather than issuing
+  further queries here.
 * Tags are read by an outer join (``LEFT JOIN note_tags``) so a note
   with zero tags still appears, and the list-builder gets all rows in
   one round trip rather than firing an N+1 per-note query.
-* :meth:`list_tags` returns ``((tag, count), ...)`` for every distinct
-  tag in use, alphabetically ordered. Empty when no note has any tags.
-* Search is a substring match across ``title``, ``snippet``, and
-  ``source``, case-insensitive for ASCII (SQLite ``LIKE`` default).
-  User input is escape-quoted via :func:`_escape_like` so a literal
-  ``%`` or ``_`` in the query does not turn into a SQL wildcard. Tags
-  are not searched; the *Tags* sidebar provides direct selection.
 """
 
 from __future__ import annotations
@@ -66,10 +56,6 @@ from typing import Final
 from asciidoc.summary import derive_summary
 from models.note import Note
 from storage.database import Database
-
-
-_LIKE_ESCAPE_CHAR: Final[str] = "\\"
-"""Escape character announced via ``ESCAPE`` clauses in LIKE queries."""
 
 
 _NOTE_FIELDS: Final[str] = (
@@ -119,39 +105,12 @@ class NoteRepository:
             raise KeyError(note_id)
         return notes[0]
 
-    def list_modified_since(self, since: datetime) -> list[Note]:
-        cursor = self._db.connection.execute(
-            _join_with_tags(
-                "WHERE n.modified_at >= ?",
-                "ORDER BY n.modified_at DESC, n.id, tag ASC",
-            ),
-            (since.isoformat(),),
-        )
-        return _assemble_notes(cursor.fetchall())
-
     def list_all(self) -> list[Note]:
         cursor = self._db.connection.execute(
             _join_with_tags(
                 "",
                 "ORDER BY n.modified_at DESC, n.id, tag ASC",
             )
-        )
-        return _assemble_notes(cursor.fetchall())
-
-    def search(self, query: str) -> list[Note]:
-        pattern = f"%{_escape_like(query)}%"
-        cursor = self._db.connection.execute(
-            _join_with_tags(
-                "WHERE n.title LIKE ? ESCAPE ? "
-                "OR n.snippet LIKE ? ESCAPE ? "
-                "OR n.source LIKE ? ESCAPE ?",
-                "ORDER BY n.modified_at DESC, n.id, tag ASC",
-            ),
-            (
-                pattern, _LIKE_ESCAPE_CHAR,
-                pattern, _LIKE_ESCAPE_CHAR,
-                pattern, _LIKE_ESCAPE_CHAR,
-            ),
         )
         return _assemble_notes(cursor.fetchall())
 
@@ -266,20 +225,6 @@ class NoteRepository:
             if cursor.rowcount == 0:
                 raise KeyError(note_id)
 
-    def list_tags(self) -> tuple[tuple[str, int], ...]:
-        """Return every distinct tag with its note count, alphabetically.
-
-        Driven by a plain ``GROUP BY`` on the junction table. The
-        sidebar reads this directly to populate its *Tags* section.
-        """
-        cursor = self._db.connection.execute(
-            "SELECT tag, COUNT(*) AS n "
-            "FROM note_tags "
-            "GROUP BY tag "
-            "ORDER BY tag ASC"
-        )
-        return tuple((row["tag"], int(row["n"])) for row in cursor.fetchall())
-
 
 def _assemble_notes(rows: Iterable[sqlite3.Row]) -> list[Note]:
     """Group joined ``(note × tag)`` rows into :class:`Note` instances.
@@ -327,14 +272,4 @@ def _row_to_note(row: sqlite3.Row, tags: list[str]) -> Note:
         tags=tuple(tags),
         created_at=datetime.fromisoformat(row["created_at"]),
         modified_at=datetime.fromisoformat(row["modified_at"]),
-    )
-
-
-def _escape_like(text: str) -> str:
-    """Escape SQL ``LIKE`` wildcards so user input is treated as literal."""
-    return (
-        text
-        .replace(_LIKE_ESCAPE_CHAR, _LIKE_ESCAPE_CHAR + _LIKE_ESCAPE_CHAR)
-        .replace("%", _LIKE_ESCAPE_CHAR + "%")
-        .replace("_", _LIKE_ESCAPE_CHAR + "_")
     )

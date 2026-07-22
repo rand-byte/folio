@@ -156,29 +156,15 @@ class NoteRepositoryProtocol(Protocol):
 
     Every method is atomic with respect to the database. Returns are
     plain :class:`Note` dataclasses; ``sqlite3.Row`` objects never escape
-    the implementation. The query methods below pre-filter by smart-filter
-    / substring on the database side; further composition (tag AND,
-    live search query, sort dropdown) happens in :mod:`search`.
-
-    :meth:`list_tags` returns every distinct tag currently in use,
-    paired with its note count, alphabetically ordered. This is the
-    surface the sidebar's *Tags* section reads.
+    the implementation. :meth:`list_all` materialises the whole table in
+    ``modified_at DESC`` order; all further composition (filtering, tag
+    AND, live search query, sort dropdown, tag counts) happens in the
+    controllers/:mod:`search` layers over the in-memory list, not here.
     """
 
     def get(self, note_id: str) -> Note: ...
 
-    def list_modified_since(self, since: datetime) -> list[Note]:
-        """Notes modified at/after ``since``. No longer on any UI path
-        after the write-through model migration — retained for legacy
-        callers and tests; do not add new consumers."""
-
     def list_all(self) -> list[Note]: ...
-
-    def search(self, query: str) -> list[Note]:
-        """Substring search across title/snippet/source. No longer on
-        any UI path after the write-through model migration (the note
-        list filters in memory) — retained for legacy callers and tests;
-        do not add new consumers."""
 
     def insert(self, note: Note) -> Note:
         """Persist ``note`` and return it **as stored** — i.e. with
@@ -200,12 +186,6 @@ class NoteRepositoryProtocol(Protocol):
         every other field is the freshly-derived state."""
 
     def delete(self, note_id: str) -> None: ...
-
-    def list_tags(self) -> tuple[tuple[str, int], ...]:
-        """Distinct tags with note counts, alphabetically. No longer on
-        any UI path after the write-through model migration (the sidebar
-        derives tag counts from the in-memory store) — retained for
-        legacy callers and tests; do not add new consumers."""
 
 
 class AttachmentStoreProtocol(Protocol):
