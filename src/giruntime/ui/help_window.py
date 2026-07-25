@@ -113,10 +113,10 @@ from giruntime.ui.link_handler import (
     UriLauncherFactory,
     default_launcher_factory,
 )
+from giruntime.ui.note_render.article_text_view import ArticleTextView
 from giruntime.ui.note_render.tag_table import TagName
 from giruntime.ui.note_render.textbuffer_renderer import TextBufferRenderer
 from giruntime.ui.note_view import (
-    ArticleTextView,
     build_article_surface,
     make_cell_width_measurer,
 )

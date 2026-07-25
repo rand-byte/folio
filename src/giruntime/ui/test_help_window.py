@@ -19,7 +19,8 @@ from giruntime.ui._filesize import format_byte_size
 from giruntime.ui.help_window import HelpWindow, _section_mark_name
 from giruntime.ui.link_handler import UriLauncherProtocol
 from giruntime.ui.note_render.tag_table import build_wash_specs
-from giruntime.ui.note_view import ArticleContainer, ArticleTextView
+from giruntime.ui.article_container import ArticleContainer
+from giruntime.ui.note_render.article_text_view import ArticleTextView
 from giruntime.ui.test_main_window import _display_available, _test_application
 from models.parse_error import ParseError
 from system_docs import load_bytes, load_text

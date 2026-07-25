@@ -1,0 +1,1151 @@
+"""Tests for :mod:`giruntime.ui.article_container`."""
+
+from __future__ import annotations
+
+import gc
+import struct
+import unittest
+import zlib
+from collections.abc import Callable
+from datetime import (
+    UTC,
+    datetime,
+    timedelta,
+)
+from pathlib import Path
+from unittest import mock
+
+from gi.repository import Gdk, GLib, GObject, Gsk, Gtk
+
+from config.defaults import (
+    ARTICLE_INNER_HPADDING_CHARS,
+    TARGET_CHARS_PER_LINE,
+)
+from enums import AttachmentExportFailureReason
+from giruntime.controllers.app_state import AppState
+from giruntime.controllers.note_list_store import NoteListStore
+from giruntime.ui import note_view as note_view_module
+from giruntime.ui.article_container import (
+    ArticleContainer,
+    CharWidthMeasurer,
+    LineHeightMeasurer,
+    _FALLBACK_CHAR_WIDTH_PX,
+    _FALLBACK_LINE_HEIGHT_PX,
+)
+from giruntime.ui.note_view import NoteView
+from models.attachment import Attachment
+from models.note import Note
+from storage.protocols import AttachmentExportFailed
+
+
+_FIXED_NOW: datetime = datetime(2026, 4, 28, 12, 0, 0, tzinfo=UTC)
+
+
+def _display_available() -> bool:
+    """True iff a GDK display can be opened — required for widget construction."""
+    Gtk.init_check()
+    return Gdk.Display.get_default() is not None
+
+
+def _fixed_measurer(value: int) -> CharWidthMeasurer:
+    """Return a measurer callable that always reports ``value``.
+
+    Used by the :class:`ArticleContainer` tests below so the two
+    measurer slots (M-width and line-height) can be filled with a
+    fixed integer without writing a lambda per call site. The return
+    type is :data:`CharWidthMeasurer`; :data:`LineHeightMeasurer` has
+    the same shape (``Callable[[], int]``) so the same factory plugs
+    into either slot.
+    """
+    return lambda: value
+
+
+def _make_test_article_container(
+    *,
+    char_w: int = 10,
+    line_h: int = 20,
+) -> ArticleContainer:
+    """Build an :class:`ArticleContainer` wired with fixed measurers.
+
+    Keeps the two-arg construction pattern out of every test that
+    doesn't care about the specific values, while still letting the
+    tests that do care override them.
+    """
+    return ArticleContainer(
+        char_width_measurer=_fixed_measurer(char_w),
+        line_height_measurer=_fixed_measurer(line_h),
+    )
+
+
+def _stub_font_measurers_factory(
+    *,
+    char_w: int,
+    line_h: int,
+) -> Callable[[Gtk.TextView], tuple[CharWidthMeasurer, LineHeightMeasurer]]:
+    """Build a stand-in for :func:`note_view._build_font_measurers`.
+
+    The returned callable matches the production helper's signature
+    so it can be monkey-patched in place, but ignores the live
+    :class:`Gtk.TextView` and returns fixed-value measurers instead.
+    Tests use this to drive :class:`NoteView` construction with
+    deterministic font dimensions, side-stepping the real Pango
+    layout.
+    """
+
+    def build(
+        _text_view: Gtk.TextView,
+    ) -> tuple[CharWidthMeasurer, LineHeightMeasurer]:
+        return (_fixed_measurer(char_w), _fixed_measurer(line_h))
+
+    return build
+
+
+def _make_note(
+    note_id: str,
+    *,
+    source: str = "= Hello\n\nbody.\n",
+    tags: tuple[str, ...] = (),
+    title: str | None = None,
+) -> Note:
+    """Build a deterministic :class:`Note` for tests."""
+    return Note(
+        id=note_id,
+        title=title if title is not None else "Hello",
+        source=source,
+        snippet="body.",
+        tags=tags,
+        created_at=_FIXED_NOW,
+        modified_at=_FIXED_NOW + timedelta(seconds=1),
+    )
+
+
+def _solid_png(width: int, height: int) -> bytes:
+    """Encode a minimal solid-colour RGB PNG of the given pixel size.
+
+    The scrollbar regression test needs a *real, decodable* image whose
+    last line is taller than the viewport. A hand-rolled encoder keeps the
+    test self-contained (no Pillow / GdkPixbuf-save dependency) and lets it
+    ask for an arbitrarily tall image; a solid fill compresses to a few
+    bytes regardless of size. Colour type 2 is RGB, bit depth 8, no filter.
+    """
+
+    def _chunk(tag: bytes, payload: bytes) -> bytes:
+        crc = zlib.crc32(tag + payload) & 0xFFFFFFFF
+        return struct.pack(">I", len(payload)) + tag + payload + struct.pack(
+            ">I", crc
+        )
+
+    signature = b"\x89PNG\r\n\x1a\n"
+    ihdr = struct.pack(">IIBBBBB", width, height, 8, 2, 0, 0, 0)
+    scanline = b"\x00" + bytes((80, 120, 200)) * width
+    image_data = zlib.compress(scanline * height, 9)
+    return (
+        signature
+        + _chunk(b"IHDR", ihdr)
+        + _chunk(b"IDAT", image_data)
+        + _chunk(b"IEND", b"")
+    )
+
+
+def _settle_real_main_loop(timeout_ms: int = 400) -> None:
+    """Run a real :class:`GLib.MainLoop`, quitting after ``timeout_ms``.
+
+    Unlike the manually pumped ``MainContext.iteration`` loop most widget
+    tests use, this drives the *real* main loop so the frame clock actually
+    ticks and the window maps. The scrollbar bug only manifests after that
+    tick (a pumped context never advances the frame clock), so the
+    regression test must settle this way rather than pumping iterations.
+    """
+    loop = GLib.MainLoop()
+
+    def _quit() -> bool:
+        loop.quit()
+        result: bool = GLib.SOURCE_REMOVE
+        return result
+
+    GLib.timeout_add(timeout_ms, _quit)
+    loop.run()
+
+
+class _FakeNoteRepository:
+    """Minimal :class:`NoteRepositoryProtocol` impl for view tests.
+
+    The methods the view tests exercise are filled in — the view's read
+    path, plus the single ``update_source`` write the §2.2 hidden-pane
+    deferral tests drive through :meth:`NoteListStore.update`. The rest
+    raise :class:`NotImplementedError` so a future test that invokes one
+    by accident fails loudly rather than silently.
+    """
+
+    notes: dict[str, Note]
+    get_calls: list[str]
+
+    def __init__(self) -> None:
+        self.notes = {}
+        self.get_calls = []
+
+    # The single read path :class:`NoteView` uses.
+    def get(self, note_id: str) -> Note:
+        self.get_calls.append(note_id)
+        return self.notes[note_id]
+
+    def list_all(self) -> list[Note]:
+        return list(self.notes.values())
+
+    def insert(self, _note: Note) -> Note:
+        raise NotImplementedError
+
+    def update_source(
+        self,
+        note_id: str,
+        source: str,
+        modified_at: datetime,
+    ) -> Note:
+        """Return an edited copy of ``note_id`` carrying the new source.
+
+        Implemented (unlike the other write stubs) because the §2.2
+        hidden-pane re-render tests drive a real edit through
+        :meth:`NoteListStore.update`, which persists via this method
+        before splicing the fresh row back into the store.
+        """
+        existing = self.notes[note_id]
+        edited = Note(
+            id=existing.id,
+            title=existing.title,
+            source=source,
+            snippet=existing.snippet,
+            tags=existing.tags,
+            created_at=existing.created_at,
+            modified_at=modified_at,
+        )
+        self.notes[note_id] = edited
+        return edited
+
+    def delete(self, _note_id: str) -> None:
+        raise NotImplementedError
+
+
+class _TrackingNoteListStore(NoteListStore):
+    """A :class:`NoteListStore` that records :meth:`get_note` calls.
+
+    Lets the view smoke-tests assert which note the view read, and in
+    what order, now that body reads come from the store rather than the
+    repository.
+    """
+
+    get_calls: list[str]
+
+    def __init__(self, *, repository: _FakeNoteRepository) -> None:
+        super().__init__(repository=repository)
+        self.get_calls = []
+
+    def get_note(self, note_id: str) -> Note:
+        self.get_calls.append(note_id)
+        return super().get_note(note_id)
+
+
+def _build_tracking_store(repo: _FakeNoteRepository) -> _TrackingNoteListStore:
+    """Build a loaded tracking store over ``repo``'s seeded notes."""
+    store = _TrackingNoteListStore(repository=repo)
+    store.load()
+    return store
+
+
+class _FakeAttachmentStore:
+    """Minimal :class:`AttachmentStoreProtocol` impl for view tests.
+
+    The store is dict-backed: :attr:`metadata` is a per-note list of
+    :class:`Attachment` instances, :attr:`blobs` maps attachment id
+    to bytes. Tests prime both directly (no ``add_for_note`` flow
+    involved — that's the editor's concern) and assert on the
+    ``calls_*`` lists to verify the resolver called the right methods
+    in the right order.
+    """
+
+    metadata_by_note: dict[str, list[Attachment]]
+    blobs: dict[str, bytes]
+    list_calls: list[str]
+    get_bytes_calls: list[str]
+
+    def __init__(self) -> None:
+        self.metadata_by_note = {}
+        self.blobs = {}
+        self.list_calls = []
+        self.get_bytes_calls = []
+
+    # --- helpers used by tests to seed the store ---
+
+    def seed(self, note_id: str, filename: str, data: bytes) -> Attachment:
+        attachment = Attachment(
+            id=f"att-{len(self.blobs) + 1}",
+            note_id=note_id,
+            filename=filename,
+            byte_size=len(data),
+        )
+        self.metadata_by_note.setdefault(note_id, []).append(attachment)
+        self.blobs[attachment.id] = data
+        return attachment
+
+    # --- protocol surface ---
+
+    def add_for_note(self, _note_id: str, _source_path: Path) -> Attachment:
+        raise NotImplementedError
+
+    def remove(self, _attachment_id: str) -> None:
+        raise NotImplementedError
+
+    def list_for_note(self, note_id: str) -> list[Attachment]:
+        self.list_calls.append(note_id)
+        return list(self.metadata_by_note.get(note_id, ()))
+
+    def get_bytes(self, attachment_id: str) -> bytes:
+        self.get_bytes_calls.append(attachment_id)
+        return self.blobs[attachment_id]
+
+    def count_for_note(self, note_id: str) -> int:
+        return len(self.metadata_by_note.get(note_id, ()))
+
+    def export_to(self, attachment_id: str, destination: Path) -> None:
+        """Write the attachment's bytes out (the outbound mirror of add)."""
+        try:
+            data = self.get_bytes(attachment_id)
+        except KeyError as exc:
+            raise AttachmentExportFailed(
+                AttachmentExportFailureReason.UNKNOWN_ATTACHMENT,
+            ) from exc
+        try:
+            destination.write_bytes(data)
+        except OSError as exc:
+            raise AttachmentExportFailed(
+                AttachmentExportFailureReason.DESTINATION_UNWRITABLE,
+            ) from exc
+
+
+@unittest.skipUnless(_display_available(), "no GDK display")
+class ArticleContainerWidthGettersTests(unittest.TestCase):
+    """The container exposes two width getters and two unit getters.
+
+    * ``text_column_width`` is the inner *text-area* width — the
+      66-character reading column the renderer lays tables and images
+      against.
+    * ``outer_column_width`` is the widget's actual width — the text
+      area plus the inner horizontal padding on both sides. Used by
+      :meth:`do_measure` and :meth:`do_size_allocate`.
+    * ``char_width_px`` and ``line_height_px`` are the cached measured
+      values that :class:`NoteView` reads when setting the four
+      TextView margins.
+    """
+
+    def test_text_column_width_is_target_chars_times_m_width(self) -> None:
+        container = _make_test_article_container(char_w=10, line_h=20)
+        self.assertEqual(
+            container.text_column_width(),
+            TARGET_CHARS_PER_LINE * 10,
+        )
+
+    def test_outer_column_width_includes_horizontal_padding_on_both_sides(
+        self,
+    ) -> None:
+        # outer = (66 + 2 × 8) × 10 = 820. The padding-aware width is
+        # what the size-allocation and measurement vfuncs use; the text
+        # area inside it remains 66 × char_w.
+        container = _make_test_article_container(char_w=10, line_h=20)
+        expected = (TARGET_CHARS_PER_LINE + 2 * ARTICLE_INNER_HPADDING_CHARS) * 10
+        self.assertEqual(container.outer_column_width(), expected)
+
+    def test_outer_minus_text_is_exactly_two_sides_of_padding(self) -> None:
+        # The whole-point invariant of this change: the padding is
+        # absorbed by the column's outer width, so the 66-char text
+        # area is preserved. ``outer - text`` must be exactly
+        # ``2 × ARTICLE_INNER_HPADDING_CHARS × char_w``.
+        container = _make_test_article_container(char_w=10, line_h=20)
+        slack = container.outer_column_width() - container.text_column_width()
+        self.assertEqual(slack, 2 * ARTICLE_INNER_HPADDING_CHARS * 10)
+
+    def test_line_height_px_returns_measured_value(self) -> None:
+        container = _make_test_article_container(char_w=10, line_h=20)
+        self.assertEqual(container.line_height_px(), 20)
+
+    def test_char_width_px_returns_measured_value(self) -> None:
+        container = _make_test_article_container(char_w=10, line_h=20)
+        self.assertEqual(container.char_width_px(), 10)
+
+    def test_non_positive_char_width_uses_fallback(self) -> None:
+        # A real font's "M" is never zero pixels wide; the fallback
+        # exists for the corner case (measuring before the widget has
+        # any font at all). A zero result must yield a usable
+        # column, not a zero-pixel one.
+        container = ArticleContainer(
+            char_width_measurer=_fixed_measurer(0),
+            line_height_measurer=_fixed_measurer(20),
+        )
+        self.assertEqual(container.char_width_px(), _FALLBACK_CHAR_WIDTH_PX)
+        self.assertEqual(
+            container.text_column_width(),
+            TARGET_CHARS_PER_LINE * _FALLBACK_CHAR_WIDTH_PX,
+        )
+
+    def test_negative_char_width_uses_fallback(self) -> None:
+        container = ArticleContainer(
+            char_width_measurer=_fixed_measurer(-3),
+            line_height_measurer=_fixed_measurer(20),
+        )
+        self.assertEqual(container.char_width_px(), _FALLBACK_CHAR_WIDTH_PX)
+
+    def test_non_positive_line_height_uses_fallback(self) -> None:
+        # Symmetric to char_width: a zero measurement must yield the
+        # fallback line height so the container's vertical metrics
+        # remain usable.
+        container = ArticleContainer(
+            char_width_measurer=_fixed_measurer(10),
+            line_height_measurer=_fixed_measurer(0),
+        )
+        self.assertEqual(container.line_height_px(), _FALLBACK_LINE_HEIGHT_PX)
+
+    def test_negative_line_height_uses_fallback(self) -> None:
+        container = ArticleContainer(
+            char_width_measurer=_fixed_measurer(10),
+            line_height_measurer=_fixed_measurer(-5),
+        )
+        self.assertEqual(container.line_height_px(), _FALLBACK_LINE_HEIGHT_PX)
+
+    def test_measurers_are_invoked_at_most_once(self) -> None:
+        # Locks in the caching invariant for both measurers. Calling
+        # every getter ten times must still result in exactly one
+        # invocation per measurer.
+        char_calls: list[None] = []
+        line_calls: list[None] = []
+
+        def char_measure() -> int:
+            char_calls.append(None)
+            return 10
+
+        def line_measure() -> int:
+            line_calls.append(None)
+            return 20
+
+        container = ArticleContainer(
+            char_width_measurer=char_measure,
+            line_height_measurer=line_measure,
+        )
+        for _ in range(10):
+            container.text_column_width()
+            container.outer_column_width()
+            container.char_width_px()
+            container.line_height_px()
+
+        self.assertEqual(len(char_calls), 1)
+        self.assertEqual(len(line_calls), 1)
+
+
+class _CapturingChild(Gtk.Widget):
+    """A bare :class:`Gtk.Widget` that records its last allocate / measure call.
+
+    Plugged into the size-allocate tests as :class:`ArticleContainer`'s
+    single child so the tests can assert what arguments the container
+    passes through :meth:`Gtk.Widget.allocate` (width / height /
+    baseline / transform) and :meth:`Gtk.Widget.measure` (orientation /
+    for-size) on it.
+
+    The Python overrides of :meth:`allocate` and :meth:`measure`
+    intercept the calls *before* they reach the C implementation, so
+    no real layout work happens — the recorded args are the
+    container's outputs verbatim. A reported height is returned from
+    :meth:`measure` so the vertical-forwarding test has something
+    deterministic to assert on.
+    """
+
+    recorded_allocate_calls: list[tuple[int, int, int, Gsk.Transform | None]]
+    recorded_measure_calls: list[tuple[Gtk.Orientation, int]]
+    _reported_vertical_height: int
+
+    def __init__(self, *, reported_vertical_height: int = 0) -> None:
+        super().__init__()
+        self.recorded_allocate_calls = []
+        self.recorded_measure_calls = []
+        self._reported_vertical_height = reported_vertical_height
+
+    def allocate(  # pylint: disable=arguments-differ
+        self,
+        width: int,
+        height: int,
+        baseline: int,
+        transform: Gsk.Transform | None,
+    ) -> None:
+        self.recorded_allocate_calls.append((width, height, baseline, transform))
+
+    def measure(  # pylint: disable=arguments-differ
+        self,
+        orientation: Gtk.Orientation,
+        for_size: int,
+    ) -> tuple[int, int, int, int]:
+        self.recorded_measure_calls.append((orientation, for_size))
+        if orientation == Gtk.Orientation.VERTICAL:
+            h = self._reported_vertical_height
+            return (h, h, -1, -1)
+        return (0, 0, -1, -1)
+
+
+def _transform_x_offset(transform: Gsk.Transform | None) -> int:
+    """Extract the X translation of ``transform`` (or 0 for ``None``).
+
+    Reads the affine 2-D components via :meth:`Gsk.Transform.to_2d`;
+    the fifth value is ``dx``. Tests assert on the offset because the
+    transform's identity isn't otherwise observable — the container's
+    contract is "the child appears at X = offset", not "the container
+    uses this particular ``Gsk.Transform`` object".
+    """
+    if transform is None:
+        return 0
+    _xx, _yx, _xy, _yy, dx, _dy = transform.to_2d()
+    return int(dx)
+
+
+@unittest.skipUnless(_display_available(), "no GDK display")
+class ArticleContainerBaseClassTests(unittest.TestCase):
+    """Lock the base class so the GTK 4 ``Gtk.Box``-can't-override-vfuncs
+    regression cannot reappear.
+
+    ``Gtk.Box`` delegates :meth:`measure` / :meth:`size_allocate` to its
+    ``BoxLayout`` layout manager at the C level, which means Python
+    overrides of :meth:`do_measure` / :meth:`do_size_allocate` on a
+    ``Gtk.Box`` subclass are dead code — the unit tests would pass
+    (the methods exist and run when called directly) while the live
+    widget behaved like a plain ``Gtk.Box``. The fix is to subclass
+    :class:`Gtk.Widget` instead; this test asserts that base class.
+    """
+
+    def test_article_container_is_a_gtk_widget_not_a_gtk_box(self) -> None:
+        container = _make_test_article_container()
+        self.assertIsInstance(container, Gtk.Widget)
+        self.assertNotIsInstance(container, Gtk.Box)
+
+
+@unittest.skipUnless(_display_available(), "no GDK display")
+class ArticleContainerSizeAllocateTests(unittest.TestCase):
+    """Pin the column-width rule from §10 of the plan.
+
+    A wide allocation centres the column by offsetting the child via a
+    translate-X :class:`Gsk.Transform`; a narrow or exact allocation
+    leaves the offset at 0 (the parent :class:`Gtk.ScrolledWindow` is
+    responsible for the horizontal scrollbar in that case — the test
+    does not assert on that). In every case, the child is allocated
+    exactly :meth:`ArticleContainer.outer_column_width` pixels wide —
+    that is the column-pinning invariant.
+
+    The assertions read the offset back from the recorded transform via
+    :func:`_transform_x_offset`; the container's contract is "the child
+    appears at X = offset", not "the container constructs this
+    particular ``Gsk.Transform`` object", so the tests check the
+    observable effect rather than object identity.
+    """
+
+    def _container_with_capturing_child(
+        self,
+        *,
+        char_w: int = 10,
+        line_h: int = 20,
+    ) -> tuple[ArticleContainer, _CapturingChild]:
+        container = _make_test_article_container(char_w=char_w, line_h=line_h)
+        child = _CapturingChild()
+        container.set_child(child)
+        return container, child
+
+    def test_wide_window_centres_child_with_half_slack_offset(self) -> None:
+        container, child = self._container_with_capturing_child()
+        outer = container.outer_column_width()
+        allocated = outer + 200  # 200 px of slack
+        container.do_size_allocate(allocated, 600, -1)
+
+        self.assertEqual(len(child.recorded_allocate_calls), 1)
+        width, height, baseline, transform = child.recorded_allocate_calls[0]
+        self.assertEqual(width, outer)
+        self.assertEqual(height, 600)
+        self.assertEqual(baseline, -1)
+        self.assertEqual(_transform_x_offset(transform), (allocated - outer) // 2)
+
+    def test_narrow_window_places_child_at_zero_offset(self) -> None:
+        container, child = self._container_with_capturing_child()
+        outer = container.outer_column_width()
+        # Narrower than the outer target — column does not shrink; the
+        # outer ScrolledWindow is responsible for the scrollbar (out of
+        # scope here).
+        container.do_size_allocate(outer - 200, 600, -1)
+
+        self.assertEqual(len(child.recorded_allocate_calls), 1)
+        width, _height, _baseline, transform = child.recorded_allocate_calls[0]
+        # Column-pinning invariant: child is allocated outer wide even
+        # though the parent gave us less.
+        self.assertEqual(width, outer)
+        self.assertEqual(_transform_x_offset(transform), 0)
+        # ``None`` is the GTK 4 idiom for "no transform"; verify the
+        # zero-offset path takes that fast-path.
+        self.assertIsNone(transform)
+
+    def test_exact_outer_width_places_child_at_zero_offset(self) -> None:
+        # The boundary: allocated == outer → no slack to absorb. The
+        # ``width >= outer`` centre branch runs and ``(outer - outer) //
+        # 2`` is 0, so the child sits at offset 0 with no transform — the
+        # same observable result as the narrow path's zero offset.
+        container, child = self._container_with_capturing_child()
+        outer = container.outer_column_width()
+        container.do_size_allocate(outer, 600, -1)
+
+        self.assertEqual(len(child.recorded_allocate_calls), 1)
+        _width, _height, _baseline, transform = child.recorded_allocate_calls[0]
+        self.assertEqual(_transform_x_offset(transform), 0)
+        self.assertIsNone(transform)
+
+    def test_repeated_allocate_with_same_width_is_stable(self) -> None:
+        # The implementation does not require an idempotence guard
+        # (it doesn't write ``self.margin-*``, only allocates the
+        # child) — every call produces the same offset against the
+        # same width.
+        container, child = self._container_with_capturing_child()
+        outer = container.outer_column_width()
+        allocated = outer + 80
+        for _ in range(3):
+            container.do_size_allocate(allocated, 400, -1)
+
+        self.assertEqual(len(child.recorded_allocate_calls), 3)
+        expected_offset = (allocated - outer) // 2  # 40
+        for width, _height, _baseline, transform in child.recorded_allocate_calls:
+            self.assertEqual(width, outer)
+            self.assertEqual(_transform_x_offset(transform), expected_offset)
+
+    def test_widening_then_narrowing_resets_offset_to_zero(self) -> None:
+        container, child = self._container_with_capturing_child()
+        outer = container.outer_column_width()
+        # Wide first.
+        container.do_size_allocate(outer + 300, 600, -1)
+        _w0, _h0, _b0, transform_wide = child.recorded_allocate_calls[-1]
+        self.assertGreater(_transform_x_offset(transform_wide), 0)
+        # Then narrow — offset must drop back to 0.
+        container.do_size_allocate(outer - 100, 600, -1)
+        _w1, _h1, _b1, transform_narrow = child.recorded_allocate_calls[-1]
+        self.assertEqual(_transform_x_offset(transform_narrow), 0)
+        self.assertIsNone(transform_narrow)
+
+    def test_child_always_allocated_outer_column_width_pixels_wide(
+        self,
+    ) -> None:
+        # The column-pinning invariant: across wide, exact, and narrow
+        # allocations, the width passed to the child is always exactly
+        # :meth:`outer_column_width`. The parent allocation's slack is
+        # absorbed by the offset, not by stretching or shrinking the
+        # child.
+        container, child = self._container_with_capturing_child()
+        outer = container.outer_column_width()
+        for parent_width in (outer - 200, outer, outer + 50, outer + 500):
+            with self.subTest(parent_width=parent_width):
+                child.recorded_allocate_calls.clear()
+                container.do_size_allocate(parent_width, 500, -1)
+                self.assertEqual(len(child.recorded_allocate_calls), 1)
+                width, _h, _b, _t = child.recorded_allocate_calls[0]
+                self.assertEqual(width, outer)
+
+    def test_allocate_is_a_no_op_when_no_child_is_set(self) -> None:
+        # Defensive path: the container is constructible without a
+        # child (production sets one immediately, but unit tests build
+        # one without). Allocating must not raise.
+        container = _make_test_article_container(char_w=10, line_h=20)
+        outer = container.outer_column_width()
+        # No assertion target beyond "does not raise" — the
+        # implementation has nothing to delegate to.
+        container.do_size_allocate(outer + 100, 600, -1)
+
+
+@unittest.skipUnless(_display_available(), "no GDK display")
+class ArticleContainerTeardownTests(unittest.TestCase):
+    """Pin the teardown unparent that silences the GTK 4 finalize warning.
+
+    :class:`ArticleContainer` parents its single child manually via
+    :meth:`Gtk.Widget.set_parent`, so — unlike a ``Gtk.Box``, whose
+    layout manager disposes of children for it — it must unparent that
+    child itself before being finalized, or GTK prints *"Finalizing …
+    but it still has children left"*. PyGObject does not expose
+    ``GObject``'s ``dispose`` vfunc, so the container does this from
+    :meth:`ArticleContainer.do_unroot` for the rooted (production) path
+    and from :meth:`ArticleContainer.__del__` for a container that is
+    finalized without ever being rooted (the standalone widgets these
+    tests build). Both routes are exercised here.
+    """
+
+    def test_unroot_unparents_the_child(self) -> None:
+        # The rooted path: adding the container to a window and then
+        # destroying the window unroots it, which must drop the child.
+        container = _make_test_article_container(char_w=10, line_h=20)
+        child = _CapturingChild()
+        container.set_child(child)
+        window = Gtk.Window()
+        window.set_child(container)
+        self.assertIs(child.get_parent(), container)
+
+        window.set_child(None)  # unroots the container
+
+        self.assertIsNone(child.get_parent())
+        self.assertIsNone(container.get_first_child())
+        window.destroy()
+
+    def test_release_child_is_idempotent(self) -> None:
+        # Both teardown hooks call the same guarded helper; calling it
+        # twice (as do_unroot + __del__ can) must not double-unparent.
+        container = _make_test_article_container(char_w=10, line_h=20)
+        child = _CapturingChild()
+        container.set_child(child)
+
+        container._release_child()
+        container._release_child()  # second pass is a guarded no-op
+
+        self.assertIsNone(child.get_parent())
+        self.assertIsNone(container.get_first_child())
+
+    def test_release_child_with_no_child_is_a_no_op(self) -> None:
+        # The container is constructible without a child; releasing in
+        # that state must not raise.
+        container = _make_test_article_container(char_w=10, line_h=20)
+        container._release_child()
+        self.assertIsNone(container.get_first_child())
+
+    def test_standalone_container_unparents_child_on_finalize(self) -> None:
+        # The never-rooted path the rest of this test module hits: build
+        # a container with a child, drop the only reference, force a GC
+        # pass, and confirm the child is no longer parented (which is
+        # what stops the finalize warning). The child is kept alive via
+        # a weakref-free local so the assertion can read its parent
+        # after the container is gone.
+        child = _CapturingChild()
+        container = _make_test_article_container(char_w=10, line_h=20)
+        container.set_child(child)
+        self.assertIs(child.get_parent(), container)
+
+        del container
+        gc.collect()
+
+        self.assertIsNone(child.get_parent())
+
+
+@unittest.skipUnless(_display_available(), "no GDK display")
+class ArticleContainerMeasureTests(unittest.TestCase):
+    """Pin the measure contract under Option C (the container is a
+    ``Gtk.Scrollable``).
+
+    Horizontally the *minimum* is ``0`` so the scrolled window may
+    allocate the container narrower than the column — the container-owned
+    ``hadjustment`` then drives the horizontal scrollbar — while the
+    *natural* width is :meth:`outer_column_width` (text + inner padding),
+    the column the pane opens at when there is room.
+
+    Vertically the container contributes nothing (``(0, 0, …)``): the
+    vertical extent is owned by the scrollable child (the text view), which
+    the container wires up as the vertical scrollport by forwarding the
+    ``vadjustment``. The container therefore never measures its child on
+    the vertical axis — re-deriving the extent here would reinvent the
+    viewport and could reintroduce the stale-extent bug.
+    """
+
+    def test_horizontal_minimum_is_zero_and_natural_is_outer_column_width(
+        self,
+    ) -> None:
+        container = _make_test_article_container(char_w=10, line_h=20)
+        outer = container.outer_column_width()
+        minimum, natural, _, _ = container.do_measure(
+            Gtk.Orientation.HORIZONTAL, -1
+        )
+        # Minimum 0 → the scrollable may be allocated narrower than the
+        # column (the hadjustment exposes the overflow); natural is the
+        # column width.
+        self.assertEqual(minimum, 0)
+        self.assertEqual(natural, outer)
+
+    def test_horizontal_measurement_is_independent_of_for_size(self) -> None:
+        # The horizontal report is fixed by the column rule — it must
+        # not vary with the cross-axis hint.
+        container = _make_test_article_container(char_w=10, line_h=20)
+        outer = container.outer_column_width()
+        for for_size in (-1, 0, 100, 5000):
+            minimum, natural, _, _ = container.do_measure(
+                Gtk.Orientation.HORIZONTAL, for_size,
+            )
+            self.assertEqual(minimum, 0)
+            self.assertEqual(natural, outer)
+
+    def test_vertical_measure_with_no_child_returns_zero(self) -> None:
+        # No child → nothing to contribute. The vertical axis is owned by
+        # the forwarded text view, so the container reports zeroes
+        # regardless.
+        container = _make_test_article_container(char_w=10, line_h=20)
+        minimum, natural, baseline_min, baseline_nat = container.do_measure(
+            Gtk.Orientation.VERTICAL, -1,
+        )
+        self.assertEqual(minimum, 0)
+        self.assertEqual(natural, 0)
+        self.assertEqual(baseline_min, -1)
+        self.assertEqual(baseline_nat, -1)
+
+    def test_vertical_measure_returns_zero_and_does_not_measure_child(
+        self,
+    ) -> None:
+        # Option C: the vertical extent comes from the scrollable child
+        # (it owns the forwarded ``vadjustment``), NOT from the container
+        # measuring its child. The container must report ``(0, 0)`` and
+        # must never call ``measure`` on the child vertically — doing so
+        # is what reinvents the viewport.
+        container = _make_test_article_container(char_w=10, line_h=20)
+        child = _CapturingChild(reported_vertical_height=123)
+        container.set_child(child)
+
+        minimum, natural, _, _ = container.do_measure(
+            Gtk.Orientation.VERTICAL, container.outer_column_width() + 500,
+        )
+        self.assertEqual(minimum, 0)
+        self.assertEqual(natural, 0)
+        self.assertEqual(child.recorded_measure_calls, [])
+
+    def test_vertical_measure_ignores_for_size(self) -> None:
+        # The container's vertical report is constant ``(0, 0)`` whatever
+        # the parent's cross-axis hint, and never touches the child.
+        container = _make_test_article_container(char_w=10, line_h=20)
+        child = _CapturingChild(reported_vertical_height=77)
+        container.set_child(child)
+        outer = container.outer_column_width()
+
+        for for_size in (-1, 0, outer - 50, outer, outer + 500):
+            with self.subTest(for_size=for_size):
+                minimum, natural, _, _ = container.do_measure(
+                    Gtk.Orientation.VERTICAL, for_size,
+                )
+                self.assertEqual((minimum, natural), (0, 0))
+        self.assertEqual(child.recorded_measure_calls, [])
+
+
+@unittest.skipUnless(_display_available(), "no GDK display")
+class ArticleContainerScrollableTests(unittest.TestCase):
+    """Pin Option C: :class:`ArticleContainer` implements ``Gtk.Scrollable``.
+
+    Implementing the interface is what makes the parent
+    ``Gtk.ScrolledWindow`` keep the container as its *direct* child and
+    interpose **no** ``Gtk.Viewport`` — the structural fix that removes the
+    first-launch scrollbar bug. The container then treats the two axes
+    differently: the vertical adjustment + policy are *forwarded* to the
+    scrollable child (which owns the v-extent), while the horizontal axis is
+    *owned* by the container (it configures the ``hadjustment`` and
+    translates the fixed-width column itself).
+    """
+
+    def _capturing(
+        self,
+        *,
+        char_w: int = 10,
+        line_h: int = 20,
+    ) -> tuple[ArticleContainer, _CapturingChild]:
+        container = _make_test_article_container(char_w=char_w, line_h=line_h)
+        child = _CapturingChild()
+        container.set_child(child)
+        return container, child
+
+    def test_container_is_a_gtk_scrollable(self) -> None:
+        # The base-class change is the whole point of Option C — without
+        # it the ScrolledWindow interposes a viewport and the bug returns.
+        container = _make_test_article_container()
+        self.assertIsInstance(container, Gtk.Scrollable)
+
+    def test_exposes_the_four_scrollable_interface_properties(self) -> None:
+        # The interface's required surface, installed under the hyphenated
+        # GObject names the ScrolledWindow drives.
+        container = _make_test_article_container()
+        prop_names = {pspec.name for pspec in container.list_properties()}
+        self.assertLessEqual(
+            {"hadjustment", "vadjustment", "hscroll-policy", "vscroll-policy"},
+            prop_names,
+        )
+
+    def test_overflow_is_hidden_so_the_column_is_clipped(self) -> None:
+        # With no interposed viewport the container must clip the column
+        # to the viewport itself, or a column wider than the window paints
+        # past the edge instead of being reached by the scrollbar.
+        container = _make_test_article_container()
+        self.assertEqual(container.get_overflow(), Gtk.Overflow.HIDDEN)
+
+    # ----- vertical pass-through -----
+
+    def test_vadjustment_is_forwarded_to_a_scrollable_child(self) -> None:
+        container = _make_test_article_container()
+        text_view = Gtk.TextView()
+        container.set_child(text_view)
+        vadj = Gtk.Adjustment()
+
+        container.set_property("vadjustment", vadj)
+
+        # The text view becomes the vertical scrollport: it owns the very
+        # adjustment the ScrolledWindow reads for the scrollbar.
+        self.assertIs(text_view.get_vadjustment(), vadj)
+
+    def test_vadjustment_set_before_child_still_reaches_a_later_child(
+        self,
+    ) -> None:
+        # In production the child is set before the ScrolledWindow installs
+        # the adjustment; here we cover the opposite order so set_child's
+        # own forwarding is exercised too.
+        container = _make_test_article_container()
+        vadj = Gtk.Adjustment()
+        container.set_property("vadjustment", vadj)
+        text_view = Gtk.TextView()
+
+        container.set_child(text_view)
+
+        self.assertIs(text_view.get_vadjustment(), vadj)
+
+    def test_vscroll_policy_is_forwarded_to_a_scrollable_child(self) -> None:
+        container = _make_test_article_container()
+        text_view = Gtk.TextView()
+        container.set_child(text_view)
+
+        container.set_property(
+            "vscroll-policy", Gtk.ScrollablePolicy.NATURAL
+        )
+
+        self.assertEqual(
+            text_view.get_vscroll_policy(), Gtk.ScrollablePolicy.NATURAL
+        )
+
+    def test_forwarding_to_a_non_scrollable_child_is_a_no_op(self) -> None:
+        # The bare-widget stand-in the allocation tests use is not a
+        # Gtk.Scrollable; forwarding must skip it without raising.
+        container, _child = self._capturing()
+        container.set_property("vadjustment", Gtk.Adjustment())  # must not raise
+
+    # ----- horizontal axis owned by the container -----
+
+    def test_narrow_allocation_configures_hadjustment_extent(self) -> None:
+        # Below the column width the container publishes the scroll extent
+        # on its own hadjustment: upper = column, page = viewport, lower 0.
+        # That overflow (upper > page) is what shows the horizontal
+        # scrollbar under the AUTOMATIC policy.
+        container, _child = self._capturing()
+        outer = container.outer_column_width()
+        hadj = Gtk.Adjustment()
+        container.set_property("hadjustment", hadj)
+        viewport = outer - 200
+
+        container.do_size_allocate(viewport, 600, -1)
+
+        self.assertEqual(hadj.get_lower(), 0.0)
+        self.assertEqual(hadj.get_upper(), float(outer))
+        self.assertEqual(hadj.get_page_size(), float(viewport))
+
+    def test_horizontal_scroll_offsets_child_by_negative_value(self) -> None:
+        # A scroll within range translates the column left by the scroll
+        # value — the container, not the text view, does the panning.
+        container, child = self._capturing()
+        outer = container.outer_column_width()
+        hadj = Gtk.Adjustment()
+        container.set_property("hadjustment", hadj)
+        viewport = outer - 200
+        container.do_size_allocate(viewport, 600, -1)  # max offset 200
+
+        hadj.set_value(150)
+        child.recorded_allocate_calls.clear()
+        container.do_size_allocate(viewport, 600, -1)
+
+        width, _h, _b, transform = child.recorded_allocate_calls[-1]
+        self.assertEqual(width, outer)  # column still pinned to full width
+        self.assertEqual(_transform_x_offset(transform), -150)
+
+    def test_horizontal_scroll_value_clamps_to_column_minus_viewport(
+        self,
+    ) -> None:
+        # A value past the end (e.g. left over from a narrower-still
+        # layout) is clamped to column − viewport so the column cannot be
+        # pinned entirely off-screen.
+        container, child = self._capturing()
+        outer = container.outer_column_width()
+        hadj = Gtk.Adjustment()
+        container.set_property("hadjustment", hadj)
+        viewport = outer - 200
+        container.do_size_allocate(viewport, 600, -1)
+        max_offset = outer - viewport  # 200
+
+        hadj.set_value(max_offset + 10_000)
+        child.recorded_allocate_calls.clear()
+        container.do_size_allocate(viewport, 600, -1)
+
+        self.assertEqual(int(hadj.get_value()), max_offset)
+        _w, _h, _b, transform = child.recorded_allocate_calls[-1]
+        self.assertEqual(_transform_x_offset(transform), -max_offset)
+
+    def test_wide_allocation_pins_hadjustment_value_to_zero(self) -> None:
+        # When the viewport is at least the column width there is nothing
+        # to scroll: upper collapses to ≤ page and the value is pinned to
+        # 0 while the column is centred.
+        container, child = self._capturing()
+        outer = container.outer_column_width()
+        hadj = Gtk.Adjustment()
+        container.set_property("hadjustment", hadj)
+        wide = outer + 240
+
+        container.do_size_allocate(wide, 600, -1)
+
+        self.assertEqual(hadj.get_value(), 0.0)
+        _w, _h, _b, transform = child.recorded_allocate_calls[-1]
+        self.assertEqual(_transform_x_offset(transform), (wide - outer) // 2)
+
+    def test_setting_hadjustment_connects_value_changed(self) -> None:
+        # The container re-runs allocation on a horizontal scroll, so it
+        # must subscribe to the adjustment it is given.
+        container = _make_test_article_container()
+        hadj = Gtk.Adjustment()
+
+        container.set_property("hadjustment", hadj)
+
+        self.assertIs(container._connected_hadjustment, hadj)
+        self.assertTrue(
+            GObject.signal_handler_is_connected(
+                hadj, container._hadjustment_value_changed_id
+            )
+        )
+
+    def test_value_changed_requests_reallocation(self) -> None:
+        # The end-to-end reason for the subscription: a value change must
+        # queue a fresh allocation so the column repositions.
+        container = _make_test_article_container()
+        hadj = Gtk.Adjustment()
+        container.set_property("hadjustment", hadj)
+        hadj.configure(0.0, 0.0, 1000.0, 10.0, 90.0, 500.0)
+        reallocations: list[int] = []
+        # Shadow the GTK method so the test observes the request without a
+        # main loop; the handler calls ``self.queue_allocate()``.
+        container.queue_allocate = lambda: reallocations.append(1)
+
+        hadj.set_value(120.0)
+
+        self.assertTrue(reallocations)
+
+    def test_replacing_hadjustment_disconnects_the_previous_one(self) -> None:
+        # A replaced adjustment must leave no dangling handler closing over
+        # the container.
+        container = _make_test_article_container()
+        first = Gtk.Adjustment()
+        container.set_property("hadjustment", first)
+        first_id = container._hadjustment_value_changed_id
+
+        second = Gtk.Adjustment()
+        container.set_property("hadjustment", second)
+
+        self.assertFalse(
+            GObject.signal_handler_is_connected(first, first_id)
+        )
+        self.assertIs(container._connected_hadjustment, second)
+
+    def test_unroot_disconnects_the_hadjustment_handler(self) -> None:
+        # The rooted (production) teardown path drops the subscription
+        # alongside the child unparent.
+        container = _make_test_article_container()
+        container.set_child(_CapturingChild())
+        window = Gtk.Window()
+        window.set_child(container)
+        hadj = Gtk.Adjustment()
+        container.set_property("hadjustment", hadj)
+        handler_id = container._hadjustment_value_changed_id
+
+        window.set_child(None)  # unroots the container
+
+        self.assertFalse(
+            GObject.signal_handler_is_connected(hadj, handler_id)
+        )
+        self.assertIsNone(container._connected_hadjustment)
+        window.destroy()
+
+
+@unittest.skipUnless(_display_available(), "no GDK display")
+class ArticleContainerScrollbarRegressionTests(unittest.TestCase):
+    """End-to-end regression for the first-launch scrollbar bug.
+
+    The original defect: on launch the rendered pane showed *no* vertical
+    scrollbar even when the selected note overflowed the viewport, if the
+    note's last line was a static-size image. The implicit ``Gtk.Viewport``
+    committed a page-sized extent during its first allocation (while the
+    text view still measured zero height) and never revised it, because a
+    trailing static image produces no later height change. Option C removes
+    the viewport, so the text view — which knows its own height — owns the
+    vertical adjustment and writes the correct ``upper``.
+
+    This test reproduces the exact trigger: a real :class:`NoteView` whose
+    selected note ends with a tall image, presented on a real toplevel and
+    settled through a **real main loop** (the bug only manifests after a
+    frame-clock tick, which a manually pumped context never produces). It
+    asserts the vertical adjustment overflows the page at startup — i.e.
+    the scrollbar is shown — without any switch-and-back nudge.
+    """
+
+    def _build_image_last_view(
+        self,
+    ) -> tuple[NoteView, Gtk.Window]:
+        repository = _FakeNoteRepository()
+        note = _make_note(
+            "img-last",
+            source="= Title\n\nIntro paragraph.\n\nimage::tall.png[]",
+        )
+        repository.notes[note.id] = note
+        store = _build_tracking_store(repository)
+        attachments = _FakeAttachmentStore()
+        # 100×900: comfortably taller than the 600 px viewport whether or
+        # not the renderer scales it to the column width.
+        attachments.seed("img-last", "tall.png", _solid_png(100, 900))
+        app_state = AppState()
+        app_state.set_selected_note_id("img-last")
+        with mock.patch.object(
+            note_view_module,
+            "_build_font_measurers",
+            _stub_font_measurers_factory(char_w=10, line_h=20),
+        ):
+            view = NoteView(
+                note_store=store,
+                app_state=app_state,
+                attachments=attachments,
+            )
+        window = Gtk.Window()
+        window.set_default_size(900, 600)
+        window.set_child(view)
+        return view, window
+
+    def test_image_last_note_shows_vertical_scrollbar_on_first_launch(
+        self,
+    ) -> None:
+        view, window = self._build_image_last_view()
+        window.present()
+        try:
+            _settle_real_main_loop()
+            scrolled = _find_scrolled_window(view)
+            # Option C interposes no viewport — the container is the direct
+            # scrollable child.
+            self.assertNotIsInstance(scrolled.get_child(), Gtk.Viewport)
+            vadjustment = scrolled.get_vadjustment()
+            self.assertGreater(
+                vadjustment.get_upper(),
+                vadjustment.get_page_size(),
+                "the rendered note overflows the viewport, so the vertical "
+                "adjustment must report an extent larger than the page "
+                "(i.e. the scrollbar is shown) at startup",
+            )
+        finally:
+            window.set_child(None)
+            window.destroy()
+            _settle_real_main_loop(timeout_ms=50)
+
+
+def _find_scrolled_window(view: NoteView) -> Gtk.ScrolledWindow:
+    """Walk the :class:`NoteView` stack and return its ``Gtk.ScrolledWindow``.
+
+    The structure is ``NoteView → ScrolledWindow → …``. The parse-error
+    notice is rendered into the note buffer rather than into a separate
+    banner widget, so the ``ScrolledWindow`` is the view's *first*
+    child. Walking the public child API keeps the tests agnostic to
+    :class:`NoteView`'s field names.
+    """
+    scrolled = view.get_first_child()
+    assert isinstance(scrolled, Gtk.ScrolledWindow), (
+        f"expected a ScrolledWindow in the NoteView stack, "
+        f"got {type(scrolled).__name__}"
+    )
+    return scrolled
