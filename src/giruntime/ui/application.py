@@ -67,6 +67,18 @@ Principles & invariants
   deleted, or the database was reset and rebuilt) falls through to the
   pre-existing welcome/newest/none chain rather than leaving the
   selection empty or crashing.
+* This class owns the :class:`Database` connection for its whole
+  lifetime: it opens it lazily in :meth:`_initialise_runtime` (first
+  activation) and closes it in :meth:`do_shutdown`, after the main loop
+  has stopped and all windows are gone. Closing there rather than in the
+  window's ``close-request`` handler is deliberate — ``close-request``
+  fires while GTK is still tearing the window down, so a deferred render
+  or an attachment resolver could still reach for the connection; by
+  ``shutdown`` nothing can. The close matters under WAL, where the
+  ``-wal`` / ``-shm`` sidecars are only cleaned up when the last
+  connection closes. A register-only lifecycle (a second instance that
+  hands off to the primary and never activates) never opens the database,
+  and :meth:`_close_database` is a no-op in that case.
 * Database errors during activation surface through
   :class:`sqlite3.DatabaseError`; we let them propagate. A failure to
   open the database is fatal for v1 (no data → nothing to show) and
@@ -299,6 +311,42 @@ class NotesApplication(  # pylint: disable=too-many-instance-attributes
         if window is None:
             window = self._build_initial_window()
         window.present()
+
+    def do_shutdown(self) -> None:  # pylint: disable=arguments-differ
+        """Close the database as the last step of the GTK lifecycle.
+
+        ``shutdown`` is emitted by :meth:`Gtk.Application.run` after the
+        main loop has stopped and every window has been torn down, so it
+        is the one point at which no widget, deferred render, or
+        attachment resolver can still touch the connection — which is why
+        the close lives here and not in the window's ``close-request``
+        handler (that runs *during* teardown). GTK's own shutdown work
+        must run first, so this chains up to the base implementation
+        before closing.
+
+        The connection is left unclosed on the abrupt-exit paths GTK
+        offers no hook for (``SIGKILL``, a native segfault); those are
+        made safe not by this method but by the storage layer's
+        autocommit + explicit-transaction discipline and WAL's automatic
+        recovery on next open, so at worst an orphaned ``-wal`` file is
+        left behind, never lost or corrupted data.
+        """
+        Gtk.Application.do_shutdown(self)
+        self._close_database()
+
+    def _close_database(self) -> None:
+        """Release the database connection if one was ever opened.
+
+        Split out from :meth:`do_shutdown` so the close is unit-testable
+        without invoking a GTK vfunc: a test assigns a real
+        :class:`Database` and asserts the connection is closed afterwards.
+        A no-op before the first activation (the database is opened lazily
+        in :meth:`_initialise_runtime`, so a shutdown that follows a
+        register-only lifecycle has nothing to close) and idempotent
+        (:meth:`Database.close` is), so calling it twice is safe.
+        """
+        if self._database is not None:
+            self._database.close()
 
     def _initialise_runtime(self) -> None:
         """Open the database, run migrations, build repositories,

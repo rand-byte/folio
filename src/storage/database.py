@@ -13,10 +13,36 @@ Principles & invariants
   every transaction starts inside :meth:`transaction`. Reads outside a
   transaction therefore execute under SQLite's autocommit mode, which is
   the cheapest read path available.
-* Foreign keys are enabled at construction time
-  (``PRAGMA foreign_keys = ON``). Without this, ``ON DELETE CASCADE`` and
-  ``ON DELETE RESTRICT`` are silently ignored — a critical correctness
-  property of the schema.
+* Connection-level settings are applied from a single declarative table,
+  :data:`_CONNECTION_PRAGMAS`, at construction time — one ordered
+  ``tuple`` of ``(pragma, value, enforcement)`` triples rather than a
+  scattering of ad-hoc ``execute`` calls. Each is written, then read back
+  and compared; the *enforcement* field says what a disagreement means:
+
+  - **Foreign keys** (:data:`enums.SqlitePragma.FOREIGN_KEYS`,
+    ``REQUIRED``). Without this, ``ON DELETE CASCADE`` and
+    ``ON DELETE RESTRICT`` are silently ignored — a critical correctness
+    property of the schema — so a read-back that is not ``1`` raises.
+  - **Journal mode** (:data:`enums.SqlitePragma.JOURNAL_MODE`,
+    ``BEST_EFFORT``). :data:`config.defaults.SQLITE_JOURNAL_MODE` (WAL)
+    is *requested*, not required: an in-memory database always reports
+    ``memory`` and a filesystem without shared-memory support keeps its
+    existing mode. Both are legitimate, so a disagreement here is
+    accepted silently. WAL is persisted in the database file header, so
+    the request is effectively a one-time migration of the user's file
+    and a no-op on every launch thereafter.
+  - **Busy timeout** (:data:`enums.SqlitePragma.BUSY_TIMEOUT`,
+    ``REQUIRED``). Set from :data:`config.defaults.SQLITE_BUSY_TIMEOUT_MS`.
+
+  Order is a contract, which is why the table is a ``tuple`` and not a
+  mapping: ``journal_mode`` cannot be set inside a transaction (there is
+  none open at construction) and ``foreign_keys`` must be on before any
+  FK-dependent statement runs. Toggles are written in their numeric form
+  (:class:`enums.SqliteToggle`) so the value written and the value read
+  back are the same string, letting one comparison rule verify every
+  pragma uniformly. Pragma names/values cannot be bound parameters, so
+  they are interpolated into the SQL text — safe because every value
+  comes from an enum member or an ``int`` constant, never user input.
 * :meth:`transaction` composes. Calling it inside another active
   ``transaction()`` issues a ``SAVEPOINT`` rather than a fresh ``BEGIN``,
   so the caller's outer transaction stays in control. This implements
@@ -24,6 +50,16 @@ Principles & invariants
   inside a parent transaction when present"* property: a repository can
   wrap each public method in ``with self._db.transaction()`` and still
   participate in a larger caller-provided transaction.
+* :meth:`close` is an **owner responsibility**, not merely a test
+  affordance. It is idempotent and backs the context-manager protocol,
+  but the running application must call it on shutdown: under WAL the
+  ``-wal`` / ``-shm`` sidecar files are checkpointed and removed only
+  when the last connection closes, so a process that just exits leaves
+  them behind (SQLite recovers them on next open — the data is safe, but
+  the lifecycle is unfinished). The single production caller is the
+  application's ``do_shutdown`` (see
+  :mod:`giruntime.ui.application`); this module only guarantees that
+  ``close`` is safe to call once, more than once, or never.
 * The class deliberately does not host any business logic. It owns the
   connection lifecycle and the transaction shape and nothing else;
   adding domain methods here would break the separation that lets
@@ -35,16 +71,63 @@ from __future__ import annotations
 import sqlite3
 from collections.abc import Iterator
 from contextlib import contextmanager
+from dataclasses import dataclass
 from pathlib import Path
 from types import TracebackType
-from typing import Self
+from typing import Final, Self
+
+from config.defaults import SQLITE_BUSY_TIMEOUT_MS, SQLITE_JOURNAL_MODE
+from enums import PragmaEnforcement, SqlitePragma, SqliteToggle
 
 
 _BEGIN_SQL: str = "BEGIN"
 _COMMIT_SQL: str = "COMMIT"
 _ROLLBACK_SQL: str = "ROLLBACK"
-_PRAGMA_FK_ON: str = "PRAGMA foreign_keys = ON"
 _IN_MEMORY_PATH: str = ":memory:"
+
+
+@dataclass(frozen=True)
+class _PragmaSetting:
+    """One connection pragma to write, verify, and its enforcement level.
+
+    ``value`` is the *string* form written into the SQL text and compared
+    against the read-back (see :class:`enums.SqliteToggle` for why the
+    numeric form is used for boolean pragmas). ``enforcement`` decides
+    what a read-back that disagrees with ``value`` means — see
+    :class:`enums.PragmaEnforcement`.
+    """
+
+    pragma: SqlitePragma
+    value: str
+    enforcement: PragmaEnforcement
+
+
+_CONNECTION_PRAGMAS: Final[tuple[_PragmaSetting, ...]] = (
+    _PragmaSetting(
+        SqlitePragma.FOREIGN_KEYS,
+        SqliteToggle.ON.value,
+        PragmaEnforcement.REQUIRED,
+    ),
+    _PragmaSetting(
+        SqlitePragma.JOURNAL_MODE,
+        SQLITE_JOURNAL_MODE.value,
+        PragmaEnforcement.BEST_EFFORT,
+    ),
+    _PragmaSetting(
+        SqlitePragma.BUSY_TIMEOUT,
+        str(SQLITE_BUSY_TIMEOUT_MS),
+        PragmaEnforcement.REQUIRED,
+    ),
+)
+"""The connection-level pragmas, applied in this order at construction.
+
+Order is a contract (``journal_mode`` cannot run inside a transaction;
+``foreign_keys`` must precede any FK-dependent statement), hence a
+``tuple``. ``foreign_keys`` is a fixed, ``REQUIRED`` entry rather than a
+tunable in :mod:`config.defaults`: a silently-ignored value would break
+``ON DELETE CASCADE``. The journal mode and busy timeout come from
+:mod:`config.defaults`, the documented home for tunables.
+"""
 
 
 class Database:
@@ -67,8 +150,42 @@ class Database:
             isolation_level=None,
         )
         self._connection.row_factory = sqlite3.Row
-        self._connection.execute(_PRAGMA_FK_ON)
+        self._apply_connection_pragmas()
         self._depth = 0
+
+    def _apply_connection_pragmas(self) -> None:
+        """Write, then verify, each pragma in :data:`_CONNECTION_PRAGMAS`.
+
+        For every setting: interpolate its value into a
+        ``PRAGMA <name> = <value>`` statement and execute it, then read the
+        pragma back and compare. A ``REQUIRED`` setting whose read-back
+        does not match the value written raises :class:`sqlite3.DatabaseError`
+        (the engine ignored a setting the schema's correctness depends on);
+        a ``BEST_EFFORT`` setting is allowed to differ (the engine may
+        legitimately decline — e.g. WAL on an in-memory database).
+
+        The read-back is always a separate ``PRAGMA <name>`` query because
+        the value a pragma *write* returns is not uniform across pragmas
+        (a toggle write yields nothing, ``journal_mode`` echoes the mode),
+        whereas the read-back is: a single-column, single-row result whose
+        value, stringified, equals the numeric/lower-case form written.
+        """
+        for setting in _CONNECTION_PRAGMAS:
+            self._connection.execute(
+                f"PRAGMA {setting.pragma.value} = {setting.value}"
+            )
+            row = self._connection.execute(
+                f"PRAGMA {setting.pragma.value}"
+            ).fetchone()
+            effective = str(row[0])
+            if (
+                setting.enforcement is PragmaEnforcement.REQUIRED
+                and effective != setting.value
+            ):
+                raise sqlite3.DatabaseError(
+                    f"PRAGMA {setting.pragma.value} could not be set to "
+                    f"{setting.value!r}: connection reports {effective!r}"
+                )
 
     @classmethod
     def in_memory(cls) -> Self:

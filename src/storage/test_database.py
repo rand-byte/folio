@@ -7,7 +7,9 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from storage.database import Database
+from config.defaults import SQLITE_BUSY_TIMEOUT_MS
+from enums import PragmaEnforcement, SqlitePragma, SqliteJournalMode
+from storage.database import _CONNECTION_PRAGMAS, Database
 
 
 def _create_test_table(database: Database) -> None:
@@ -78,6 +80,110 @@ class DatabaseConstructionTests(unittest.TestCase):
         _create_test_table(db)
         db.connection.execute("INSERT INTO items VALUES (1, 'x')")
         self.assertFalse(db.connection.in_transaction)
+
+
+# ---------------------------------------------------------------------------
+# Connection pragmas (WAL / busy_timeout / foreign_keys)
+# ---------------------------------------------------------------------------
+
+
+class ConnectionPragmaTableTests(unittest.TestCase):
+    """The declarative pragma table is well-formed — pure, no connection."""
+
+    def test_every_pragma_appears_exactly_once(self) -> None:
+        # Mirrors the exhaustiveness habit used elsewhere (the help-doc
+        # coverage test): each SqlitePragma member is configured, and none
+        # twice, so the table cannot silently drop or duplicate a setting.
+        configured = [setting.pragma for setting in _CONNECTION_PRAGMAS]
+        self.assertCountEqual(configured, list(SqlitePragma))
+
+    def test_foreign_keys_is_applied_first(self) -> None:
+        # foreign_keys must precede any FK-dependent statement, so it leads
+        # the ordered tuple.
+        self.assertEqual(
+            _CONNECTION_PRAGMAS[0].pragma, SqlitePragma.FOREIGN_KEYS
+        )
+
+    def test_foreign_keys_is_required(self) -> None:
+        # A silently-ignored foreign_keys breaks ON DELETE CASCADE, so it
+        # is a REQUIRED (verified) setting, never best-effort.
+        (setting,) = [
+            s
+            for s in _CONNECTION_PRAGMAS
+            if s.pragma is SqlitePragma.FOREIGN_KEYS
+        ]
+        self.assertIs(setting.enforcement, PragmaEnforcement.REQUIRED)
+
+    def test_journal_mode_is_best_effort(self) -> None:
+        # WAL is requested, not required: :memory: and shared-memory-less
+        # filesystems legitimately keep their existing mode.
+        (setting,) = [
+            s
+            for s in _CONNECTION_PRAGMAS
+            if s.pragma is SqlitePragma.JOURNAL_MODE
+        ]
+        self.assertIs(setting.enforcement, PragmaEnforcement.BEST_EFFORT)
+
+
+class ConnectionPragmaEffectTests(unittest.TestCase):
+    """The pragmas take effect on a real connection."""
+
+    def test_file_database_uses_wal_journal_mode(self) -> None:
+        # WAL needs a real file (shared memory) — it cannot apply to an
+        # in-memory database, so this is the file-backed case.
+        with tempfile.TemporaryDirectory() as tmp:
+            db = Database(Path(tmp) / "wal.db")
+            self.addCleanup(db.close)
+            mode = db.connection.execute("PRAGMA journal_mode").fetchone()[0]
+            self.assertEqual(mode, SqliteJournalMode.WAL.value)
+
+    def test_in_memory_database_reports_memory_mode(self) -> None:
+        # The best-effort journal-mode request must not raise on :memory:,
+        # which always reports "memory" — this is what keeps the whole
+        # storage test suite (all in-memory) working unchanged.
+        db = Database.in_memory()
+        self.addCleanup(db.close)
+        mode = db.connection.execute("PRAGMA journal_mode").fetchone()[0]
+        self.assertEqual(mode, SqliteJournalMode.MEMORY.value)
+
+    def test_busy_timeout_is_set_from_defaults(self) -> None:
+        db = Database.in_memory()
+        self.addCleanup(db.close)
+        timeout = db.connection.execute("PRAGMA busy_timeout").fetchone()[0]
+        self.assertEqual(timeout, SQLITE_BUSY_TIMEOUT_MS)
+
+    def test_wal_persists_across_reopen_without_rerequest(self) -> None:
+        # Journal mode is stored in the database file header, so a file
+        # opened once in WAL stays WAL on the next open — the pragma is a
+        # one-time migration of the file, not a per-launch necessity.
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "persist.db"
+            first = Database(path)
+            _create_test_table(first)
+            first.close()
+
+            second = Database(path)
+            self.addCleanup(second.close)
+            mode = second.connection.execute(
+                "PRAGMA journal_mode"
+            ).fetchone()[0]
+            self.assertEqual(mode, SqliteJournalMode.WAL.value)
+
+    def test_wal_sidecars_are_removed_on_close(self) -> None:
+        # The -wal/-shm sidecars exist while a connection is open and are
+        # checkpointed away when the last connection closes. This is the
+        # property that makes closing the database on shutdown matter.
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "sidecar.db"
+            wal = path.with_name(path.name + "-wal")
+            db = Database(path)
+            _create_test_table(db)
+            with db.transaction() as conn:
+                conn.execute("INSERT INTO items VALUES (1, 'a')")
+            self.assertTrue(wal.exists())
+
+            db.close()
+            self.assertFalse(wal.exists())
 
 
 # ---------------------------------------------------------------------------

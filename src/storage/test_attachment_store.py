@@ -10,6 +10,7 @@ foreign-key cascade behaviour we depend on.
 
 from __future__ import annotations
 
+import io
 import sqlite3
 import unittest
 from datetime import UTC, datetime
@@ -385,6 +386,120 @@ class AddForNoteSizeCapTests(unittest.TestCase):
         # bytes we read, not the lying stat. That's intentional — we
         # want the recorded size to match the BLOB length.
         self.assertEqual(attachment.byte_size, len(_PNG_1X1))
+
+
+# ---------------------------------------------------------------------------
+# add_for_note — the stat-then-read race (§1.5 bounded read)
+# ---------------------------------------------------------------------------
+
+
+class AddForNoteGrowRaceTests(unittest.TestCase):
+    """A file that grows past the cap *after* the stat gate is rejected.
+
+    The stat gate sees the file under the limit and lets it through to the
+    read. The bounded read (``cap + 1`` bytes) plus the post-read size
+    check must then reject it, so no over-limit blob reaches the database
+    and the store never holds more than ``cap + 1`` bytes.
+    """
+
+    db: Database
+    files: _TempFileFactory
+    store: AttachmentStore
+
+    def setUp(self) -> None:
+        self.db = _build_database_with_note()
+        self.files = _TempFileFactory()
+        self.store = AttachmentStore(self.db, id_factory=_IdSequence())
+
+    def tearDown(self) -> None:
+        self.files.close()
+        self.db.close()
+
+    @staticmethod
+    def _under_limit_stat(path: Path) -> object:
+        """A stat patch reporting a small size for ``path`` only."""
+        original_stat = Path.stat
+
+        def fake_stat(
+            self: Path, *args: object, **kwargs: object
+        ) -> object:
+            real = original_stat(self, *args, **kwargs)  # type: ignore[arg-type]
+            if self == path:
+                class _ShimStat:
+                    st_size = len(_PNG_1X1)
+                return _ShimStat()
+            return real
+
+        return fake_stat
+
+    def test_file_grown_after_stat_is_rejected_as_too_big(self) -> None:
+        # The file passes the stat gate (small), but the open returns a
+        # stream holding cap + 1 bytes — the "grew after stat" case.
+        path = self.files.write("grows.png", _PNG_1X1)
+        oversized = io.BytesIO(b"\0" * (MAX_ATTACHMENT_BYTES + 1))
+
+        def fake_open(self: Path, mode: str = "r") -> object:
+            del mode
+            if self == path:
+                return oversized
+            raise AssertionError("unexpected open target")
+
+        with patch.object(Path, "stat", self._under_limit_stat(path)), \
+             patch.object(Path, "open", fake_open):
+            with self.assertRaises(AttachmentRejected) as ctx:
+                self.store.add_for_note("note-1", path)
+
+        self.assertIs(
+            ctx.exception.reason,
+            AttachmentRejectionReason.EXCEEDS_SIZE_LIMIT,
+        )
+
+    def test_file_grown_after_stat_is_not_stored(self) -> None:
+        # The stronger property: the rejected add leaves no row behind —
+        # the INSERT transaction is never reached.
+        path = self.files.write("grows.png", _PNG_1X1)
+        oversized = io.BytesIO(b"\0" * (MAX_ATTACHMENT_BYTES + 1))
+
+        def fake_open(self: Path, mode: str = "r") -> object:
+            del mode
+            if self == path:
+                return oversized
+            raise AssertionError("unexpected open target")
+
+        with patch.object(Path, "stat", self._under_limit_stat(path)), \
+             patch.object(Path, "open", fake_open):
+            with self.assertRaises(AttachmentRejected):
+                self.store.add_for_note("note-1", path)
+
+        self.assertEqual(self.store.list_for_note("note-1"), [])
+
+    def test_read_is_bounded_to_cap_plus_one(self) -> None:
+        # The property that closes the race: the read never asks for more
+        # than cap + 1 bytes. A recording stream captures the size passed
+        # to read(), so a future refactor that drops the bound (back to an
+        # unbounded read()) fails here.
+        path = self.files.write("grows.png", _PNG_1X1)
+        read_sizes: list[int | None] = []
+
+        class _RecordingStream(io.BytesIO):
+            def read(self, size: int | None = -1) -> bytes:
+                read_sizes.append(size)
+                return super().read(size)
+
+        stream = _RecordingStream(b"\0" * (MAX_ATTACHMENT_BYTES + 1))
+
+        def fake_open(self: Path, mode: str = "r") -> object:
+            del mode
+            if self == path:
+                return stream
+            raise AssertionError("unexpected open target")
+
+        with patch.object(Path, "stat", self._under_limit_stat(path)), \
+             patch.object(Path, "open", fake_open):
+            with self.assertRaises(AttachmentRejected):
+                self.store.add_for_note("note-1", path)
+
+        self.assertEqual(read_sizes, [MAX_ATTACHMENT_BYTES + 1])
 
 
 # ---------------------------------------------------------------------------

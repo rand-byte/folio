@@ -7,9 +7,21 @@ Principles & invariants
   numbers scattered through implementation files and of a single
   "settings" module that ends up importing half the application.
 * ``MAX_ATTACHMENT_BYTES`` is the only quota the storage layer enforces.
-  It is checked via :meth:`pathlib.Path.stat` before any bytes are read,
-  so an over-limit file never enters memory. Changing the value affects
-  in-flight rejections but never invalidates already-stored attachments.
+  It is checked via :meth:`pathlib.Path.stat` before any bytes are read
+  (so an obviously over-limit file never enters memory) *and* re-checked
+  against a bounded read of ``cap + 1`` bytes, so a file that grows
+  between the ``stat`` and the read cannot smuggle an over-limit blob in.
+  Changing the value affects in-flight rejections but never invalidates
+  already-stored attachments.
+* ``SQLITE_JOURNAL_MODE`` and ``SQLITE_BUSY_TIMEOUT_MS`` are the two
+  connection-level SQLite tunables. They live here (not as SQL text baked
+  into :mod:`storage.database`) because they are exactly the kind of
+  reusable, tunable value this module exists to hold; the dialect that
+  turns them into ``PRAGMA`` statements stays in the storage layer. Note
+  that foreign-key enforcement is deliberately *not* a tunable here — a
+  silently-disabled ``foreign_keys`` breaks ``ON DELETE CASCADE``, so it
+  is a fixed, required setting owned by :mod:`storage.database`, not a
+  knob.
 * ``TARGET_CHARS_PER_LINE`` parameterises the rendered-view text column
   width. The pixel width is computed by the UI layer once per font as
   ``TARGET_CHARS_PER_LINE`` × measured glyph width and cached. Changing
@@ -65,6 +77,8 @@ Principles & invariants
 
 from __future__ import annotations
 
+from enums import SqliteJournalMode
+
 
 # ---------------------------------------------------------------------------
 # Tunable numeric constants
@@ -72,6 +86,31 @@ from __future__ import annotations
 
 MAX_ATTACHMENT_BYTES: int = 10 * 1024 * 1024
 """Hard upper bound on the size of a single image attachment, in bytes."""
+
+SQLITE_JOURNAL_MODE: SqliteJournalMode = SqliteJournalMode.WAL
+"""Journal mode requested on every database connection at construction.
+
+WAL (write-ahead logging) lowers per-commit latency — the app commits on
+every debounced autosave, i.e. roughly once per 300 ms of typing — and lets
+readers run concurrently with a writer, which matters only if a second
+connection ever appears (an export/CLI tool, a reader process). The request
+is *best-effort*: an in-memory database and a filesystem without shared-memory
+support keep their existing mode, and that is not an error (see
+:class:`enums.PragmaEnforcement`). It is a tunable here — swap in
+:attr:`SqliteJournalMode.DELETE` to fall back to the classic rollback journal
+— but changing it does not migrate existing databases: journal mode is stored
+in the database file header and switches on the next connection.
+"""
+
+SQLITE_BUSY_TIMEOUT_MS: int = 5000
+"""How long a connection waits for a lock before raising ``SQLITE_BUSY``.
+
+Unreachable today — the application is single-process, single-threaded, one
+connection, so nothing contends for a lock. It exists so that the *moment* a
+second connection appears (the WAL-enabled reader/exporter cases above), lock
+contention degrades into a short retry rather than an instant error. 5000 ms
+is the conventional desktop default. A tunable, not a typography metric.
+"""
 
 MAX_LIST_DEPTH: int = 3
 """Maximum nesting depth for ordered and unordered lists.

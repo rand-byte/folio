@@ -159,7 +159,7 @@ real `giruntime` package, which pins the GObject-Introspection versions once.
 
 ### `config/` — constants + paths
 
-- **`defaults.py`** — tunable constants (attachment/list/article/table limits and multipliers, snippet limits) and stable identifiers (`SEED_WELCOME_NOTE_ID`).
+- **`defaults.py`** — tunable constants (attachment/list/article/table limits and multipliers, snippet limits, the SQLite `journal_mode`/`busy_timeout` connection tunables) and stable identifiers (`SEED_WELCOME_NOTE_ID`).
 - **`paths.py`** — `data_directory()` / `database_path()` / `session_state_path()`, XDG-aware. Pure except for `mkdir`.
 
 ### `system_docs/` — bundled system documents (gi-free, config-tier)
@@ -198,10 +198,10 @@ A **pure** format library: GTK-free and storage-free, importing only `enums` /
 classes are siblings.
 
 - **`protocols.py`** — repository / attachment-store / session-state / renderer protocols, plus the `AttachmentRejected` / `AttachmentExportFailed` exceptions and resolver aliases (`ImageBytesResolver`, `AttachmentListResolver`, …). Pure typing — no `sqlite3` or `gi` at runtime.
-- **`database.py`** — owns the single `sqlite3.Connection` (`autocommit=True`, `foreign_keys=ON`, composable `transaction()` via savepoints).
+- **`database.py`** — owns the single `sqlite3.Connection` (`autocommit=True`, composable `transaction()` via savepoints) and applies its connection settings from one declarative table (`_CONNECTION_PRAGMAS`): `foreign_keys=ON` (required — a silent failure breaks `ON DELETE CASCADE`), `journal_mode=WAL` (best-effort — `:memory:` and shared-memory-less filesystems keep their mode), and `busy_timeout`. `close()` is an owner responsibility (the app calls it on shutdown so WAL sidecars are checkpointed away); it is idempotent and backs the context-manager protocol.
 - **`migrations.py`** — all schema statements in an append-only `ALL_MIGRATIONS`; `apply_pending()` is idempotent. See the live schema below.
 - **`note_repository.py`** — SQLite-backed repository and **single owner of the `source → cached state` mapping**: `insert` / `update_source` derive title/snippet/tags, write the cached columns and `note_tags`, and return the persisted derived `Note`.
-- **`attachment_store.py`** — BLOB-backed store. Attachments are opaque blobs; the only add-time gates are the `MAX_ATTACHMENT_BYTES` cap (checked before any bytes are read) and source readability.
+- **`attachment_store.py`** — BLOB-backed store. Attachments are opaque blobs; the only add-time gates are the `MAX_ATTACHMENT_BYTES` cap (a `stat` check before any bytes are read, plus a bounded `cap + 1` read re-checked against the cap, so a file that grows after the stat can't smuggle in an over-limit blob) and source readability.
 - **`session_state_store.py`** — JSON-file-backed store at `paths.session_state_path()`. `load()` never raises (any error resolves to `DEFAULT_SESSION_STATE`); `save()` writes atomically.
 
 **Live schema** (defined in `migrations.py`):
@@ -262,7 +262,7 @@ controller's narrow per-note `attachments-changed` signal instead.
 The only layer that owns widget trees. Every widget is thin and unit-testable
 with fake controllers/repositories.
 
-- **`application.py`** — `NotesApplication(Gtk.Application)`: composes the storage/controller stack, presents `MainWindow`, loads/saves `SessionState`, selects the initial note, registers the app-scoped `help` (`F1`) and `quit` (`Ctrl+Q`) actions and the bundled application icon. App lifetime is bound to the main window; its `close-request` handler flushes the editor's pending autosave (`MainWindow.flush_editor`) before quitting, so keystrokes still inside the debounce window are not lost on close — and `quit` routes through that same close path (it closes the stored main window) rather than calling `Gtk.Application.quit` directly, so `Ctrl+Q` keeps the flush + save guarantees.
+- **`application.py`** — `NotesApplication(Gtk.Application)`: composes the storage/controller stack, presents `MainWindow`, loads/saves `SessionState`, selects the initial note, registers the app-scoped `help` (`F1`) and `quit` (`Ctrl+Q`) actions and the bundled application icon. App lifetime is bound to the main window; its `close-request` handler flushes the editor's pending autosave (`MainWindow.flush_editor`) before quitting, so keystrokes still inside the debounce window are not lost on close — and `quit` routes through that same close path (it closes the stored main window) rather than calling `Gtk.Application.quit` directly, so `Ctrl+Q` keeps the flush + save guarantees. It owns the `Database` connection end to end: opened lazily on first activation, closed in `do_shutdown` (after the loop stops and all widgets are gone, so nothing can still touch it — and so WAL sidecars are checkpointed away).
 - **`help_window.py`** — `HelpWindow`, the standalone non-modal help reference. Builds its reading pane from the shared `note_view.build_article_surface()` so help renders identically to a note. Hide-on-close (one cached instance).
 - **`main_window.py`** — the three-pane shell (sidebar │ note list │ `Gtk.Stack(view ↔ editor)`). Takes an optional `restored_state`. Owns the `AppState:notify::view-mode` subscription, and registers the window-scoped keyboard actions (`win.new-note` / `win.focus-search` / `win.toggle-mode` / `win.delete-note`, from `enums.WindowAction`) with their `Ctrl+N` / `Ctrl+F` / `Ctrl+E` accelerators — `win.delete-note` gets **no** accelerator here (the note list binds `Delete` focus-locally). Each action delegates to the behaviour's single home (`Toolbar` methods, or `AppState.set_view_mode`), so a key and its toolbar button never diverge; `win.delete-note`'s enabled state tracks the selection.
 - **`sidebar.py`** — flat library navigation: a **Library** section (`All notes` / `Untagged`) and a model-driven **Tags** section (multi-select, AND semantics). Selection rules owned by `AppState`; counts update live off the store.

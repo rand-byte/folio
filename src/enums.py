@@ -396,3 +396,97 @@ class GResourceSubtree(StrEnum):
 
     LANGUAGE_SPECS = "resource:///org/folio/language-specs"
     ICONS = "/org/folio/icons"
+
+
+class SqlitePragma(StrEnum):
+    """The ``PRAGMA`` names :class:`storage.database.Database` sets on every
+    connection at construction.
+
+    Each member's *value is the pragma name exactly as it appears in the
+    SQL text* (``PRAGMA <value> = <setting>``). This is the first
+    SQLite-dialect enum in this module: it lives here, rather than as
+    string literals in ``database.py``, so the connection-pragma table and
+    any test that reads a pragma back both name the same identifier and
+    cannot drift.
+
+    Pragma names and values cannot be bound parameters (``PRAGMA x = ?``
+    is not valid SQL), so the value is interpolated into the statement
+    text. That is safe here *only* because every value originates from an
+    enum member or an ``int`` constant in :mod:`config.defaults`, never
+    from user input.
+
+    Values are in-memory only (they name a driver-level setting, never
+    persisted note content), so they carry no migration implication.
+    """
+
+    FOREIGN_KEYS = "foreign_keys"
+    JOURNAL_MODE = "journal_mode"
+    BUSY_TIMEOUT = "busy_timeout"
+
+
+class SqliteJournalMode(StrEnum):
+    """SQLite journal modes the application cares about.
+
+    Each member's *value is exactly what a ``PRAGMA journal_mode``
+    read-back reports* (lower-case), so a member doubles as both the
+    setting written and the string compared against on verification.
+
+    Only :attr:`WAL` and (implicitly) :attr:`DELETE` are ever *requested*;
+    :attr:`MEMORY` exists because an in-memory database
+    (:meth:`storage.database.Database.in_memory`, used by the whole
+    storage test suite) always reports ``memory`` regardless of what was
+    asked for — journal mode on ``:memory:`` cannot be changed. Requesting
+    WAL there is a silent no-op, which is why the journal-mode pragma is
+    applied *best-effort* (see :class:`PragmaEnforcement`): the request may
+    legitimately not take effect, both on ``:memory:`` and on a filesystem
+    without shared-memory support, and neither is an error.
+
+    Values are in-memory only (a driver-level setting, not persisted note
+    content), so they carry no migration implication — but they must match
+    what SQLite reports, which is fixed by the engine.
+    """
+
+    DELETE = "delete"
+    WAL = "wal"
+    MEMORY = "memory"
+
+
+class SqliteToggle(StrEnum):
+    """The numeric form of a boolean SQLite pragma (``0`` / ``1``).
+
+    Boolean pragmas such as ``foreign_keys`` accept several spellings on
+    write (``ON``/``OFF``, ``1``/``0``, ``true``/``false``) but a
+    ``PRAGMA foreign_keys`` read-back always reports the *numeric* form.
+    Writing the numeric form too means the value written and the value
+    read back are the same string, so one comparison rule
+    (``str(read_back) == setting.value``) verifies every pragma uniformly
+    — toggles and scalars alike — with no per-pragma special-casing.
+
+    Values are in-memory only, so they carry no migration implication.
+    """
+
+    OFF = "0"
+    ON = "1"
+
+
+class PragmaEnforcement(Enum):
+    """How :class:`storage.database.Database` treats a pragma that did not
+    take effect.
+
+    Plain :class:`enum.Enum` rather than ``StrEnum`` because the value is
+    never persisted or interpolated into SQL — it only classifies how the
+    connection setup reacts to a read-back that disagrees with the value
+    written:
+
+    * :attr:`REQUIRED` — a mismatch is a correctness bug and must raise.
+      ``foreign_keys`` is the case that matters: if it is silently ignored,
+      ``ON DELETE CASCADE`` stops working and the schema's own invariant is
+      broken.
+    * :attr:`BEST_EFFORT` — the engine may legitimately decline, so a
+      mismatch is accepted silently. ``journal_mode = wal`` is the case:
+      an ``:memory:`` database or a filesystem without shared-memory
+      support keeps its existing mode, and that is fine.
+    """
+
+    REQUIRED = auto()
+    BEST_EFFORT = auto()

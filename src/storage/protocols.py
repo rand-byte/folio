@@ -206,10 +206,12 @@ class AttachmentStoreProtocol(Protocol):
         allow-list. Raises :class:`AttachmentRejected` with the
         corresponding :class:`AttachmentRejectionReason` when:
 
-        * the source file's :meth:`pathlib.Path.stat` size exceeds
+        * the source file exceeds
           :data:`config.defaults.MAX_ATTACHMENT_BYTES`
-          (``EXCEEDS_SIZE_LIMIT``) — checked before any bytes enter
-          memory;
+          (``EXCEEDS_SIZE_LIMIT``) — enforced by a
+          :meth:`pathlib.Path.stat` check before any bytes enter memory
+          *and* re-checked against a bounded read, so a file that grows
+          between the stat and the read is still rejected;
         * the source file cannot be stat'd, opened, or read
           (``UNREADABLE_SOURCE``).
         """

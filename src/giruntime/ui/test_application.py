@@ -20,6 +20,7 @@ duck-typed fake (:class:`_FakeMainWindow`) rather than a real
 
 from __future__ import annotations
 
+import sqlite3
 import unittest
 from collections.abc import Callable
 from datetime import UTC, datetime
@@ -40,6 +41,7 @@ from giruntime.ui.application import (
 )
 from giruntime.ui.main_window import MainWindow
 from models.note import Note
+from storage.database import Database
 from storage.session_state_store import SessionStateStore
 
 
@@ -281,6 +283,46 @@ class QuitActionTests(unittest.TestCase):
         application._main_window = None
 
         application._on_quit_activated(cast(Gio.SimpleAction, None), None)
+
+
+class DatabaseLifecycleTests(unittest.TestCase):
+    """:meth:`NotesApplication._close_database` releases the connection on
+    shutdown, so the WAL sidecars are checkpointed away and the lifecycle
+    is finished rather than left to process exit.
+
+    The tests drive ``_close_database`` directly rather than the
+    ``do_shutdown`` vfunc: chaining up into ``Gtk.Application.do_shutdown``
+    on an unregistered, never-run application is not a dependency worth
+    taking, and ``do_shutdown`` is a two-line delegation to the method
+    covered here.
+    """
+
+    def test_close_database_closes_the_connection(self) -> None:
+        application = NotesApplication()
+        database = Database.in_memory()
+        application._database = database
+
+        application._close_database()
+
+        # A closed sqlite3 connection raises ProgrammingError on use.
+        with self.assertRaises(sqlite3.ProgrammingError):
+            database.connection.execute("SELECT 1")
+
+    def test_close_database_is_idempotent(self) -> None:
+        application = NotesApplication()
+        application._database = Database.in_memory()
+
+        application._close_database()
+        # A second close must not raise.
+        application._close_database()
+
+    def test_close_database_before_activation_is_a_noop(self) -> None:
+        # Before the first activation the database is None (a register-only
+        # second instance never opens one); closing must be a safe no-op.
+        application = NotesApplication()
+        application._database = None
+
+        application._close_database()
 
 
 class SaveSessionStateTests(unittest.TestCase):

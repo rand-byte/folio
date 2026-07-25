@@ -7,11 +7,17 @@ Principles & invariants
   was created in v1 (and slimmed by v4, which dropped the unused
   ``mime_type`` column), so this module never issues DDL. It only
   reads and writes rows.
-* The 10 MB hard cap from :data:`MAX_ATTACHMENT_BYTES` is enforced via
-  :meth:`pathlib.Path.stat` *before* any bytes are read into memory.
-  The ordering matters: an over-limit file must not enter the process
-  even briefly. The unit tests assert this by patching :func:`open` to
-  fail if it is called for an over-limit input.
+* The 10 MB hard cap from :data:`MAX_ATTACHMENT_BYTES` is enforced in
+  two stages. First a :meth:`pathlib.Path.stat` gate *before* any bytes
+  are read: an already-over-limit file is rejected without being opened,
+  so it never enters the process even briefly (the unit tests assert
+  this by patching :func:`open` to fail if it is called for such an
+  input). Second a *bounded read* of ``cap + 1`` bytes, re-checked
+  against the cap: this closes the stat-then-read race — a file that
+  grows between the ``stat`` and the read cannot smuggle an
+  arbitrarily-large blob into the database, because the store never holds
+  more than one byte past the cap. Both rejections use the same
+  :class:`AttachmentRejectionReason.EXCEEDS_SIZE_LIMIT`.
 * Attachments are **opaque blobs** — there is no content-type
   allow-list and no classification. Any file the user picks may be
   attached; whether bytes referenced by an ``image::`` macro display
@@ -125,11 +131,17 @@ class AttachmentStore:
            :data:`MAX_ATTACHMENT_BYTES`. Over-limit →
            ``EXCEEDS_SIZE_LIMIT``, *without* the bytes ever being
            loaded. The unit test patches :func:`open` to verify this.
-        3. Read the bytes (:class:`OSError` on read maps to
-           ``UNREADABLE_SOURCE`` — the file passed stat but the read
-           itself failed, e.g. mid-read disk error). There is no type
-           gate: any file under the cap is accepted.
-        4. Insert the row and return the metadata.
+        3. Read at most ``MAX_ATTACHMENT_BYTES + 1`` bytes
+           (:class:`OSError` on read maps to ``UNREADABLE_SOURCE`` — the
+           file passed stat but the read itself failed, e.g. mid-read
+           disk error). There is no type gate: any file under the cap is
+           accepted.
+        4. If the bounded read returned more than
+           :data:`MAX_ATTACHMENT_BYTES` bytes, the file grew past the cap
+           after the stat gate saw it under the limit → reject with
+           ``EXCEEDS_SIZE_LIMIT``. This closes the stat-then-read race
+           while never holding more than ``cap + 1`` bytes.
+        5. Insert the row and return the metadata.
         """
         try:
             stat_result = source_path.stat()
@@ -148,12 +160,30 @@ class AttachmentStore:
 
         try:
             with source_path.open("rb") as handle:
-                data = handle.read()
+                # Bounded read: at most ``cap + 1`` bytes. The stat gate
+                # above rejects an already-over-limit file without opening
+                # it; this bound closes the stat-then-read race — a file
+                # that *grows* between the stat and this read (a still-
+                # downloading file, an appended log, a hostile writer)
+                # cannot land an arbitrarily large blob in the database,
+                # because we never read more than one byte past the cap.
+                data = handle.read(MAX_ATTACHMENT_BYTES + 1)
         except OSError as exc:
             raise AttachmentRejected(
                 AttachmentRejectionReason.UNREADABLE_SOURCE,
                 f"could not read {source_path}: {exc}",
             ) from exc
+
+        if len(data) > MAX_ATTACHMENT_BYTES:
+            # The file grew past the cap after the stat gate saw it under
+            # the limit. Reuse the same rejection reason as the stat gate
+            # — from the user's point of view the file is simply too big —
+            # while never having held more than ``cap + 1`` bytes.
+            raise AttachmentRejected(
+                AttachmentRejectionReason.EXCEEDS_SIZE_LIMIT,
+                f"{source_path.name} grew past the limit while being read "
+                f"(limit {MAX_ATTACHMENT_BYTES})",
+            )
 
         # ``stat`` and the actual read can disagree if the file was
         # truncated between calls; the BLOB column gets the bytes we

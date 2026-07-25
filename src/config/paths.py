@@ -30,7 +30,16 @@ APP_DIRECTORY_NAME: str = "folio"
 """The single subdirectory under XDG_DATA_HOME the app owns."""
 
 DATABASE_FILENAME: str = "notes.db"
-"""The single SQLite file inside the app directory."""
+"""The name of the SQLite database file inside the app directory.
+
+The database runs in WAL mode (see
+:data:`config.defaults.SQLITE_JOURNAL_MODE`), so while a connection is
+open SQLite keeps two sidecar files beside it — ``notes.db-wal`` and
+``notes.db-shm``. They are checkpointed into the main file and removed
+when the last connection closes (the application closes it on shutdown),
+so a cleanly-exited app leaves only ``notes.db``. All three live in this
+one directory, so the module-level "copy the directory to back up the
+library" invariant is unaffected."""
 
 SESSION_STATE_FILENAME: str = "state.json"
 """The single session-state file inside the app directory.
