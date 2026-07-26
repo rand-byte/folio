@@ -58,13 +58,17 @@ Principles & invariants
   module level (:data:`AUTOSAVE_DEBOUNCE_MS`) for a single source of
   truth and easy adjustment.
 * The timeout *scheduler* and *canceller* are injected as
-  :data:`TimeoutScheduler` / :data:`TimeoutCanceller` callables.
-  Production wires them to :func:`GLib.timeout_add` and
-  :func:`GLib.source_remove`; tests pass synchronous fakes that let
-  them assert "the editor scheduled exactly one save 300 ms after
-  the user typed" without spinning a real GLib main loop. This is
-  the same dependency-injection pattern the renderer uses for
-  ``image_bytes_for`` and ``column_width_px``.
+  :data:`giruntime.ui._timeouts.TimeoutScheduler` /
+  :data:`giruntime.ui._timeouts.TimeoutCanceller` callables. Production
+  wires them to :func:`GLib.timeout_add` and :func:`GLib.source_remove`;
+  tests pass synchronous fakes that let them assert "the editor
+  scheduled exactly one save 300 ms after the user typed" without
+  spinning a real GLib main loop. This is the same dependency-injection
+  pattern the renderer uses for ``image_bytes_for`` and
+  ``column_width_px``. The seam itself lives in
+  :mod:`giruntime.ui._timeouts` because the note list debounces its
+  search filter through the same primitives; the 300 ms *delay* stays
+  here, next to the behaviour it belongs to.
 * A "loading" guard flag prevents the programmatic buffer load that
   follows a selection change from itself triggering an auto-save.
   Without the guard, every reload would queue a redundant save of
@@ -91,10 +95,9 @@ Principles & invariants
 from __future__ import annotations
 
 import sqlite3
-from collections.abc import Callable
 from typing import Final
 
-from gi.repository import GLib, GObject, Gtk, GtkSource
+from gi.repository import GObject, Gtk, GtkSource
 
 from enums import GResourceSubtree
 from giruntime.controllers.app_state import AppState
@@ -104,6 +107,13 @@ from giruntime.ui import _gresource
 from giruntime.ui._file_picker import (
     FileDialogOpener,
     default_file_dialog_opener,
+)
+from giruntime.ui._timeouts import (
+    TIMEOUT_REMOVE,
+    TimeoutCanceller,
+    TimeoutScheduler,
+    default_timeout_canceller,
+    default_timeout_scheduler,
 )
 from giruntime.ui.attachments_panel import AttachmentsPanel
 from storage.protocols import AttachmentStoreProtocol
@@ -131,53 +141,6 @@ saving on every one would hammer the database. 300 ms is a typical
 editor latency budget — long enough to coalesce keystrokes, short
 enough that the user does not notice a lag when they pause.
 """
-
-# ---------------------------------------------------------------------------
-# Type aliases for the injected timeout primitives
-# ---------------------------------------------------------------------------
-
-
-type TimeoutScheduler = Callable[[int, Callable[[], bool]], int]
-"""Schedule ``callback`` to run once after ``delay_ms`` ms; return a
-cancellable handle.
-
-The callback's :class:`bool` return value follows GLib semantics:
-returning :data:`GLib.SOURCE_REMOVE` (``False``) means "do not
-re-fire". The editor never returns :data:`GLib.SOURCE_CONTINUE` —
-auto-save is one-shot per debounce cycle.
-
-Production wiring: :func:`GLib.timeout_add`. Test wiring: a fake that
-records the call and returns a synthetic integer handle, plus a
-:meth:`fire` helper that invokes the callback synchronously."""
-
-type TimeoutCanceller = Callable[[int], None]
-"""Cancel a previously-scheduled :data:`TimeoutScheduler` handle.
-
-Production wiring: :func:`GLib.source_remove`. Test wiring: a fake
-that records the cancelled handle so assertions can verify the
-debounce really did cancel before rescheduling."""
-
-
-def _default_timeout_scheduler(
-    delay_ms: int,
-    callback: Callable[[], bool],
-) -> int:
-    """Production scheduler — wraps :func:`GLib.timeout_add`.
-
-    Defined as a free function rather than ``GLib.timeout_add``
-    directly so the type annotation in :class:`NoteEditor`'s
-    ``__init__`` can be the explicit :data:`TimeoutScheduler` alias.
-    PyGObject's introspected signatures do not always satisfy mypy
-    against arbitrary callable types.
-    """
-    handle: int = GLib.timeout_add(delay_ms, callback)
-    return handle
-
-
-def _default_timeout_canceller(handle: int) -> None:
-    """Production canceller — wraps :func:`GLib.source_remove`."""
-    GLib.source_remove(handle)
-
 
 # ---------------------------------------------------------------------------
 # Pure helpers — operate on Gtk.TextBuffer with no display required
@@ -366,8 +329,8 @@ class NoteEditor(Gtk.Box):  # pylint: disable=too-many-instance-attributes
         note_controller: NoteController,
         app_state: AppState,
         attachments: AttachmentStoreProtocol | None = None,
-        schedule_timeout: TimeoutScheduler = _default_timeout_scheduler,
-        cancel_timeout: TimeoutCanceller = _default_timeout_canceller,
+        schedule_timeout: TimeoutScheduler = default_timeout_scheduler,
+        cancel_timeout: TimeoutCanceller = default_timeout_canceller,
         file_dialog_opener: FileDialogOpener = default_file_dialog_opener,
     ) -> None:
         super().__init__(orientation=Gtk.Orientation.VERTICAL, spacing=0)
@@ -583,7 +546,7 @@ class NoteEditor(Gtk.Box):  # pylint: disable=too-many-instance-attributes
     def _on_save_timer(self) -> bool:
         """GLib timer callback — perform the deferred save.
 
-        Always returns :data:`GLib.SOURCE_REMOVE` (``False``) so the
+        Always returns :data:`TIMEOUT_REMOVE` (``False``) so the
         timer does not re-fire; the next save is scheduled by the
         next buffer change.
         """
@@ -598,7 +561,7 @@ class NoteEditor(Gtk.Box):  # pylint: disable=too-many-instance-attributes
         # tears the timer down so it does not re-fire. Keep returning the
         # named constant rather than a bare ``False`` so the source
         # contract stays explicit.
-        result: bool = GLib.SOURCE_REMOVE
+        result: bool = TIMEOUT_REMOVE
         return result
 
     def _save_now(self) -> None:

@@ -4,28 +4,42 @@ The note list now binds a ``Filter``/``Sort``/``ListView`` chain over
 the in-memory :class:`controllers.note_list_store.NoteListStore`. The
 "what shows / what order" rules are covered exhaustively by the pure
 predicates in :mod:`search.note_filter`; here we exercise the widget's
-own wiring: the filtered count, live query filtering (no throttle),
-sort-key reordering, the AppState ⇄ selection round-trip, and the 📎
-badge's re-bind on the controller's ``attachments-changed`` signal.
+own wiring: the filtered count, debounced query filtering, the
+monotone ``Gtk.FilterChange`` hints, the empty-state reason, sort-key
+reordering, the AppState ⇄ selection round-trip, and the 📎 badge's
+re-bind on the controller's ``attachments-changed`` signal.
 """
 
 from __future__ import annotations
 
 import unittest
+from collections.abc import Callable
 from datetime import UTC, datetime
 from pathlib import Path
 
 from gi.repository import Gdk, GLib, Gtk
 
-from enums import AttachmentExportFailureReason, NoteSortKey
+from enums import (
+    AttachmentExportFailureReason,
+    NoteListEmptyReason,
+    NoteSortKey,
+    SmartFilter,
+)
 from storage.protocols import AttachmentExportFailed
 from giruntime.controllers.app_state import AppState
 from giruntime.controllers.note_controller import NoteController
 from giruntime.controllers.note_list_store import NoteListStore
 import giruntime.ui.note_list as note_list_module
-from giruntime.ui.note_list import NoteList, _SORT_KEY_DROPDOWN_ORDER
+from giruntime.ui.note_list import (
+    _EMPTY_STATE_LABELS,
+    _SORT_KEY_DROPDOWN_ORDER,
+    NoteList,
+    _filter_change_for,
+    _selection_empty_reason,
+)
 from models.attachment import Attachment
 from models.note import Note
+from search.note_filter import SmartSelection, TagSelection
 
 
 _FIXED_NOW: datetime = datetime(2026, 4, 28, 12, 0, 0, tzinfo=UTC)
@@ -129,9 +143,55 @@ class _FakeAttachmentStore:
             ) from exc
 
 
+class _FakeTimeoutBackend:
+    """Synchronous stand-in for :func:`GLib.timeout_add` / ``source_remove``.
+
+    Mirrors the backend :mod:`giruntime.ui.test_note_editor` uses for
+    autosave, so both debouncing panes are driven the same way: the
+    scheduled callback runs only when a test calls :meth:`fire_pending`.
+    """
+
+    schedule_calls: list[tuple[int, Callable[[], bool]]]
+    cancel_calls: list[int]
+    _next_handle: int
+    _pending: dict[int, Callable[[], bool]]
+
+    def __init__(self) -> None:
+        self.schedule_calls = []
+        self.cancel_calls = []
+        self._next_handle = 2000
+        self._pending = {}
+
+    def schedule(
+        self,
+        delay_ms: int,
+        callback: Callable[[], bool],
+    ) -> int:
+        self.schedule_calls.append((delay_ms, callback))
+        handle = self._next_handle
+        self._next_handle += 1
+        self._pending[handle] = callback
+        return handle
+
+    def cancel(self, handle: int) -> None:
+        self.cancel_calls.append(handle)
+        self._pending.pop(handle, None)
+
+    def fire_pending(self) -> None:
+        """Synchronously invoke every still-pending callback."""
+        for handle, callback in list(self._pending.items()):
+            if not callback():
+                self._pending.pop(handle, None)
+
+    @property
+    def pending_count(self) -> int:
+        return len(self._pending)
+
+
 def _build_note_list_with_collaborators(
     notes: list[Note],
     app_state: AppState,
+    timeouts: _FakeTimeoutBackend | None = None,
 ) -> tuple[NoteList, NoteController, _FakeAttachmentStore]:
     store = NoteListStore(repository=_FakeNoteRepository(notes))
     store.load()
@@ -141,13 +201,40 @@ def _build_note_list_with_collaborators(
         attachments=attachment_store,
         app_state=app_state,
     )
+    backend = timeouts if timeouts is not None else _FakeTimeoutBackend()
     note_list = NoteList(
         note_store=store,
         note_controller=controller,
         app_state=app_state,
         attachment_store=attachment_store,
+        schedule_timeout=backend.schedule,
+        cancel_timeout=backend.cancel,
     )
     return note_list, controller, attachment_store
+
+
+def _build_note_list_with_timeouts(
+    notes: list[Note],
+    app_state: AppState,
+) -> tuple[NoteList, _FakeTimeoutBackend]:
+    """Build a pane whose search debounce a test can fire by hand."""
+    backend = _FakeTimeoutBackend()
+    note_list, _, _ = _build_note_list_with_collaborators(
+        notes, app_state, backend,
+    )
+    return note_list, backend
+
+
+def _search(
+    note_list: NoteList,
+    app_state: AppState,
+    backend: _FakeTimeoutBackend,
+    query: str,
+) -> None:
+    """Type ``query`` and let the debounce elapse."""
+    app_state.props.query = query
+    backend.fire_pending()
+    del note_list
 
 
 def _build_note_list(notes: list[Note], app_state: AppState) -> NoteList:
@@ -192,17 +279,28 @@ class NoteListModelChainTests(unittest.TestCase):
         self.assertEqual(note_list._count_label.get_text(), "3 notes")
         self.assertEqual(_visible_ids(note_list), ["1", "2", "3"])
 
-    def test_query_filters_immediately_without_throttle(self) -> None:
+    def test_query_filters_once_the_debounce_elapses(self) -> None:
         app_state = AppState()
-        note_list = _build_note_list(self._notes(), app_state)
-        # Setting the query filters the model right away — no pending
-        # timer, no coalescing window.
+        note_list, backend = _build_note_list_with_timeouts(
+            self._notes(), app_state,
+        )
         app_state.props.query = "alpha"
+        # Still unfiltered: the keystroke only scheduled the work.
+        self.assertEqual(_visible_ids(note_list), ["1", "2", "3"])
+        backend.fire_pending()
         self.assertEqual(note_list._count_label.get_text(), "1 notes")
         self.assertEqual(_visible_ids(note_list), ["1"])
-        # Clearing restores the full set.
+
+    def test_clearing_the_query_restores_the_full_set(self) -> None:
+        app_state = AppState()
+        note_list, backend = _build_note_list_with_timeouts(
+            self._notes(), app_state,
+        )
+        _search(note_list, app_state, backend, "alpha")
         app_state.props.query = ""
+        # No fire_pending: clearing bypasses the debounce entirely.
         self.assertEqual(note_list._count_label.get_text(), "3 notes")
+        self.assertEqual(_visible_ids(note_list), ["1", "2", "3"])
 
     def test_default_sort_is_modified_descending(self) -> None:
         app_state = AppState()
@@ -386,3 +484,332 @@ class NoteListDeleteShortcutTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class FilterChangeClassificationTests(unittest.TestCase):
+    """:func:`_filter_change_for` — pure, no display required."""
+
+    def test_extending_the_needle_is_more_strict(self) -> None:
+        self.assertEqual(
+            _filter_change_for("al", "alp"), Gtk.FilterChange.MORE_STRICT,
+        )
+
+    def test_shortening_the_needle_is_less_strict(self) -> None:
+        self.assertEqual(
+            _filter_change_for("alp", "al"), Gtk.FilterChange.LESS_STRICT,
+        )
+
+    def test_starting_to_type_is_more_strict(self) -> None:
+        # The empty needle matches everything, so any needle narrows.
+        self.assertEqual(
+            _filter_change_for("", "a"), Gtk.FilterChange.MORE_STRICT,
+        )
+
+    def test_clearing_is_less_strict(self) -> None:
+        self.assertEqual(
+            _filter_change_for("a", ""), Gtk.FilterChange.LESS_STRICT,
+        )
+
+    def test_unrelated_needles_are_different(self) -> None:
+        self.assertEqual(
+            _filter_change_for("alpha", "beta"), Gtk.FilterChange.DIFFERENT,
+        )
+
+    def test_mid_string_insertion_is_different(self) -> None:
+        # "ala" is not a substring of "alpha" nor vice versa.
+        self.assertEqual(
+            _filter_change_for("ala", "alpha"), Gtk.FilterChange.DIFFERENT,
+        )
+
+
+class SelectionEmptyReasonTests(unittest.TestCase):
+    """:func:`_selection_empty_reason` — pure, no display required."""
+
+    def test_tag_selection_reports_tag_matches(self) -> None:
+        self.assertEqual(
+            _selection_empty_reason(TagSelection(tags=frozenset({"a", "b"}))),
+            NoteListEmptyReason.NO_TAG_MATCHES,
+        )
+
+    def test_untagged_reports_no_untagged_notes(self) -> None:
+        self.assertEqual(
+            _selection_empty_reason(
+                SmartSelection(smart_filter=SmartFilter.UNTAGGED),
+            ),
+            NoteListEmptyReason.NO_UNTAGGED_NOTES,
+        )
+
+    def test_all_is_unreachable_and_raises(self) -> None:
+        # A non-empty store with no query under ALL cannot be empty, so
+        # arriving here is an invariant break, not a user-facing state.
+        with self.assertRaises(AssertionError):
+            _selection_empty_reason(
+                SmartSelection(smart_filter=SmartFilter.ALL),
+            )
+
+
+@unittest.skipUnless(_display_available(), "no GDK display")
+class SearchDebounceTests(unittest.TestCase):
+    """The query is coalesced behind one timer; clearing is immediate."""
+
+    def _notes(self) -> list[Note]:
+        return [_note("1", "alpha"), _note("2", "beta")]
+
+    def test_typing_schedules_a_single_pending_timer(self) -> None:
+        app_state = AppState()
+        _, backend = _build_note_list_with_timeouts(self._notes(), app_state)
+        app_state.props.query = "a"
+        app_state.props.query = "al"
+        app_state.props.query = "alp"
+        self.assertEqual(backend.pending_count, 1)
+
+    def test_each_keystroke_cancels_the_previous_timer(self) -> None:
+        app_state = AppState()
+        _, backend = _build_note_list_with_timeouts(self._notes(), app_state)
+        app_state.props.query = "a"
+        app_state.props.query = "al"
+        app_state.props.query = "alp"
+        # Three keystrokes, three schedules, two cancels — the first
+        # keystroke had nothing to cancel.
+        self.assertEqual(len(backend.schedule_calls), 3)
+        self.assertEqual(len(backend.cancel_calls), 2)
+
+    def test_the_debounce_uses_the_module_delay(self) -> None:
+        app_state = AppState()
+        _, backend = _build_note_list_with_timeouts(self._notes(), app_state)
+        app_state.props.query = "alpha"
+        delay_ms, _callback = backend.schedule_calls[0]
+        self.assertEqual(delay_ms, note_list_module.SEARCH_DEBOUNCE_MS)
+
+    def test_coalesced_typing_applies_only_the_final_needle(self) -> None:
+        app_state = AppState()
+        note_list, backend = _build_note_list_with_timeouts(
+            self._notes(), app_state,
+        )
+        app_state.props.query = "a"
+        app_state.props.query = "beta"
+        backend.fire_pending()
+        self.assertEqual(_visible_ids(note_list), ["2"])
+
+    def test_clearing_applies_without_waiting(self) -> None:
+        app_state = AppState()
+        note_list, backend = _build_note_list_with_timeouts(
+            self._notes(), app_state,
+        )
+        _search(note_list, app_state, backend, "alpha")
+        self.assertEqual(_visible_ids(note_list), ["1"])
+        app_state.props.query = ""
+        self.assertEqual(_visible_ids(note_list), ["1", "2"])
+
+    def test_clearing_cancels_a_pending_timer(self) -> None:
+        app_state = AppState()
+        _, backend = _build_note_list_with_timeouts(self._notes(), app_state)
+        app_state.props.query = "alpha"
+        app_state.props.query = ""
+        self.assertEqual(backend.pending_count, 0)
+
+    def test_whitespace_only_query_is_treated_as_cleared(self) -> None:
+        app_state = AppState()
+        note_list, backend = _build_note_list_with_timeouts(
+            self._notes(), app_state,
+        )
+        app_state.props.query = "   "
+        self.assertEqual(backend.pending_count, 0)
+        self.assertEqual(_visible_ids(note_list), ["1", "2"])
+
+    def test_flush_applies_a_pending_query_at_once(self) -> None:
+        app_state = AppState()
+        note_list, backend = _build_note_list_with_timeouts(
+            self._notes(), app_state,
+        )
+        app_state.props.query = "alpha"
+        note_list.flush_pending_query()
+        self.assertEqual(_visible_ids(note_list), ["1"])
+        self.assertEqual(backend.pending_count, 0)
+
+    def test_flush_without_a_pending_query_is_a_no_op(self) -> None:
+        app_state = AppState()
+        note_list, backend = _build_note_list_with_timeouts(
+            self._notes(), app_state,
+        )
+        note_list.flush_pending_query()
+        self.assertEqual(backend.cancel_calls, [])
+        self.assertEqual(_visible_ids(note_list), ["1", "2"])
+
+    def test_a_query_typed_then_undone_does_not_refilter(self) -> None:
+        app_state = AppState()
+        note_list, backend = _build_note_list_with_timeouts(
+            self._notes(), app_state,
+        )
+        _search(note_list, app_state, backend, "alpha")
+        app_state.props.query = "alpha"  # same needle again
+        backend.fire_pending()
+        self.assertEqual(_visible_ids(note_list), ["1"])
+
+
+@unittest.skipUnless(_display_available(), "no GDK display")
+class FilterChangeHintResultTests(unittest.TestCase):
+    """The monotone hints must not change *what* the list shows."""
+
+    def _notes(self) -> list[Note]:
+        return [
+            _note("1", "alpha", modified_at=datetime(2026, 1, 3, tzinfo=UTC)),
+            _note("2", "alpine", modified_at=datetime(2026, 1, 2, tzinfo=UTC)),
+            _note("3", "beta", modified_at=datetime(2026, 1, 1, tzinfo=UTC)),
+        ]
+
+    def test_typed_character_by_character_matches_a_direct_query(
+        self,
+    ) -> None:
+        # Appending characters takes the MORE_STRICT path; the result
+        # must equal the same needle applied in one go.
+        typed_state = AppState()
+        typed, typed_backend = _build_note_list_with_timeouts(
+            self._notes(), typed_state,
+        )
+        for prefix in ("a", "al", "alp", "alph", "alpha"):
+            _search(typed, typed_state, typed_backend, prefix)
+
+        direct_state = AppState()
+        direct, direct_backend = _build_note_list_with_timeouts(
+            self._notes(), direct_state,
+        )
+        _search(direct, direct_state, direct_backend, "alpha")
+
+        self.assertEqual(_visible_ids(typed), _visible_ids(direct))
+        self.assertEqual(_visible_ids(typed), ["1"])
+
+    def test_backspacing_widens_back_to_the_original_set(self) -> None:
+        # Removing characters takes the LESS_STRICT path.
+        app_state = AppState()
+        note_list, backend = _build_note_list_with_timeouts(
+            self._notes(), app_state,
+        )
+        _search(note_list, app_state, backend, "alpha")
+        self.assertEqual(_visible_ids(note_list), ["1"])
+        _search(note_list, app_state, backend, "alp")
+        self.assertEqual(_visible_ids(note_list), ["1", "2"])
+        _search(note_list, app_state, backend, "a")
+        self.assertEqual(_visible_ids(note_list), ["1", "2", "3"])
+
+    def test_replacing_the_needle_wholesale_refilters(self) -> None:
+        # An unrelated needle takes the DIFFERENT path.
+        app_state = AppState()
+        note_list, backend = _build_note_list_with_timeouts(
+            self._notes(), app_state,
+        )
+        _search(note_list, app_state, backend, "alpha")
+        _search(note_list, app_state, backend, "beta")
+        self.assertEqual(_visible_ids(note_list), ["3"])
+
+    def test_mid_string_edit_refilters(self) -> None:
+        app_state = AppState()
+        note_list, backend = _build_note_list_with_timeouts(
+            self._notes(), app_state,
+        )
+        _search(note_list, app_state, backend, "ala")
+        self.assertEqual(_visible_ids(note_list), [])
+        _search(note_list, app_state, backend, "alpha")
+        self.assertEqual(_visible_ids(note_list), ["1"])
+
+
+@unittest.skipUnless(_display_available(), "no GDK display")
+class NoteListEmptyStateTests(unittest.TestCase):
+    """The empty-state label says *why* the list is empty."""
+
+    def _tagged_notes(self) -> list[Note]:
+        return [
+            _note("1", "alpha", tags=("work",)),
+            _note("2", "beta", tags=("urgent",)),
+        ]
+
+    def _empty_text(self, note_list: NoteList) -> str:
+        self.assertTrue(note_list._empty_label.get_visible())
+        text: str = note_list._empty_label.get_text()
+        return text
+
+    def test_empty_store_reports_no_notes(self) -> None:
+        app_state = AppState()
+        note_list = _build_note_list([], app_state)
+        self.assertEqual(
+            self._empty_text(note_list),
+            _EMPTY_STATE_LABELS[NoteListEmptyReason.NO_NOTES],
+        )
+
+    def test_empty_store_wins_over_the_untagged_filter(self) -> None:
+        # The ordering guard: an empty library must not be reported as
+        # "every note has a tag" just because Untagged is selected.
+        app_state = AppState()
+        note_list = _build_note_list([], app_state)
+        app_state.set_smart(SmartFilter.UNTAGGED)
+        self.assertEqual(
+            self._empty_text(note_list),
+            _EMPTY_STATE_LABELS[NoteListEmptyReason.NO_NOTES],
+        )
+
+    def test_query_matching_nothing_reports_the_search(self) -> None:
+        app_state = AppState()
+        note_list, backend = _build_note_list_with_timeouts(
+            self._tagged_notes(), app_state,
+        )
+        _search(note_list, app_state, backend, "nonexistent")
+        self.assertEqual(
+            self._empty_text(note_list),
+            _EMPTY_STATE_LABELS[NoteListEmptyReason.NO_QUERY_MATCHES],
+        )
+
+    def test_query_reason_wins_over_the_selection(self) -> None:
+        app_state = AppState()
+        note_list, backend = _build_note_list_with_timeouts(
+            self._tagged_notes(), app_state,
+        )
+        app_state.toggle_tag("work")
+        _search(note_list, app_state, backend, "nonexistent")
+        self.assertEqual(
+            self._empty_text(note_list),
+            _EMPTY_STATE_LABELS[NoteListEmptyReason.NO_QUERY_MATCHES],
+        )
+
+    def test_two_tags_that_share_no_note_report_tag_matches(self) -> None:
+        app_state = AppState()
+        note_list = _build_note_list(self._tagged_notes(), app_state)
+        app_state.toggle_tag("work")
+        app_state.toggle_tag("urgent")
+        self.assertEqual(
+            self._empty_text(note_list),
+            _EMPTY_STATE_LABELS[NoteListEmptyReason.NO_TAG_MATCHES],
+        )
+
+    def test_either_tag_alone_still_matches(self) -> None:
+        # Pins the invariant the NO_TAG_MATCHES wording relies on: a
+        # single selected tag can never empty the list, so only a
+        # combination reaches that message.
+        app_state = AppState()
+        note_list = _build_note_list(self._tagged_notes(), app_state)
+        app_state.toggle_tag("work")
+        self.assertEqual(_visible_ids(note_list), ["1"])
+        app_state.toggle_tag("work")
+        app_state.toggle_tag("urgent")
+        self.assertEqual(_visible_ids(note_list), ["2"])
+
+    def test_untagged_with_every_note_tagged_reports_no_untagged(
+        self,
+    ) -> None:
+        app_state = AppState()
+        note_list = _build_note_list(self._tagged_notes(), app_state)
+        app_state.set_smart(SmartFilter.UNTAGGED)
+        self.assertEqual(
+            self._empty_text(note_list),
+            _EMPTY_STATE_LABELS[NoteListEmptyReason.NO_UNTAGGED_NOTES],
+        )
+
+    def test_label_hides_again_once_the_list_is_non_empty(self) -> None:
+        app_state = AppState()
+        note_list, backend = _build_note_list_with_timeouts(
+            self._tagged_notes(), app_state,
+        )
+        _search(note_list, app_state, backend, "nonexistent")
+        self.assertTrue(note_list._empty_label.get_visible())
+        app_state.props.query = ""
+        self.assertFalse(note_list._empty_label.get_visible())
+        self.assertTrue(note_list._list_view.get_visible())

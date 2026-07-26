@@ -26,14 +26,38 @@ Principles & invariants
 * :func:`filter_by_query` strips and case-folds the query before
   matching. An empty or whitespace-only query is a passthrough — the
   search box being empty must never hide notes. Substring matching
-  spans ``title``, ``snippet``, and ``source``, mirroring the
-  repository's SQL ``LIKE`` query so the in-memory and SQL-side paths
-  agree on what "matches" means.
+  spans ``title``, ``snippet``, and ``source``. This module is now the
+  **sole** definition of what "matches" means: the repository's SQL
+  ``LIKE`` search this predicate once mirrored has been deleted, so
+  there is no second implementation to agree with.
+* ``tags`` is **deliberately not matched**, and its absence is a
+  design decision rather than an omission. Tag filtering has its own
+  affordance — the sidebar's Tags section, which selects tags
+  explicitly and combines them with **AND** semantics that a substring
+  test cannot express — and the text box is not a second, weaker way
+  to do the same job. The two compose: :func:`matches_selection` and
+  :func:`matches_query` are ANDed by the note list, so a query narrows
+  within the selected tags. A user who types a tag word is told where
+  tags live by the note list's empty state
+  (:data:`enums.NoteListEmptyReason.NO_QUERY_MATCHES`) rather than by
+  widening this predicate.
 * :func:`sort_notes` always returns a fresh list — the input is never
   mutated. The order is descending by ``modified_at`` / ``created_at``
   (newest first) and ascending by case-folded title for
   :data:`NoteSortKey.TITLE`. Python's sort is stable, so ties preserve
   the order of the input list.
+* :func:`matches_query` **re-folds the note on every call**, and that
+  is a deliberate choice rather than an oversight awaiting an
+  optimisation. Caching the folded fields alongside each list item was
+  built, measured, and removed: at the scale this application targets
+  the whole sweep costs 0.4 ms for 100 notes and 4.3 ms for 1,000
+  (4 KB bodies) — inside a single frame before any caching — and the
+  note list debounces the sweep to at most one per typing pause, so the
+  saving is imperceptible. Worse, the cache's value *falls* as the
+  corpus grows: at 40 KB bodies the substring scan dominates the fold,
+  so the speed-up drops to 1.7x while the memory cost (a second copy of
+  every note's text) grows with the corpus. Re-measure before
+  reintroducing it; do not assume it is a win.
 * The "what matches" / "what order" rules each live in exactly one
   place, exposed as **per-item** helpers so a ``Gtk.CustomFilter`` /
   ``Gtk.CustomSorter`` can reuse them without re-implementing the rule:
@@ -161,10 +185,13 @@ def normalize_query(query: str) -> str:
 def matches_query(note: Note, needle: str) -> bool:
     """Return whether ``needle`` occurs in the note's title/snippet/source.
 
+    The single definition of "does this note match the query", called
+    per item by the note list's ``Gtk.CustomFilter`` as well as by
+    :func:`filter_by_query`. ``tags`` is deliberately not searched (see
+    the module docstring), and the fold is deliberately not cached (see
+    the same).
+
     ``needle`` must already be normalised (see :func:`normalize_query`).
-    Matching spans the same three fields the repository's legacy SQL
-    ``LIKE`` query searched, so the in-memory and SQL paths agree on
-    what "matches" means.
     """
     return (
         needle in note.title.casefold()

@@ -364,3 +364,28 @@ class ComparatorForTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class MatchesQueryFoldingTests(unittest.TestCase):
+    """The fold is a real case-fold, and it covers the right fields."""
+
+    def test_casefold_is_not_merely_lowercase(self) -> None:
+        # casefold() maps the German sharp s to "ss"; lower() does not.
+        note = _make_note(note_id="n1", title="Straße")
+        self.assertTrue(matches_query(note, normalize_query("STRASSE")))
+
+    def test_tags_are_not_searched(self) -> None:
+        note = _make_note(note_id="n1", title="alpha", tags=("urgent",))
+        self.assertFalse(matches_query(note, "urgent"))
+
+    def test_matches_across_title_snippet_and_source(self) -> None:
+        note = _make_note(
+            note_id="n1",
+            title="Quarterly Report",
+            snippet="revenue summary",
+            source="= Quarterly Report\n\nrevenue is up\n",
+        )
+        for needle in ("quarterly", "summary", "is up"):
+            with self.subTest(needle=needle):
+                self.assertTrue(matches_query(note, needle))
+        self.assertFalse(matches_query(note, "expenditure"))

@@ -121,6 +121,41 @@ class SelectionKind(StrEnum):
     TAG = auto()
 
 
+class NoteListEmptyReason(StrEnum):
+    """Why the note list is showing nothing — drives the empty-state text.
+
+    One member per *reachable* empty state, so no member describes a
+    situation the UI cannot produce. Two states that might be expected
+    here are absent because they cannot occur:
+
+    * *"no notes with this tag"* — a tag row exists in the sidebar only
+      while at least one note carries that tag
+      (:class:`giruntime.controllers.tag_counts_model.TagCountsModel`
+      drops the row on the ``1 -> 0`` transition, and the sidebar then
+      drops the tag from the selection), and a
+      :class:`search.note_filter.TagSelection` matches a note when the
+      selected tags are a *subset* of the note's. A single selected tag
+      therefore always has at least one match; only two or more tags can
+      intersect to nothing, which is :data:`NO_TAG_MATCHES`.
+    * *"the unfiltered list is empty"* — a non-empty store with no query
+      and :data:`SmartFilter.ALL` selected matches everything, so it
+      cannot be empty. An empty store is :data:`NO_NOTES` regardless of
+      what is selected.
+    """
+
+    NO_NOTES = auto()
+    """The library itself holds no notes."""
+
+    NO_QUERY_MATCHES = auto()
+    """A non-empty search query matched nothing."""
+
+    NO_TAG_MATCHES = auto()
+    """Two or more selected tags AND together to nothing."""
+
+    NO_UNTAGGED_NOTES = auto()
+    """:data:`SmartFilter.UNTAGGED` is selected and every note is tagged."""
+
+
 class TokenKind(StrEnum):
     """Lexer token classifications used by :mod:`asciidoc.lexer`."""
 

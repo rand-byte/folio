@@ -22,10 +22,30 @@ Principles & invariants
 * The filter and sorter reuse the per-item predicates in
   :mod:`search.note_filter` (:func:`matches_selection`,
   :func:`matches_query`, :func:`comparator_for`) so the "what shows" /
-  "what order" rules live in exactly one place, shared with the legacy
-  list API. The query needle is normalised once per query change via
-  :func:`normalize_query`, then the filter is invalidated; re-filtering
-  the resident list per keystroke is cheap, so no throttle is needed.
+  "what order" rules live in exactly one place.
+* Search is **debounced**. ``AppState.query`` still updates on every
+  keystroke — it is bound bidirectionally to the entry and must stay
+  verbatim — but the needle is only recomputed and the filter only
+  invalidated :data:`SEARCH_DEBOUNCE_MS` ms after the user stops typing.
+  Clearing the box bypasses the debounce and applies immediately, so
+  ``Esc`` / *stop-search* never feels laggy. The timer primitives are
+  injected (:mod:`giruntime.ui._timeouts`) exactly as the editor's
+  autosave does it, so tests drive the debounce synchronously.
+  Consequence to keep in mind: the header count and the row highlight
+  trail the keystroke by that interval, by design.
+* Query invalidation passes GTK a **monotonicity hint** rather than
+  always claiming :data:`Gtk.FilterChange.DIFFERENT`. Substring
+  matching is monotone in the needle, so extending it can only shrink
+  the match set (``MORE_STRICT``) and shortening it can only grow it
+  (``LESS_STRICT``); GTK then re-tests only the matching or only the
+  hidden items instead of the whole model. Selection changes keep
+  ``DIFFERENT`` — a tag selection change is not monotone.
+* When the list is empty, the empty-state label says *why*
+  (:class:`enums.NoteListEmptyReason`), which requires knowing the
+  unfiltered store's size as well as the filtered count — hence the
+  retained :attr:`_note_store`. Resolution order is store-empty first,
+  then query, then selection: deleting every note while *Untagged* is
+  selected must read as "no notes", not "every note has a tag".
 * Selection is one source of truth: :class:`AppState`. A row click moves
   the :class:`Gtk.SingleSelection`, whose ``notify::selected`` writes
   through to ``app_state.set_selected_note_id``; a programmatic
@@ -67,18 +87,34 @@ Principles & invariants
 from __future__ import annotations
 
 from collections.abc import Callable
-from typing import Final
+from typing import Final, assert_never
 
 from gi.repository import GObject, Gtk, Pango
 
-from enums import NoteSortKey, WindowAction, window_action_detailed_name
+from enums import (
+    NoteListEmptyReason,
+    NoteSortKey,
+    SmartFilter,
+    WindowAction,
+    window_action_detailed_name,
+)
 from giruntime.controllers.app_state import AppState
 from giruntime.controllers.note_controller import NoteController
 from giruntime.controllers.note_item import NoteItem
 from giruntime.controllers.note_list_store import NoteListStore
 from giruntime.ui._dates import format_date_short
+from giruntime.ui._timeouts import (
+    TIMEOUT_REMOVE,
+    TimeoutCanceller,
+    TimeoutScheduler,
+    default_timeout_canceller,
+    default_timeout_scheduler,
+)
 from models.note import Note
 from search.note_filter import (
+    Selection,
+    SmartSelection,
+    TagSelection,
     comparator_for,
     matches_query,
     matches_selection,
@@ -127,6 +163,32 @@ _META_SEPARATOR: Final[str] = "|"
 _NOTES_LABEL_TEMPLATE: Final[str] = "{n} notes"
 """Header text on the left — ``"N notes"`` (count of the filtered set)."""
 
+SEARCH_DEBOUNCE_MS: Final[int] = 150
+"""Delay between the last keystroke and the search filter being applied.
+
+Lives here, not in :mod:`config.defaults`, because that module holds
+values "the app reuses **across modules**" and this one has a single
+consumer — mirroring :data:`giruntime.ui.note_editor.AUTOSAVE_DEBOUNCE_MS`.
+150 ms is short enough to feel immediate while still coalescing the
+keystrokes of a brisk typist into one filter pass.
+"""
+
+_EMPTY_STATE_LABELS: Final[dict[NoteListEmptyReason, str]] = {
+    NoteListEmptyReason.NO_NOTES: "No notes here yet.",
+    NoteListEmptyReason.NO_QUERY_MATCHES: (
+        "No notes match this search. Tags are filtered from the sidebar."
+    ),
+    NoteListEmptyReason.NO_TAG_MATCHES: "No notes have all of these tags.",
+    NoteListEmptyReason.NO_UNTAGGED_NOTES: "Every note has a tag.",
+}
+"""The empty-state text for each reachable reason.
+
+The :data:`NO_QUERY_MATCHES` wording carries the one pointer the
+deliberate exclusion of tags from text search (see
+:mod:`search.note_filter`) owes the user: a search for a tag word finds
+nothing, so the message says where tags are filtered instead.
+"""
+
 _DELETE_SHORTCUT_TRIGGER: Final[str] = "Delete"
 """The key that deletes the selected note **while this pane has focus**.
 
@@ -169,18 +231,44 @@ class NoteList(Gtk.Box):  # pylint: disable=too-many-instance-attributes
     _sort_model: Gtk.SortListModel
     _selection_model: Gtk.SingleSelection
 
+    _note_store: NoteListStore
+    """The *unfiltered* store, retained for the empty-state reason.
+
+    :meth:`_empty_reason` must distinguish "the library is empty" from
+    "the current filter matches nothing", which the filtered model
+    alone cannot answer. Held as a typed field rather than recovered
+    via ``self._filter_model.get_model()`` so no downcast is needed.
+    """
+
     _sort_key: NoteSortKey
     _comparator: Callable[[Note, Note], int]
     _needle: str
+    """The needle currently *applied* to the filter.
+
+    Trails ``AppState.query`` by up to :data:`SEARCH_DEBOUNCE_MS` ms —
+    it is updated when the debounce elapses, not when the user types.
+    """
+
     _syncing_selection: bool
 
-    def __init__(
+    _schedule_timeout: TimeoutScheduler
+    _cancel_timeout: TimeoutCanceller
+    _pending_query_handle: int | None
+    """Handle of the in-flight search debounce, or ``None``.
+
+    Set by :meth:`_on_app_state_query_changed`, cleared inside the timer
+    callback after firing or by :meth:`_cancel_pending_query`.
+    """
+
+    def __init__(  # pylint: disable=too-many-arguments
         self,
         *,
         note_store: NoteListStore,
         note_controller: NoteController,
         app_state: AppState,
         attachment_store: AttachmentStoreProtocol | None = None,
+        schedule_timeout: TimeoutScheduler = default_timeout_scheduler,
+        cancel_timeout: TimeoutCanceller = default_timeout_canceller,
     ) -> None:
         super().__init__(orientation=Gtk.Orientation.VERTICAL, spacing=0)
         self._app_state = app_state
@@ -190,13 +278,18 @@ class NoteList(Gtk.Box):  # pylint: disable=too-many-instance-attributes
         self._comparator = comparator_for(self._sort_key)
         self._needle = normalize_query(app_state.query)
         self._syncing_selection = False
+        self._schedule_timeout = schedule_timeout
+        self._cancel_timeout = cancel_timeout
+        self._pending_query_handle = None
 
         self.append(self._build_header())
         self._build_model_chain(note_store)
         self.append(self._build_list_view())
         self._install_delete_shortcut()
 
-        self._empty_label = Gtk.Label.new("No notes here yet.")
+        self._empty_label = Gtk.Label.new(
+            _EMPTY_STATE_LABELS[NoteListEmptyReason.NO_NOTES],
+        )
         self._empty_label.set_margin_top(_ROW_PADDING_PX * 4)
         self._empty_label.set_margin_bottom(_ROW_PADDING_PX * 4)
         self._empty_label.set_visible(False)
@@ -275,6 +368,7 @@ class NoteList(Gtk.Box):  # pylint: disable=too-many-instance-attributes
 
     def _build_model_chain(self, note_store: NoteListStore) -> None:
         """Layer Filter → Sort → SingleSelection over the note store."""
+        self._note_store = note_store
         self._filter = Gtk.CustomFilter.new(self._match)
         self._sorter = Gtk.CustomSorter.new(self._compare)
         self._filter_model = Gtk.FilterListModel.new(note_store, self._filter)
@@ -319,10 +413,9 @@ class NoteList(Gtk.Box):  # pylint: disable=too-many-instance-attributes
     ) -> bool:
         if not isinstance(item, NoteItem):
             return False
-        note = item.note
         return (
-            matches_selection(note, self._app_state.selection)
-            and matches_query(note, self._needle)
+            matches_selection(item.note, self._app_state.selection)
+            and matches_query(item.note, self._needle)
         )
 
     def _compare(
@@ -411,13 +504,74 @@ class NoteList(Gtk.Box):  # pylint: disable=too-many-instance-attributes
         _state: AppState,
         _pspec: GObject.ParamSpec,
     ) -> None:
-        """Re-normalise the needle and invalidate the filter.
+        """Debounce the keystroke, then re-filter.
 
-        In-memory re-filtering is cheap, so the per-keystroke query
-        notification invalidates the filter directly — no throttle.
+        ``AppState.query`` fires per keystroke; re-filtering per
+        keystroke is what we are avoiding. Any in-flight timer is
+        cancelled and a fresh one scheduled, so the filter runs once the
+        user pauses for :data:`SEARCH_DEBOUNCE_MS` ms.
+
+        Clearing the box is applied **immediately**: waiting to *stop*
+        filtering is a lag the user reads as the app being stuck, and
+        the empty needle is the one value guaranteed to widen the set.
         """
-        self._needle = normalize_query(self._app_state.query)
-        self._filter.changed(Gtk.FilterChange.DIFFERENT)
+        self._cancel_pending_query()
+        if not normalize_query(self._app_state.query):
+            self._apply_needle("")
+            return
+        self._pending_query_handle = self._schedule_timeout(
+            SEARCH_DEBOUNCE_MS,
+            self._on_query_debounce_elapsed,
+        )
+
+    def _on_query_debounce_elapsed(self) -> bool:
+        """Timer callback — apply whatever the query says *now*.
+
+        Re-reads :attr:`AppState.query` rather than closing over the
+        value seen when the timer was scheduled, so the applied needle
+        is always the current one.
+
+        Returns :data:`TIMEOUT_REMOVE` so the timer does not re-fire;
+        the next keystroke schedules a fresh one.
+        """
+        self._pending_query_handle = None
+        self._apply_needle(normalize_query(self._app_state.query))
+        return TIMEOUT_REMOVE
+
+    def _cancel_pending_query(self) -> None:
+        """Cancel the in-flight search debounce, if any."""
+        if self._pending_query_handle is None:
+            return
+        handle = self._pending_query_handle
+        self._pending_query_handle = None
+        self._cancel_timeout(handle)
+
+    def _apply_needle(self, needle: str) -> None:
+        """Adopt ``needle`` and invalidate the filter monotonically.
+
+        A no-op when the needle is unchanged — the debounce can elapse
+        on a query that ended up back where it started (type then
+        delete), and re-filtering for that is pure waste.
+        """
+        if needle == self._needle:
+            return
+        previous = self._needle
+        self._needle = needle
+        self._filter.changed(_filter_change_for(previous, needle))
+
+    def flush_pending_query(self) -> None:
+        """Apply a pending search immediately, cancelling its timer.
+
+        The debounce's escape hatch, mirroring
+        :meth:`giruntime.ui.note_editor.NoteEditor.flush_pending_save`.
+        Nothing in the UI needs it today — a stale-by-150 ms list is
+        never *wrong*, only late — but the pane should not be the only
+        debouncing widget with no way to settle on demand.
+        """
+        if self._pending_query_handle is None:
+            return
+        self._cancel_pending_query()
+        self._apply_needle(normalize_query(self._app_state.query))
 
     def _on_app_state_selected_note_changed(
         self,
@@ -477,8 +631,26 @@ class NoteList(Gtk.Box):  # pylint: disable=too-many-instance-attributes
     def _update_count(self) -> None:
         count = self._sort_model.get_n_items()
         self._count_label.set_text(_NOTES_LABEL_TEMPLATE.format(n=count))
+        if count == 0:
+            self._empty_label.set_text(
+                _EMPTY_STATE_LABELS[self._empty_reason()],
+            )
         self._empty_label.set_visible(count == 0)
         self._list_view.set_visible(count > 0)
+
+    def _empty_reason(self) -> NoteListEmptyReason:
+        """Classify *why* the filtered list is empty.
+
+        Only meaningful when the filtered count is zero. The order is
+        load-bearing: the store is tested **before** the selection, so
+        an empty library reads as "no notes" even while *Untagged*
+        happens to be selected.
+        """
+        if self._note_store.get_n_items() == 0:
+            return NoteListEmptyReason.NO_NOTES
+        if self._needle:
+            return NoteListEmptyReason.NO_QUERY_MATCHES
+        return _selection_empty_reason(self._app_state.selection)
 
     def _sync_selection_from_app_state(self) -> None:
         """Mirror :attr:`AppState.selected_note_id` onto the model.
@@ -489,6 +661,12 @@ class NoteList(Gtk.Box):  # pylint: disable=too-many-instance-attributes
         note_id = self._app_state.selected_note_id
         target = Gtk.INVALID_LIST_POSITION
         if note_id is not None:
+            current = self._selection_model.get_selected_item()
+            if isinstance(current, NoteItem) and current.note.id == note_id:
+                # Already on the right note. The scan below is O(n) in
+                # PyGObject round-trips and runs on every items-changed
+                # (i.e. every filter pass); this is the common case.
+                return
             for position in range(self._sort_model.get_n_items()):
                 candidate = self._sort_model.get_item(position)
                 if isinstance(candidate, NoteItem) and candidate.note.id == note_id:
@@ -503,6 +681,75 @@ class NoteList(Gtk.Box):  # pylint: disable=too-many-instance-attributes
     @property
     def sort_key(self) -> NoteSortKey:
         return self._sort_key
+
+
+# ---------------------------------------------------------------------------
+# Pure helpers — no widget state, testable without a display
+# ---------------------------------------------------------------------------
+
+
+def _filter_change_for(previous: str, current: str) -> Gtk.FilterChange:
+    """Classify a needle change so GTK can re-test only what may differ.
+
+    Substring matching is monotone in the needle: if ``previous`` occurs
+    in ``current`` then every note matching ``current`` already matched
+    ``previous``, so the match set can only shrink
+    (:data:`Gtk.FilterChange.MORE_STRICT`) and GTK need only re-test the
+    items it is currently showing. The mirror case — ``current`` inside
+    ``previous`` — can only grow the set
+    (:data:`Gtk.FilterChange.LESS_STRICT`), so only hidden items need
+    re-testing. Typing and backspacing are exactly these two cases;
+    anything else (a paste, a mid-string edit) falls back to
+    :data:`Gtk.FilterChange.DIFFERENT`.
+
+    Equal needles report ``MORE_STRICT``, which is sound — nothing
+    changes — though :meth:`NoteList._apply_needle` skips that call.
+
+    The empty needle is a substring of everything, so clearing the box
+    reports ``LESS_STRICT`` and starting to type reports ``MORE_STRICT``
+    without either needing a special case.
+    """
+    if previous in current:
+        return Gtk.FilterChange.MORE_STRICT
+    if current in previous:
+        return Gtk.FilterChange.LESS_STRICT
+    return Gtk.FilterChange.DIFFERENT
+
+
+def _selection_empty_reason(selection: Selection) -> NoteListEmptyReason:
+    """Why a non-empty, un-queried store shows nothing under ``selection``.
+
+    Only two of the possible selections can produce an empty list, and
+    :class:`enums.NoteListEmptyReason` documents why. Reaching the
+    :data:`SmartFilter.ALL` branch means the model chain hid every note
+    while nothing was filtering them, which is an invariant break rather
+    than a state the user can be shown a message about — so it raises
+    instead of inventing a plausible-looking label.
+    """
+    match selection:
+        case TagSelection():
+            return NoteListEmptyReason.NO_TAG_MATCHES
+        case SmartSelection(smart_filter=smart_filter):
+            return _smart_filter_empty_reason(smart_filter)
+        case _ as unhandled:
+            assert_never(unhandled)
+
+
+def _smart_filter_empty_reason(
+    smart_filter: SmartFilter,
+) -> NoteListEmptyReason:
+    """The empty-state reason for a smart filter (see the caller)."""
+    match smart_filter:
+        case SmartFilter.UNTAGGED:
+            return NoteListEmptyReason.NO_UNTAGGED_NOTES
+        case SmartFilter.ALL:
+            raise AssertionError(
+                "note list is empty under SmartFilter.ALL with a "
+                "non-empty store and no query: the filter chain hid "
+                "notes nothing was filtering"
+            )
+        case _ as unhandled:
+            assert_never(unhandled)
 
 
 # ---------------------------------------------------------------------------
