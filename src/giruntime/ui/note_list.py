@@ -46,6 +46,23 @@ Principles & invariants
   retained :attr:`_note_store`. Resolution order is store-empty first,
   then query, then selection: deleting every note while *Untagged* is
   selected must read as "no notes", not "every note has a tag".
+* The empty-state label **wraps**, and that is load-bearing rather than
+  cosmetic. A non-wrapping label reports its full one-line width as its
+  *minimum*, and the enclosing :class:`Gtk.Paned` is built with
+  ``shrink_start_child=False`` (see :mod:`giruntime.ui.main_window`), so
+  that minimum becomes the pane's — a message longer than
+  :data:`_DEFAULT_PANE_WIDTH_PX` widens the whole pane the moment the
+  list empties. ``set_size_request`` cannot prevent this: it is a floor,
+  not a ceiling.
+* Empty-state messages are authored as **lines**
+  (:data:`_EMPTY_STATE_LABELS`) joined into one label by
+  :func:`_message_text`, so a two-sentence message breaks at its sentence
+  instead of wherever the wrapper lands, and every line of it necessarily
+  carries the same style.
+* While the empty label shows it is the only thing in the list area: the
+  **scroller** is hidden, not merely emptied. It is the widget carrying
+  ``vexpand``, so leaving it visible would pin the message to the bottom
+  of the pane whatever alignment the label asked for.
 * Selection is one source of truth: :class:`AppState`. A row click moves
   the :class:`Gtk.SingleSelection`, whose ``notify::selected`` writes
   through to ``app_state.set_selected_note_id``; a programmatic
@@ -151,11 +168,24 @@ _CHIP_SPACING_PX: Final[int] = 6
 """Horizontal gap between adjacent #tag labels on the third row."""
 _DEFAULT_PANE_WIDTH_PX: Final[int] = 320
 
+_EMPTY_STATE_PADDING_PX: Final[int] = 24
+"""Inset on all four sides of the empty-state message.
+
+Deliberately wider than :data:`_ROW_PADDING_PX`, and deliberately *not*
+derived from it: 24 px here is a typographic choice about a centred block
+of prose, not a multiple of the row inset, so coupling the two would let a
+future row-density change silently reflow the empty state. The side inset
+is what keeps a wrapped line off the pane's edges; the top inset is
+small enough to keep the message and the ``"N notes"`` header that
+explains it within one glance.
+"""
+
 _TITLE_CSS_CLASS: Final[str] = "note-title"
 _SNIPPET_CSS_CLASS: Final[str] = "note-snippet"
 _META_CSS_CLASS: Final[str] = "note-meta"
 _META_SEPARATOR_CSS_CLASS: Final[str] = "note-meta-separator"
 _CHIP_CSS_CLASS: Final[str] = "tag-chip-row"
+_EMPTY_CSS_CLASS: Final[str] = "note-list-empty"
 
 _PAPERCLIP: Final[str] = "\U0001f4ce"
 _META_SEPARATOR: Final[str] = "|"
@@ -173,20 +203,31 @@ consumer — mirroring :data:`giruntime.ui.note_editor.AUTOSAVE_DEBOUNCE_MS`.
 keystrokes of a brisk typist into one filter pass.
 """
 
-_EMPTY_STATE_LABELS: Final[dict[NoteListEmptyReason, str]] = {
-    NoteListEmptyReason.NO_NOTES: "No notes here yet.",
+_EMPTY_STATE_LABELS: Final[dict[NoteListEmptyReason, tuple[str, ...]]] = {
+    NoteListEmptyReason.NO_NOTES: ("No notes here yet.",),
     NoteListEmptyReason.NO_QUERY_MATCHES: (
-        "No notes match this search. Tags are filtered from the sidebar."
+        "No notes match this search.",
+        "Tags are filtered from the sidebar.",
     ),
-    NoteListEmptyReason.NO_TAG_MATCHES: "No notes have all of these tags.",
-    NoteListEmptyReason.NO_UNTAGGED_NOTES: "Every note has a tag.",
+    NoteListEmptyReason.NO_TAG_MATCHES: ("No notes have all of these tags.",),
+    NoteListEmptyReason.NO_UNTAGGED_NOTES: ("Every note has a tag.",),
 }
-"""The empty-state text for each reachable reason.
+"""The empty-state message for each reachable reason, as authored lines.
+
+One tuple entry per line, joined by :func:`_message_text` into the single
+:attr:`NoteList._empty_label`. Every entry is non-empty — a reason with no
+line would render as a blank pane saying nothing.
+
+Authoring the break rather than leaving it to the wrapper is what keeps a
+two-sentence message from splitting mid-sentence at the default pane
+width. Because the lines share one label they also share one style: the
+split is about where the text breaks, never about emphasis.
 
 The :data:`NO_QUERY_MATCHES` wording carries the one pointer the
 deliberate exclusion of tags from text search (see
 :mod:`search.note_filter`) owes the user: a search for a tag word finds
-nothing, so the message says where tags are filtered instead.
+nothing, so the message says where tags are filtered instead — which is
+exactly the sentence that earns the second line.
 """
 
 _DELETE_SHORTCUT_TRIGGER: Final[str] = "Delete"
@@ -223,6 +264,14 @@ class NoteList(Gtk.Box):  # pylint: disable=too-many-instance-attributes
     _count_label: Gtk.Label
     _sort_dropdown: Gtk.DropDown
     _list_view: Gtk.ListView
+    _list_scroller: Gtk.ScrolledWindow
+    """The scrolled host of :attr:`_list_view`, retained for the empty state.
+
+    Hidden — not merely emptied — whenever the empty label shows: it is
+    what carries ``vexpand``, so leaving it visible would pin the message
+    to the bottom of the pane no matter how the label is aligned.
+    """
+
     _empty_label: Gtk.Label
 
     _filter: Gtk.CustomFilter
@@ -288,10 +337,21 @@ class NoteList(Gtk.Box):  # pylint: disable=too-many-instance-attributes
         self._install_delete_shortcut()
 
         self._empty_label = Gtk.Label.new(
-            _EMPTY_STATE_LABELS[NoteListEmptyReason.NO_NOTES],
+            _message_text(NoteListEmptyReason.NO_NOTES),
         )
-        self._empty_label.set_margin_top(_ROW_PADDING_PX * 4)
-        self._empty_label.set_margin_bottom(_ROW_PADDING_PX * 4)
+        # Wrapping is load-bearing, not cosmetic: see the module docstring.
+        self._empty_label.set_wrap(True)
+        self._empty_label.set_wrap_mode(Pango.WrapMode.WORD_CHAR)
+        self._empty_label.set_justify(Gtk.Justification.CENTER)
+        self._empty_label.set_margin_start(_EMPTY_STATE_PADDING_PX)
+        self._empty_label.set_margin_end(_EMPTY_STATE_PADDING_PX)
+        self._empty_label.set_margin_top(_EMPTY_STATE_PADDING_PX)
+        self._empty_label.set_margin_bottom(_EMPTY_STATE_PADDING_PX)
+        # Claim the list's vertical space and sit at its top, so the
+        # message lands under the header instead of the pane's last line.
+        self._empty_label.set_vexpand(True)
+        self._empty_label.set_valign(Gtk.Align.START)
+        self._empty_label.add_css_class(_EMPTY_CSS_CLASS)
         self._empty_label.set_visible(False)
         self.append(self._empty_label)
 
@@ -400,6 +460,7 @@ class NoteList(Gtk.Box):  # pylint: disable=too-many-instance-attributes
         scrolled.set_hexpand(True)
         scrolled.set_vexpand(True)
         scrolled.set_child(self._list_view)
+        self._list_scroller = scrolled
         return scrolled
 
     # ------------------------------------------------------------------
@@ -632,11 +693,12 @@ class NoteList(Gtk.Box):  # pylint: disable=too-many-instance-attributes
         count = self._sort_model.get_n_items()
         self._count_label.set_text(_NOTES_LABEL_TEMPLATE.format(n=count))
         if count == 0:
-            self._empty_label.set_text(
-                _EMPTY_STATE_LABELS[self._empty_reason()],
-            )
+            self._empty_label.set_text(_message_text(self._empty_reason()))
         self._empty_label.set_visible(count == 0)
         self._list_view.set_visible(count > 0)
+        # The scroller carries ``vexpand``; hiding it is what lets the
+        # empty label claim the list area and sit at its top.
+        self._list_scroller.set_visible(count > 0)
 
     def _empty_reason(self) -> NoteListEmptyReason:
         """Classify *why* the filtered list is empty.
@@ -714,6 +776,16 @@ def _filter_change_for(previous: str, current: str) -> Gtk.FilterChange:
     if current in previous:
         return Gtk.FilterChange.LESS_STRICT
     return Gtk.FilterChange.DIFFERENT
+
+
+def _message_text(reason: NoteListEmptyReason) -> str:
+    """The label text for ``reason`` — its authored lines, newline-joined.
+
+    The one place :data:`_EMPTY_STATE_LABELS`' tuple-of-lines shape is
+    turned into the single string the label renders, so production and
+    tests cannot disagree about how the lines are joined.
+    """
+    return "\n".join(_EMPTY_STATE_LABELS[reason])
 
 
 def _selection_empty_reason(selection: Selection) -> NoteListEmptyReason:

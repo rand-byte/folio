@@ -16,8 +16,9 @@ import unittest
 from collections.abc import Callable
 from datetime import UTC, datetime
 from pathlib import Path
+from unittest.mock import patch
 
-from gi.repository import Gdk, GLib, Gtk
+from gi.repository import Gdk, GLib, Gtk, Pango
 
 from enums import (
     AttachmentExportFailureReason,
@@ -31,10 +32,13 @@ from giruntime.controllers.note_controller import NoteController
 from giruntime.controllers.note_list_store import NoteListStore
 import giruntime.ui.note_list as note_list_module
 from giruntime.ui.note_list import (
+    _DEFAULT_PANE_WIDTH_PX,
     _EMPTY_STATE_LABELS,
+    _EMPTY_STATE_PADDING_PX,
     _SORT_KEY_DROPDOWN_ORDER,
     NoteList,
     _filter_change_for,
+    _message_text,
     _selection_empty_reason,
 )
 from models.attachment import Attachment
@@ -548,6 +552,159 @@ class SelectionEmptyReasonTests(unittest.TestCase):
             )
 
 
+class EmptyStateMessageTests(unittest.TestCase):
+    """The message table and its join — pure, no display required.
+
+    Deliberately un-gated: these are the checks most likely to catch a
+    future regression, and a display-gated test that silently skips
+    catches nothing.
+    """
+
+    def test_every_reason_has_a_message(self) -> None:
+        # The label is chosen by reason at runtime, so a reason absent
+        # from the table would raise KeyError in front of the user.
+        for reason in NoteListEmptyReason:
+            self.assertIn(reason, _EMPTY_STATE_LABELS)
+
+    def test_every_message_has_at_least_one_line(self) -> None:
+        # ``tuple[str, ...]`` permits (), which would render as a blank
+        # pane saying nothing. Pins the table's documented invariant.
+        for reason, lines in _EMPTY_STATE_LABELS.items():
+            with self.subTest(reason=reason):
+                self.assertGreater(len(lines), 0)
+                for line in lines:
+                    self.assertTrue(line.strip())
+
+    def test_message_text_joins_the_authored_lines(self) -> None:
+        self.assertEqual(
+            _message_text(NoteListEmptyReason.NO_QUERY_MATCHES),
+            "No notes match this search.\n"
+            "Tags are filtered from the sidebar.",
+        )
+
+    def test_message_text_of_a_single_line_reason_adds_no_break(self) -> None:
+        text = _message_text(NoteListEmptyReason.NO_NOTES)
+        self.assertNotIn("\n", text)
+        self.assertEqual(text, "No notes here yet.")
+
+
+@unittest.skipUnless(_display_available(), "no GDK display")
+class EmptyStateLabelWidthTests(unittest.TestCase):
+    """No empty-state message may widen the pane.
+
+    The pane sits in a ``Gtk.Paned`` built with
+    ``shrink_start_child=False``, so a label's *minimum* width becomes the
+    pane's. A non-wrapping label reports its whole one-line width as its
+    minimum, which is the defect these pin.
+    """
+
+    def _minimum_width(self, text: str) -> int:
+        label = Gtk.Label.new(text)
+        label.set_wrap(True)
+        label.set_wrap_mode(Pango.WrapMode.WORD_CHAR)
+        minimum: int = label.measure(Gtk.Orientation.HORIZONTAL, -1)[0]
+        return minimum
+
+    def test_every_message_fits_the_default_pane_width(self) -> None:
+        budget = _DEFAULT_PANE_WIDTH_PX - 2 * _EMPTY_STATE_PADDING_PX
+        for reason in _EMPTY_STATE_LABELS:
+            with self.subTest(reason=reason):
+                self.assertLessEqual(
+                    self._minimum_width(_message_text(reason)), budget,
+                )
+
+    def test_pane_minimum_width_is_unchanged_when_the_list_empties(
+        self,
+    ) -> None:
+        # Characterisation of the reported symptom, with the real
+        # messages. Compares against the populated pane rather than a
+        # literal, so it survives a _DEFAULT_PANE_WIDTH_PX change.
+        app_state = AppState()
+        note_list, backend = _build_note_list_with_timeouts(
+            [_note("1", "alpha"), _note("2", "beta")], app_state,
+        )
+        populated = note_list.measure(Gtk.Orientation.HORIZONTAL, -1)[0]
+
+        _search(note_list, app_state, backend, "nonexistent")
+
+        self.assertTrue(note_list._empty_label.get_visible())
+        self.assertEqual(
+            note_list.measure(Gtk.Orientation.HORIZONTAL, -1)[0], populated,
+        )
+
+    def test_a_long_message_cannot_widen_the_pane(self) -> None:
+        """Pins *wrapping* as the mechanism, not the brevity of the text.
+
+        Every shipped message is short enough to fit the pane unwrapped —
+        ``NO_QUERY_MATCHES`` only because it is split across two authored
+        lines — so the real messages cannot tell a wrapping label apart
+        from a merely lucky one, and the test above passes either way.
+        Substituting a message long enough to overflow the pane is what
+        makes the absence of ``set_wrap`` fail here.
+        """
+        overflowing = (
+            "An unusually long empty-state message which would certainly "
+            "overflow the width of the note list pane if its label did "
+            "not wrap.",
+        )
+        app_state = AppState()
+        note_list, backend = _build_note_list_with_timeouts(
+            [_note("1", "alpha")], app_state,
+        )
+        populated = note_list.measure(Gtk.Orientation.HORIZONTAL, -1)[0]
+
+        with patch.dict(
+            note_list_module._EMPTY_STATE_LABELS,
+            {NoteListEmptyReason.NO_QUERY_MATCHES: overflowing},
+        ):
+            _search(note_list, app_state, backend, "nonexistent")
+            # Guard the guard: if the substitution did not reach the
+            # label, the width assertion below would prove nothing.
+            self.assertEqual(
+                note_list._empty_label.get_text(), overflowing[0],
+            )
+            self.assertEqual(
+                note_list.measure(Gtk.Orientation.HORIZONTAL, -1)[0],
+                populated,
+            )
+
+
+@unittest.skipUnless(_display_available(), "no GDK display")
+class EmptyStateLayoutTests(unittest.TestCase):
+    """The empty label wraps, is inset, and sits at the top of the list."""
+
+    def test_label_wraps(self) -> None:
+        note_list = _build_note_list([], AppState())
+        self.assertTrue(note_list._empty_label.get_wrap())
+
+    def test_label_is_inset_from_the_pane_edges(self) -> None:
+        label = _build_note_list([], AppState())._empty_label
+        self.assertEqual(label.get_margin_start(), _EMPTY_STATE_PADDING_PX)
+        self.assertEqual(label.get_margin_end(), _EMPTY_STATE_PADDING_PX)
+        self.assertEqual(label.get_margin_top(), _EMPTY_STATE_PADDING_PX)
+        self.assertEqual(label.get_margin_bottom(), _EMPTY_STATE_PADDING_PX)
+
+    def test_label_claims_the_list_area_and_aligns_to_its_top(self) -> None:
+        label = _build_note_list([], AppState())._empty_label
+        self.assertTrue(label.get_vexpand())
+        self.assertEqual(label.get_valign(), Gtk.Align.START)
+
+    def test_scroller_is_hidden_while_the_empty_label_shows(self) -> None:
+        # The scroller carries vexpand; if it stayed visible the message
+        # would sit on the pane's last line however the label aligns.
+        app_state = AppState()
+        note_list, backend = _build_note_list_with_timeouts(
+            [_note("1", "alpha")], app_state,
+        )
+        self.assertTrue(note_list._list_scroller.get_visible())
+
+        _search(note_list, app_state, backend, "nonexistent")
+        self.assertFalse(note_list._list_scroller.get_visible())
+
+        app_state.props.query = ""
+        self.assertTrue(note_list._list_scroller.get_visible())
+
+
 @unittest.skipUnless(_display_available(), "no GDK display")
 class SearchDebounceTests(unittest.TestCase):
     """The query is coalesced behind one timer; clearing is immediate."""
@@ -733,7 +890,7 @@ class NoteListEmptyStateTests(unittest.TestCase):
         note_list = _build_note_list([], app_state)
         self.assertEqual(
             self._empty_text(note_list),
-            _EMPTY_STATE_LABELS[NoteListEmptyReason.NO_NOTES],
+            _message_text(NoteListEmptyReason.NO_NOTES),
         )
 
     def test_empty_store_wins_over_the_untagged_filter(self) -> None:
@@ -744,7 +901,7 @@ class NoteListEmptyStateTests(unittest.TestCase):
         app_state.set_smart(SmartFilter.UNTAGGED)
         self.assertEqual(
             self._empty_text(note_list),
-            _EMPTY_STATE_LABELS[NoteListEmptyReason.NO_NOTES],
+            _message_text(NoteListEmptyReason.NO_NOTES),
         )
 
     def test_query_matching_nothing_reports_the_search(self) -> None:
@@ -755,7 +912,7 @@ class NoteListEmptyStateTests(unittest.TestCase):
         _search(note_list, app_state, backend, "nonexistent")
         self.assertEqual(
             self._empty_text(note_list),
-            _EMPTY_STATE_LABELS[NoteListEmptyReason.NO_QUERY_MATCHES],
+            _message_text(NoteListEmptyReason.NO_QUERY_MATCHES),
         )
 
     def test_query_reason_wins_over_the_selection(self) -> None:
@@ -767,7 +924,7 @@ class NoteListEmptyStateTests(unittest.TestCase):
         _search(note_list, app_state, backend, "nonexistent")
         self.assertEqual(
             self._empty_text(note_list),
-            _EMPTY_STATE_LABELS[NoteListEmptyReason.NO_QUERY_MATCHES],
+            _message_text(NoteListEmptyReason.NO_QUERY_MATCHES),
         )
 
     def test_two_tags_that_share_no_note_report_tag_matches(self) -> None:
@@ -777,7 +934,7 @@ class NoteListEmptyStateTests(unittest.TestCase):
         app_state.toggle_tag("urgent")
         self.assertEqual(
             self._empty_text(note_list),
-            _EMPTY_STATE_LABELS[NoteListEmptyReason.NO_TAG_MATCHES],
+            _message_text(NoteListEmptyReason.NO_TAG_MATCHES),
         )
 
     def test_either_tag_alone_still_matches(self) -> None:
@@ -800,7 +957,7 @@ class NoteListEmptyStateTests(unittest.TestCase):
         app_state.set_smart(SmartFilter.UNTAGGED)
         self.assertEqual(
             self._empty_text(note_list),
-            _EMPTY_STATE_LABELS[NoteListEmptyReason.NO_UNTAGGED_NOTES],
+            _message_text(NoteListEmptyReason.NO_UNTAGGED_NOTES),
         )
 
     def test_label_hides_again_once_the_list_is_non_empty(self) -> None:

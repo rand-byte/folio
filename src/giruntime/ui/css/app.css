@@ -93,6 +93,23 @@
     opacity: 0.45;
 }
 
+/* Note-list empty-state message (middle pane, shown in place of the list).
+ *
+ * Palette-safe like the rest of this file: dimmed via opacity only, in the
+ * same family as .note-snippet and .note-meta, so it tracks the active
+ * theme and no colour is named. Slightly stronger than the snippet's 0.6
+ * because this text is the pane's only content when it shows, rather than
+ * a supporting line under a title.
+ *
+ * ONE rule for the whole message: the two authored lines of
+ * NO_QUERY_MATCHES live in a single label (see _message_text in
+ * ui/note_list.py), so neither line can be emphasised over the other.
+ * Geometry is not set here -- the inset is _EMPTY_STATE_PADDING_PX in
+ * note_list.py, alongside the wrap settings it has to move with. */
+.note-list-empty {
+    opacity: 0.7;
+}
+
 /* Note-list row tag chips (third line of each row when tags non-empty).
  *
  * Dim ``#tagname`` labels rendered in a horizontal box, sitting below
