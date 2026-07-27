@@ -109,7 +109,7 @@ class ApplyPreferenceTests(unittest.TestCase):
 
     def setUp(self) -> None:
         self.setter = _RecordingSetter()
-        self.watcher = SystemColorSchemeWatcher(self.setter)
+        self.watcher = SystemColorSchemeWatcher(self.setter, _no_portal)
 
     def test_dark_preference_applies_true(self) -> None:
         self.watcher.apply_preference(
@@ -151,8 +151,15 @@ class ApplyPreferenceTests(unittest.TestCase):
         for preference in DesktopColorSchemePreference:
             with self.subTest(preference=preference):
                 setter = _RecordingSetter()
-                SystemColorSchemeWatcher(setter).apply_preference(preference)
+                SystemColorSchemeWatcher(
+                    setter, _no_portal,
+                ).apply_preference(preference)
                 self.assertEqual(len(setter.applied), 1)
+
+
+def _no_portal() -> None:
+    """A :data:`PortalConnector` for a machine with no settings portal."""
+    return None
 
 
 class _SilentProxy:
@@ -162,6 +169,16 @@ class _SilentProxy:
     succeeds for an unowned name, so "we have a proxy" does not mean
     "there is a portal".
     """
+
+    connected: list[str]
+
+    def __init__(self) -> None:
+        self.connected = []
+
+    def connect(self, detail: str, _handler: object) -> int:
+        """Record the change subscription :meth:`start` installs."""
+        self.connected.append(detail)
+        return 1
 
     def call_sync(
         self,
@@ -224,8 +241,13 @@ class ReadPreferenceTests(unittest.TestCase):
 class StartWithoutAPortalTests(unittest.TestCase):
     """A box with no portal keeps the pre-existing behaviour.
 
-    The test environment has no ``xdg-desktop-portal``, so this
-    exercises the real failure path rather than a simulated one.
+    Absence is *injected*, never inferred from the machine running the
+    suite. An earlier version of this test simply called ``start()`` and
+    asserted nothing was written, which passed only because the
+    container it was written in had no session bus — on any real desktop
+    the portal answered and the assertion failed. What is under test is
+    this module's response to a missing portal, not the tester's
+    environment.
     """
 
     def test_start_without_a_portal_touches_nothing(self) -> None:
@@ -233,8 +255,22 @@ class StartWithoutAPortalTests(unittest.TestCase):
         # a dark GTK theme the user had set by other means, which the
         # article view can still detect on its own.
         setter = _RecordingSetter()
-        SystemColorSchemeWatcher(setter).start()
+        SystemColorSchemeWatcher(setter, _no_portal).start()
         self.assertEqual(setter.applied, [])
+
+    def test_start_with_a_silent_portal_touches_nothing(self) -> None:
+        # Connected but unanswering: a proxy can be built for a bus name
+        # nobody owns, so this is a distinct path from having no portal.
+        setter = _RecordingSetter()
+        SystemColorSchemeWatcher(setter, _SilentProxy).start()
+        self.assertEqual(setter.applied, [])
+
+    def test_a_silent_portal_is_still_subscribed_to(self) -> None:
+        # It may start answering later — a portal that appears after the
+        # app has launched should still be able to flip the theme.
+        proxy = _SilentProxy()
+        SystemColorSchemeWatcher(_RecordingSetter(), lambda: proxy).start()
+        self.assertEqual(proxy.connected, ["g-signal"])
 
 
 if __name__ == "__main__":

@@ -147,7 +147,10 @@ from giruntime.controllers.note_list_store import NoteListStore
 from giruntime.ui import _gresource
 from giruntime.ui.help_window import HelpWindow
 from giruntime.ui.main_window import MainWindow
-from giruntime.ui.system_color_scheme import SystemColorSchemeWatcher
+from giruntime.ui.system_color_scheme import (
+    SystemColorSchemeWatcher,
+    connect_settings_portal,
+)
 from models.session_state import SessionState
 from storage.attachment_store import AttachmentStore
 from storage.database import Database
@@ -792,6 +795,8 @@ def _start_color_scheme_watcher() -> SystemColorSchemeWatcher | None:
             _PREFER_DARK_THEME_PROPERTY, prefer_dark,
         )
 
-    watcher = SystemColorSchemeWatcher(apply_prefer_dark)
+    watcher = SystemColorSchemeWatcher(
+        apply_prefer_dark, connect_settings_portal,
+    )
     watcher.start()
     return watcher

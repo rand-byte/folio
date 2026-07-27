@@ -56,6 +56,18 @@ from gi.repository import Gio, GLib
 from enums import DesktopColorSchemePreference
 
 
+type PortalConnector = Callable[[], "Gio.DBusProxy | None"]
+"""Open a proxy to the settings portal, or report that there is none.
+
+Injected for the same reason every other seam in this codebase is: it is
+the boundary with the outside world. Production passes
+:func:`connect_settings_portal`; tests pass a connector that returns
+:data:`None`, or one returning a stub, so what gets asserted is *this
+module's* behaviour rather than whether the machine running the suite
+happens to have ``xdg-desktop-portal`` installed.
+"""
+
+
 type PreferDarkSetter = Callable[[bool], None]
 """Apply "should this application style itself dark?" to the toolkit.
 
@@ -132,10 +144,16 @@ class SystemColorSchemeWatcher:
     """
 
     _apply_prefer_dark: PreferDarkSetter
+    _connect_portal: PortalConnector
     _proxy: Gio.DBusProxy | None
 
-    def __init__(self, apply_prefer_dark: PreferDarkSetter) -> None:
+    def __init__(
+        self,
+        apply_prefer_dark: PreferDarkSetter,
+        connect_portal: PortalConnector,
+    ) -> None:
         self._apply_prefer_dark = apply_prefer_dark
+        self._connect_portal = connect_portal
         self._proxy = None
 
     def start(self) -> None:
@@ -147,7 +165,7 @@ class SystemColorSchemeWatcher:
         would start light in a dark session and correct itself only on
         the next change.
         """
-        proxy = self._connect()
+        proxy = self._connect_portal()
         if proxy is None:
             return
         self._proxy = proxy
@@ -173,29 +191,6 @@ class SystemColorSchemeWatcher:
         actually switch back" behaviour can be pinned without a portal.
         """
         self._apply_prefer_dark(prefers_dark(preference))
-
-    @staticmethod
-    def _connect() -> Gio.DBusProxy | None:
-        """Return a proxy for the portal's settings interface, or ``None``.
-
-        A missing portal or an unavailable session bus is an ordinary
-        environment, not an error: a headless test box, a minimal WM, a
-        container. Only :class:`GLib.Error` is caught — a failure to
-        *use* a proxy that did connect is a real bug and is left to
-        propagate.
-        """
-        try:
-            return Gio.DBusProxy.new_for_bus_sync(
-                Gio.BusType.SESSION,
-                Gio.DBusProxyFlags.DO_NOT_AUTO_START,
-                None,
-                _PORTAL_BUS_NAME,
-                _PORTAL_OBJECT_PATH,
-                _PORTAL_SETTINGS_INTERFACE,
-                None,
-            )
-        except GLib.Error:
-            return None
 
     @staticmethod
     def _read_preference(
@@ -247,6 +242,30 @@ class SystemColorSchemeWatcher:
         if namespace != _APPEARANCE_NAMESPACE or key != _COLOR_SCHEME_KEY:
             return
         self.apply_preference(preference_for_wire_value(value))
+
+
+def connect_settings_portal() -> Gio.DBusProxy | None:
+    """Open a proxy to the XDG settings portal, or ``None`` if there is none.
+
+    The production :data:`PortalConnector`. A missing portal or an
+    unavailable session bus is an ordinary environment rather than an
+    error — a minimal window manager, a container, a headless CI box —
+    so it reports absence instead of raising. Only :class:`GLib.Error`
+    is caught; a failure to *use* a proxy that did connect is a real bug
+    and is left to propagate.
+    """
+    try:
+        return Gio.DBusProxy.new_for_bus_sync(
+            Gio.BusType.SESSION,
+            Gio.DBusProxyFlags.DO_NOT_AUTO_START,
+            None,
+            _PORTAL_BUS_NAME,
+            _PORTAL_OBJECT_PATH,
+            _PORTAL_SETTINGS_INTERFACE,
+            None,
+        )
+    except GLib.Error:
+        return None
 
 
 def _wire_value_from(result: GLib.Variant) -> int | None:
