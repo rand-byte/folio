@@ -9,6 +9,7 @@ from collections.abc import Callable
 
 from gi.repository import Gdk, GLib, Gtk, Pango
 
+from giruntime.ui.note_render.palette import LIGHT_PALETTE
 from giruntime.ui.note_render.tag_table import (
     TagName,
     admonition_body_tag_name,
@@ -220,7 +221,9 @@ def _build_renderer(
     tag_table: Gtk.TextTagTable | None = None,
 ) -> tuple[TextBufferRenderer, Gtk.TextBuffer, Gtk.TextTagTable]:
     """Construct a renderer and a buffer wired to a fresh tag table."""
-    table = tag_table if tag_table is not None else build_tag_table(char_width_px=9)
+    table = tag_table if tag_table is not None else build_tag_table(
+        char_width_px=9, palette=LIGHT_PALETTE,
+    )
     renderer = TextBufferRenderer(
         image_bytes_for=image_bytes_for if image_bytes_for is not None else (lambda _f: _PNG_1X1),
         attachments_for=attachments_for if attachments_for is not None else (lambda: ()),
@@ -559,7 +562,7 @@ class ListRenderingTests(unittest.TestCase):
         #      GAP   = round(LIST_MARKER_GAP_CHARS * char_width_px),
         #      STEP  = FIELD + GAP.
         char_width_px = 9
-        table = build_tag_table(char_width_px=char_width_px)
+        table = build_tag_table(char_width_px=char_width_px, palette=LIGHT_PALETTE)
         field = LIST_MARKER_FIELD_CHARS * char_width_px
         gap = round(LIST_MARKER_GAP_CHARS * char_width_px)
         step = field + gap
@@ -950,8 +953,8 @@ class RebuildSemanticsTests(unittest.TestCase):
         # If the buffer was constructed with a different tag table,
         # the renderer raises rather than silently writing tags that
         # are missing from the buffer.
-        wrong_table = build_tag_table(char_width_px=9)
-        right_table = build_tag_table(char_width_px=9)
+        wrong_table = build_tag_table(char_width_px=9, palette=LIGHT_PALETTE)
+        right_table = build_tag_table(char_width_px=9, palette=LIGHT_PALETTE)
         renderer = TextBufferRenderer(
             image_bytes_for=lambda _f: _PNG_1X1,
             attachments_for=lambda: (),
@@ -2346,3 +2349,40 @@ class AttachmentTableExpansionTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+
+class NoWholeBufferTagTests(unittest.TestCase):
+    """A render tags only what it styles, and leaves plain text bare.
+
+    A regression guard with a specific history: the note's default ink
+    was briefly a lowest-priority tag applied across the whole buffer at
+    the end of every render. It coloured text correctly, but applying a
+    tag over the entire buffer *after* the content is inserted
+    re-invalidates the text layout, and the next paint used estimated
+    line heights — the sheet and the block washes are computed from
+    ``get_line_yrange``, so they were painted a block short until an
+    unrelated redraw corrected them. The ink now comes from CSS on the
+    view (``article_text_view._apply_article_ink``), which changes no
+    layout. If a whole-buffer tag ever comes back, this fails.
+    """
+
+    def test_plain_paragraph_text_carries_no_tag(self) -> None:
+        renderer, buffer, _ = _build_renderer()
+        renderer.render_into("= D\n\nplain words.\n", buffer, note_id="n1")
+        text = _full_text(buffer)
+        self.assertEqual(_tag_names_at(buffer, text.index("plain")), set())
+
+    def test_no_tag_spans_the_entire_buffer(self) -> None:
+        renderer, buffer, _ = _build_renderer()
+        renderer.render_into(
+            "= Title\n\nbody text.\n\n== Section\n\nmore.\n",
+            buffer,
+            note_id="n1",
+        )
+        whole = [(0, len(_full_text(buffer)))]
+        for name in TagName:
+            with self.subTest(tag=name):
+                self.assertNotEqual(
+                    _ranges_with_tag(buffer, name.value), whole,
+                )

@@ -280,6 +280,87 @@ class WashShape(Enum):
     LEFT_BAR = auto()   # thin left vertical rule, no fill (blockquote)
 
 
+class DesktopColorSchemePreference(Enum):
+    """The desktop's colour-scheme preference, as the XDG portal reports it.
+
+    Read from the ``org.freedesktop.appearance`` / ``color-scheme`` key
+    of ``org.freedesktop.portal.Settings`` — the cross-desktop signal
+    behind GNOME's "Dark Style" switch. It is the *user's stated
+    preference*, which is a different thing from
+    :class:`ColorScheme`: this says what the desktop asked for, that
+    says which palette the rendered note is actually painted in.
+
+    Plain :class:`enum.Enum` with explicit :class:`int` values rather
+    than :func:`auto`, because these values are **wire constants** owned
+    by the portal specification, not by us. They can never be
+    renumbered, for the same reason the persisted ``StrEnum`` values
+    cannot: something outside this codebase defines them.
+
+    A value the portal reports that is not listed here is treated as
+    :attr:`NO_PREFERENCE` rather than raising — the specification
+    reserves further values and requires clients to degrade that way, so
+    a future portal cannot break the application. See
+    :func:`giruntime.ui.system_color_scheme.preference_for_wire_value`.
+    """
+
+    NO_PREFERENCE = 0
+    PREFER_DARK = 1
+    PREFER_LIGHT = 2
+
+
+class ColorScheme(Enum):
+    """Which palette the rendered view paints itself in.
+
+    The rendered note is drawn on an opaque "sheet" the application
+    paints itself, so — unlike the chrome around it — it does not inherit
+    the theme's own page colour. This enum selects the matching set of
+    colours (see :mod:`giruntime.ui.note_render.palette`): a light sheet
+    with dark ink, or a dark sheet with light ink.
+
+    The value is *derived*, not configured: ``ArticleTextView`` measures
+    its own resolved theme foreground and classifies it by luminance, so
+    a dark chrome reached by any route (the settings portal, ``GTK_THEME``,
+    a ``settings.ini``, a third-party dark theme) selects
+    :attr:`DARK`. Two members only — "follow the system" is the *source*
+    of the value, not a third value.
+
+    Plain :class:`enum.Enum` with :func:`auto` values because the choice
+    is a purely in-memory presentation concept — it is never persisted, so
+    its on-disk representation is undefined and no migration is implied
+    (the same rationale as :class:`WashShape`).
+    """
+
+    LIGHT = auto()
+    DARK = auto()
+
+
+class ErrorNoticeLine(Enum):
+    """One of the four lines of the in-surface parse-error notice.
+
+    When a note's source fails to parse, the rendered view clears the
+    buffer and inserts a four-line notice in its place. This enum names
+    those lines so both halves of their presentation can be keyed by the
+    same member: the per-line foreground in a
+    :class:`giruntime.ui.note_render.palette.Palette`, and the per-line
+    :class:`giruntime.ui.note_render.tag_table.TagName` that carries the
+    rest of the line's styling.
+
+    It is the categorical concept *behind* the existing
+    ``TagName.ERROR_NOTICE_*`` members, which stay as they are: those are
+    buffer *tag names* (the string a :class:`Gtk.TextTag` is registered
+    under), not a classification. Keying a palette by tag name would tie
+    a colour table to GTK's naming; keying it by this enum does not.
+
+    Plain :class:`enum.Enum` with :func:`auto` values: presentation-only,
+    never persisted.
+    """
+
+    ICON = auto()    # the large warning glyph
+    TITLE = auto()   # the headline
+    DETAIL = auto()  # the kind-specific message from ``_message_for``
+    HINT = auto()    # the recovery hint
+
+
 class AdmonitionKind(StrEnum):
     """The five admonition labels recognised by the parser.
 

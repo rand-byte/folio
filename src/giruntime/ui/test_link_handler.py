@@ -8,6 +8,7 @@ from dataclasses import dataclass, field
 
 from gi.repository import Gdk, Gio, Gtk
 
+from giruntime.ui.note_render.palette import LIGHT_PALETTE
 from giruntime.ui.note_render.tag_table import TagName, build_tag_table
 from giruntime.ui.note_render.textbuffer_renderer import (
     ActivationTarget,
@@ -585,7 +586,7 @@ class UrlRecoveryFromLinkTagTests(unittest.TestCase):
         # pipeline the released-callback uses, just bypassing the
         # coord translation that would otherwise require a realised
         # widget.
-        table = build_tag_table(char_width_px=9)
+        table = build_tag_table(char_width_px=9, palette=LIGHT_PALETTE)
         renderer = TextBufferRenderer(
             image_bytes_for=lambda _f: b"",
             attachments_for=lambda: (),
@@ -617,7 +618,7 @@ class UrlRecoveryFromLinkTagTests(unittest.TestCase):
         self.assertEqual(len(factory.launchers[0].launch_calls), 1)
 
     def test_offset_outside_any_link_resolves_to_no_launch(self) -> None:
-        table = build_tag_table(char_width_px=9)
+        table = build_tag_table(char_width_px=9, palette=LIGHT_PALETTE)
         renderer = TextBufferRenderer(
             image_bytes_for=lambda _f: b"",
             attachments_for=lambda: (),
@@ -652,7 +653,7 @@ class UrlRecoveryFromLinkTagTests(unittest.TestCase):
         # Confirms the handler doesn't somehow latch onto a single
         # URL: two clicks on two different links produce two
         # distinct launches.
-        table = build_tag_table(char_width_px=9)
+        table = build_tag_table(char_width_px=9, palette=LIGHT_PALETTE)
         renderer = TextBufferRenderer(
             image_bytes_for=lambda _f: b"",
             attachments_for=lambda: (),
@@ -686,7 +687,7 @@ class UrlRecoveryFromLinkTagTests(unittest.TestCase):
         # A region with bold styling but no link must produce no
         # URL — verifies that URL recovery distinguishes anonymous
         # URL tags from the shared LINK / BOLD styling tags.
-        table = build_tag_table(char_width_px=9)
+        table = build_tag_table(char_width_px=9, palette=LIGHT_PALETTE)
         renderer = TextBufferRenderer(
             image_bytes_for=lambda _f: b"",
             attachments_for=lambda: (),
@@ -820,7 +821,7 @@ class AttachmentRecoveryFromRealRendererTests(unittest.TestCase):
     """End-to-end: render a save link, click it, the activator fires."""
 
     def test_clicking_an_attachment_link_activates_it(self) -> None:
-        table = build_tag_table(char_width_px=9)
+        table = build_tag_table(char_width_px=9, palette=LIGHT_PALETTE)
         renderer = TextBufferRenderer(
             image_bytes_for=lambda _f: b"",
             attachments_for=lambda: (),

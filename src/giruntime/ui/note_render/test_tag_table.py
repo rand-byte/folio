@@ -6,7 +6,9 @@ import unittest
 
 from gi.repository import Gtk, Pango
 
+from giruntime.ui.note_render.palette import DARK_PALETTE, LIGHT_PALETTE
 from giruntime.ui.note_render.tag_table import (
+    apply_palette,
     SheetWash,
     TagName,
     WashSpec,
@@ -19,7 +21,7 @@ from giruntime.ui.note_render.tag_table import (
     heading_tag_name,
     list_item_tag_name,
 )
-from enums import AdmonitionKind, WashShape
+from enums import AdmonitionKind, ErrorNoticeLine, WashShape
 from config.defaults import (
     LIST_MARKER_FIELD_CHARS,
     LIST_MARKER_GAP_CHARS,
@@ -222,7 +224,7 @@ class ListItemTagPropertyTests(unittest.TestCase):
     table: Gtk.TextTagTable
 
     def setUp(self) -> None:
-        self.table = build_tag_table(char_width_px=_TEST_CHAR_WIDTH_PX)
+        self.table = build_tag_table(char_width_px=_TEST_CHAR_WIDTH_PX, palette=LIGHT_PALETTE)
 
     @property
     def _field(self) -> int:
@@ -327,7 +329,7 @@ class BuildTagTableStructureTests(unittest.TestCase):
     """
 
     def setUp(self) -> None:
-        self.table = build_tag_table(char_width_px=_TEST_CHAR_WIDTH_PX)
+        self.table = build_tag_table(char_width_px=_TEST_CHAR_WIDTH_PX, palette=LIGHT_PALETTE)
 
     def test_every_enum_member_has_a_tag(self) -> None:
         for name in TagName:
@@ -350,7 +352,7 @@ class BuildTagTableStructureTests(unittest.TestCase):
     def test_each_call_returns_a_fresh_table(self) -> None:
         # Per the module's invariant: a fresh table per call. This lets
         # tests construct independent buffers without aliasing.
-        another = build_tag_table(char_width_px=_TEST_CHAR_WIDTH_PX)
+        another = build_tag_table(char_width_px=_TEST_CHAR_WIDTH_PX, palette=LIGHT_PALETTE)
         self.assertIsNot(self.table, another)
         # The tags inside are also fresh — not aliased.
         self.assertIsNot(
@@ -374,7 +376,7 @@ class InlineTagPropertyTests(unittest.TestCase):
     """The four inline tags carry the visual properties they advertise."""
 
     def setUp(self) -> None:
-        self.table = build_tag_table(char_width_px=_TEST_CHAR_WIDTH_PX)
+        self.table = build_tag_table(char_width_px=_TEST_CHAR_WIDTH_PX, palette=LIGHT_PALETTE)
 
     def test_bold_tag_uses_bold_weight(self) -> None:
         tag = self.table.lookup(TagName.BOLD.value)
@@ -440,7 +442,7 @@ class HeadingTagPropertyTests(unittest.TestCase):
     """Heading tags are bold-weight + scale, in monotone-decreasing scale."""
 
     def setUp(self) -> None:
-        self.table = build_tag_table(char_width_px=_TEST_CHAR_WIDTH_PX)
+        self.table = build_tag_table(char_width_px=_TEST_CHAR_WIDTH_PX, palette=LIGHT_PALETTE)
 
     def test_every_heading_tag_is_bold(self) -> None:
         for level in (0, 2, 3, 4, 5, 6):
@@ -517,7 +519,7 @@ class ParagraphBackgroundIsNotOnTagsTests(unittest.TestCase):
     """
 
     def setUp(self) -> None:
-        self.table = build_tag_table(char_width_px=_TEST_CHAR_WIDTH_PX)
+        self.table = build_tag_table(char_width_px=_TEST_CHAR_WIDTH_PX, palette=LIGHT_PALETTE)
 
     def test_no_paragraph_tag_carries_a_paragraph_background_rgba(self) -> None:
         for name in _PARAGRAPH_BACKGROUND_TAGS:
@@ -526,7 +528,7 @@ class ParagraphBackgroundIsNotOnTagsTests(unittest.TestCase):
                 self.assertFalse(
                     tag.get_property("paragraph-background-set"),
                     f"{name!r} still carries paragraph-background-rgba; "
-                    f"the wash should live on build_wash_specs() instead",
+                    f"the wash should live on build_wash_specs(LIGHT_PALETTE) instead",
                 )
 
     def test_attribution_does_not_carry_a_paragraph_background(self) -> None:
@@ -541,7 +543,7 @@ class AdmonitionTagPropertyTests(unittest.TestCase):
     """Admonition tags carry the visual properties the layout requires."""
 
     def setUp(self) -> None:
-        self.table = build_tag_table(char_width_px=_TEST_CHAR_WIDTH_PX)
+        self.table = build_tag_table(char_width_px=_TEST_CHAR_WIDTH_PX, palette=LIGHT_PALETTE)
 
     def test_every_label_paragraph_tag_has_left_and_right_margins(self) -> None:
         # The card spans the prose column (wash inset 0); the paragraph
@@ -636,7 +638,7 @@ class TableRowTagPropertyTests(unittest.TestCase):
     """The table row / header paragraph tags carry the row treatment."""
 
     def setUp(self) -> None:
-        self.table = build_tag_table(char_width_px=_TEST_CHAR_WIDTH_PX)
+        self.table = build_tag_table(char_width_px=_TEST_CHAR_WIDTH_PX, palette=LIGHT_PALETTE)
 
     def test_both_row_tags_set_wrap_mode_none(self) -> None:
         # A row is one logical line aligned by a per-table tab array;
@@ -684,7 +686,7 @@ class BlockquoteTagPropertyTests(unittest.TestCase):
     """Blockquote body and attribution tags."""
 
     def setUp(self) -> None:
-        self.table = build_tag_table(char_width_px=_TEST_CHAR_WIDTH_PX)
+        self.table = build_tag_table(char_width_px=_TEST_CHAR_WIDTH_PX, palette=LIGHT_PALETTE)
 
     def test_body_left_margin_is_one_m_width_internal_padding(self) -> None:
         # The blockquote card aligns with the prose column (wash inset 0);
@@ -745,7 +747,7 @@ class CodeBlockTagPropertyTests(unittest.TestCase):
     """Code-block tag carries layout but not the monospace family."""
 
     def setUp(self) -> None:
-        self.table = build_tag_table(char_width_px=_TEST_CHAR_WIDTH_PX)
+        self.table = build_tag_table(char_width_px=_TEST_CHAR_WIDTH_PX, palette=LIGHT_PALETTE)
 
     def test_has_left_and_right_margins(self) -> None:
         # The code card aligns with the prose column (wash inset 0); the
@@ -810,7 +812,7 @@ class ErrorNoticeTagPropertyTests(unittest.TestCase):
     coloured, and scaled — and carry no block layout (no margins)."""
 
     def setUp(self) -> None:
-        self.table = build_tag_table(char_width_px=_TEST_CHAR_WIDTH_PX)
+        self.table = build_tag_table(char_width_px=_TEST_CHAR_WIDTH_PX, palette=LIGHT_PALETTE)
 
     def test_every_notice_line_is_centre_justified(self) -> None:
         # Each line is its own paragraph, so the centre justification
@@ -876,8 +878,8 @@ class WashSpecTests(unittest.TestCase):
     """
 
     def setUp(self) -> None:
-        self.specs = build_wash_specs()
-        self.table = build_tag_table(char_width_px=_TEST_CHAR_WIDTH_PX)
+        self.specs = build_wash_specs(LIGHT_PALETTE)
+        self.table = build_tag_table(char_width_px=_TEST_CHAR_WIDTH_PX, palette=LIGHT_PALETTE)
 
     def test_keys_are_tag_names(self) -> None:
         for name in self.specs:
@@ -1034,7 +1036,7 @@ class BuildSheetWashTests(unittest.TestCase):
     """
 
     def setUp(self) -> None:
-        self.wash = build_sheet_wash()
+        self.wash = build_sheet_wash(LIGHT_PALETTE)
 
     def test_returns_a_sheet_wash(self) -> None:
         self.assertIsInstance(self.wash, SheetWash)
@@ -1056,7 +1058,217 @@ class BuildSheetWashTests(unittest.TestCase):
     def test_each_call_returns_an_equal_wash(self) -> None:
         # The colour is static; a fresh call must yield an equal value
         # (frozen dataclass equality) so callers can resolve it once.
-        self.assertEqual(build_sheet_wash(), self.wash)
+        self.assertEqual(build_sheet_wash(LIGHT_PALETTE), self.wash)
+
+
+_COLOURED_TAG_NAMES: tuple[TagName, ...] = (
+    TagName.LINK,
+    TagName.METADATA,
+    TagName.ADMONITION_NOTE_KIND,
+    TagName.ADMONITION_TIP_KIND,
+    TagName.ADMONITION_IMPORTANT_KIND,
+    TagName.ADMONITION_WARNING_KIND,
+    TagName.ADMONITION_CAUTION_KIND,
+    TagName.ERROR_NOTICE_ICON,
+    TagName.ERROR_NOTICE_TITLE,
+    TagName.ERROR_NOTICE_DETAIL,
+    TagName.ERROR_NOTICE_HINT,
+)
+"""Every tag :func:`apply_palette` writes a foreground onto.
+
+Spelled out rather than derived from the palette so that a colour added
+to ``Palette`` without a tag to carry it (or the reverse) shows up as a
+failing assertion here instead of as a colour nobody paints.
+"""
+
+
+def _foreground_of(table: Gtk.TextTagTable, name: TagName) -> str:
+    """Return the ``foreground`` a tag resolves to, as a hex string.
+
+    ``Gtk.TextTag`` has no readable ``foreground`` property (it is
+    write-only shorthand), so the value comes back from
+    ``foreground-rgba`` and is re-serialised for comparison.
+    """
+    tag = table.lookup(name.value)
+    assert tag is not None
+    rgba = tag.get_property("foreground-rgba")
+    red = round(rgba.red * 255)
+    green = round(rgba.green * 255)
+    blue = round(rgba.blue * 255)
+    return f"#{red:02x}{green:02x}{blue:02x}"
+
+
+class ApplyPaletteTests(unittest.TestCase):
+    """Colour is written in exactly one place, on both paths."""
+
+    def test_build_uses_the_palette_it_is_given(self) -> None:
+        table = build_tag_table(
+            char_width_px=_TEST_CHAR_WIDTH_PX, palette=DARK_PALETTE,
+        )
+        self.assertEqual(
+            _foreground_of(table, TagName.LINK),
+            DARK_PALETTE.link_foreground,
+        )
+
+    def test_reapplying_a_palette_matches_building_with_it(self) -> None:
+        # The anti-drift test. A theme change re-colours the existing
+        # table rather than building a new one (a buffer is bound to its
+        # tag table for life), so the re-theme path must land on exactly
+        # what a fresh build would have produced. Any colour that
+        # build_tag_table set directly, instead of via apply_palette,
+        # would survive here and show up as a mismatch.
+        rethemed = build_tag_table(
+            char_width_px=_TEST_CHAR_WIDTH_PX, palette=LIGHT_PALETTE,
+        )
+        apply_palette(rethemed, DARK_PALETTE)
+        fresh = build_tag_table(
+            char_width_px=_TEST_CHAR_WIDTH_PX, palette=DARK_PALETTE,
+        )
+        for name in _COLOURED_TAG_NAMES:
+            with self.subTest(tag=name):
+                self.assertEqual(
+                    _foreground_of(rethemed, name),
+                    _foreground_of(fresh, name),
+                )
+
+    def test_reapplying_the_original_palette_restores_it(self) -> None:
+        # Switching to dark and back must be lossless — the user who
+        # toggles their desktop theme twice ends where they started.
+        table = build_tag_table(
+            char_width_px=_TEST_CHAR_WIDTH_PX, palette=LIGHT_PALETTE,
+        )
+        apply_palette(table, DARK_PALETTE)
+        apply_palette(table, LIGHT_PALETTE)
+        self.assertEqual(
+            _foreground_of(table, TagName.LINK),
+            LIGHT_PALETTE.link_foreground,
+        )
+
+    def test_every_coloured_tag_differs_between_the_two_palettes(self) -> None:
+        # If a tag resolved to the same colour in both, it would be a
+        # value someone forgot to re-derive for the dark sheet.
+        light = build_tag_table(
+            char_width_px=_TEST_CHAR_WIDTH_PX, palette=LIGHT_PALETTE,
+        )
+        dark = build_tag_table(
+            char_width_px=_TEST_CHAR_WIDTH_PX, palette=DARK_PALETTE,
+        )
+        for name in _COLOURED_TAG_NAMES:
+            with self.subTest(tag=name):
+                self.assertNotEqual(
+                    _foreground_of(light, name), _foreground_of(dark, name),
+                )
+
+    def test_admonition_kind_labels_take_their_kind_colour(self) -> None:
+        table = build_tag_table(
+            char_width_px=_TEST_CHAR_WIDTH_PX, palette=DARK_PALETTE,
+        )
+        for kind in AdmonitionKind:
+            with self.subTest(kind=kind):
+                self.assertEqual(
+                    _foreground_of(table, admonition_kind_tag_name(kind)),
+                    DARK_PALETTE.admonition_kind_foregrounds[kind],
+                )
+
+    def test_notice_lines_take_their_line_colour(self) -> None:
+        table = build_tag_table(
+            char_width_px=_TEST_CHAR_WIDTH_PX, palette=DARK_PALETTE,
+        )
+        expected = {
+            ErrorNoticeLine.ICON: TagName.ERROR_NOTICE_ICON,
+            ErrorNoticeLine.TITLE: TagName.ERROR_NOTICE_TITLE,
+            ErrorNoticeLine.DETAIL: TagName.ERROR_NOTICE_DETAIL,
+            ErrorNoticeLine.HINT: TagName.ERROR_NOTICE_HINT,
+        }
+        for line, tag_name in expected.items():
+            with self.subTest(line=line):
+                self.assertEqual(
+                    _foreground_of(table, tag_name),
+                    DARK_PALETTE.error_notice_foregrounds[line],
+                )
+
+    def test_applying_to_a_foreign_table_raises(self) -> None:
+        # A table that did not come from build_tag_table is a wiring
+        # bug, and deserves to fail loudly rather than half-colour.
+        with self.assertRaises(LookupError):
+            apply_palette(Gtk.TextTagTable.new(), LIGHT_PALETTE)
+
+    def test_geometry_survives_a_re_theme(self) -> None:
+        # apply_palette must touch colour only: the margins were sized
+        # from the measured font at construction and re-measuring is not
+        # part of a theme change.
+        table = build_tag_table(
+            char_width_px=_TEST_CHAR_WIDTH_PX, palette=LIGHT_PALETTE,
+        )
+        tag = table.lookup(TagName.CODE_BLOCK.value)
+        assert tag is not None
+        before = tag.get_property("left-margin")
+        apply_palette(table, DARK_PALETTE)
+        self.assertEqual(tag.get_property("left-margin"), before)
+
+
+class DarkWashSpecTests(unittest.TestCase):
+    """The painted tints follow the palette too, not just the tags."""
+
+    light: dict[TagName, WashSpec]
+    dark: dict[TagName, WashSpec]
+
+    def setUp(self) -> None:
+        self.light = build_wash_specs(LIGHT_PALETTE)
+        self.dark = build_wash_specs(DARK_PALETTE)
+
+    def test_both_palettes_cover_the_same_tags(self) -> None:
+        # Which blocks paint a wash is structural; only the colour
+        # varies. A tag present in one map and not the other would mean
+        # a block silently loses its tint in one scheme.
+        self.assertEqual(set(self.light), set(self.dark))
+
+    def test_admonition_tints_differ_between_palettes(self) -> None:
+        for kind in AdmonitionKind:
+            with self.subTest(kind=kind):
+                name = admonition_body_tag_name(kind)
+                self.assertNotEqual(
+                    self.light[name].tint, self.dark[name].tint,
+                )
+
+    def test_code_block_tint_differs_between_palettes(self) -> None:
+        self.assertNotEqual(
+            self.light[TagName.CODE_BLOCK].tint,
+            self.dark[TagName.CODE_BLOCK].tint,
+        )
+
+    def test_insets_are_identical_between_palettes(self) -> None:
+        # Insets are geometry, and geometry is not the palette's to set.
+        for name, spec in self.light.items():
+            with self.subTest(tag=name):
+                self.assertEqual(
+                    spec.box_left_inset_px,
+                    self.dark[name].box_left_inset_px,
+                )
+                self.assertEqual(
+                    spec.box_right_inset_px,
+                    self.dark[name].box_right_inset_px,
+                )
+
+    def test_shapes_are_identical_between_palettes(self) -> None:
+        for name, spec in self.light.items():
+            with self.subTest(tag=name):
+                self.assertIs(spec.shape, self.dark[name].shape)
+
+
+class DarkSheetWashTests(unittest.TestCase):
+    def test_sheet_follows_the_palette(self) -> None:
+        self.assertEqual(build_sheet_wash(DARK_PALETTE).tint, DARK_PALETTE.sheet)
+
+    def test_dark_sheet_differs_from_light_sheet(self) -> None:
+        self.assertNotEqual(
+            build_sheet_wash(DARK_PALETTE), build_sheet_wash(LIGHT_PALETTE),
+        )
+
+    def test_dark_sheet_is_opaque(self) -> None:
+        # Same requirement as the light sheet: it replaces the page
+        # background, so the desk must not bleed through it.
+        self.assertEqual(build_sheet_wash(DARK_PALETTE).tint[3], 1.0)
 
 
 if __name__ == "__main__":

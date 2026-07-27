@@ -6,12 +6,18 @@ import unittest
 
 from gi.repository import Gdk, GLib, Graphene, Gtk
 
-from enums import AdmonitionKind
+from enums import AdmonitionKind, ColorScheme
+from giruntime.ui.note_render import article_text_view
 from giruntime.ui.note_render.article_text_view import (
     ArticleTextView,
     _HAIRLINE_THICKNESS_PX,
     _rgba_from_tint,
     _sheet_rect_for,
+)
+from giruntime.ui.note_render.palette import (
+    DARK_PALETTE,
+    LIGHT_PALETTE,
+    scheme_for_foreground,
 )
 from giruntime.ui.note_render.tag_table import (
     TagName,
@@ -60,12 +66,21 @@ def _build_article_text_view_with_buffer() -> tuple[
     :class:`NoteView` and :class:`HelpWindow` use. Returns the trio so
     individual tests can populate the buffer with tagged content and
     probe the painter.
+
+    The colour scheme is **pinned to light**, not left to the ambient
+    theme. Every wash and geometry assertion in this module compares
+    against ``LIGHT_PALETTE`` tints, and an unpinned view re-themes
+    itself the moment it resolves a dark style — so on a dark desktop
+    those tests would compare light expectations against dark output and
+    fail for reasons that have nothing to do with what they test. Cases
+    that are *about* the dark path install their own probe afterwards.
     """
-    table = build_tag_table(char_width_px=9)
+    table = build_tag_table(char_width_px=9, palette=LIGHT_PALETTE)
     text_view = ArticleTextView()
     buffer = Gtk.TextBuffer.new(table)
     text_view.set_buffer(buffer)
     text_view.install_wash_specs_from_table(table)
+    text_view.install_scheme_probe(lambda: ColorScheme.LIGHT)
     return text_view, buffer, table
 
 
@@ -176,7 +191,7 @@ class InstallWashSpecsFromTableTests(unittest.TestCase):
     def test_installs_a_spec_for_every_wash_name(self) -> None:
         text_view, _buffer, _table = _build_article_text_view_with_buffer()
         self.assertEqual(
-            len(text_view._wash_specs_by_tag), len(build_wash_specs()),
+            len(text_view._wash_specs_by_tag), len(build_wash_specs(LIGHT_PALETTE)),
         )
 
 
@@ -221,7 +236,7 @@ class ArticleTextViewWashRectTests(unittest.TestCase):
         # The colour must match the NOTE admonition's tint — the
         # painter uses the spec's tint verbatim.
         expected_color = _rgba_from_tint(
-            build_wash_specs()[
+            build_wash_specs(LIGHT_PALETTE)[
                 admonition_body_tag_name(AdmonitionKind.NOTE)
             ].tint
         )
@@ -270,7 +285,7 @@ class ArticleTextViewWashRectTests(unittest.TestCase):
         # painter is a no-op. This is the right behaviour for tests
         # that construct the subclass standalone, and for the brief
         # window between constructor and wash-spec install.
-        table = build_tag_table(char_width_px=9)
+        table = build_tag_table(char_width_px=9, palette=LIGHT_PALETTE)
         text_view = ArticleTextView()
         buffer = Gtk.TextBuffer.new(table)
         text_view.set_buffer(buffer)
@@ -321,7 +336,7 @@ class ArticleTextViewWashRectTests(unittest.TestCase):
         self.assertEqual(
             _tuple_of(color),
             _tuple_of(
-                _rgba_from_tint(build_wash_specs()[TagName.TABLE_HEADER].tint)
+                _rgba_from_tint(build_wash_specs(LIGHT_PALETTE)[TagName.TABLE_HEADER].tint)
             ),
         )
         ok, line_iter = buffer.get_iter_at_line(0)
@@ -357,7 +372,7 @@ class ArticleTextViewWashRectTests(unittest.TestCase):
         _apply_tag_across_line(buffer, 1, TagName.TABLE_ROW.value)
         rects = _all_wash_rects(text_view)
         self.assertEqual(len(rects), 2)
-        specs = build_wash_specs()
+        specs = build_wash_specs(LIGHT_PALETTE)
         header_color, _header_rect = rects[0]
         row_color, row_rect = rects[1]
         self.assertEqual(
@@ -382,7 +397,7 @@ class ArticleTextViewWashRectTests(unittest.TestCase):
         _apply_tag_across_line(buffer, 0, TagName.BLOCKQUOTE_BODY.value)
         rects = _all_wash_rects(text_view)
         self.assertEqual(len(rects), 1)
-        spec = build_wash_specs()[TagName.BLOCKQUOTE_BODY]
+        spec = build_wash_specs(LIGHT_PALETTE)[TagName.BLOCKQUOTE_BODY]
         color, rect = rects[0]
         self.assertEqual(_tuple_of(color), _tuple_of(_rgba_from_tint(spec.tint)))
         self.assertEqual(rect.get_width(), float(spec.bar_width_px))
@@ -440,7 +455,7 @@ class ArticleTextViewWashClipTests(unittest.TestCase):
     def _admonition_tint(self) -> tuple[float, float, float, float]:
         return _tuple_of(
             _rgba_from_tint(
-                build_wash_specs()[
+                build_wash_specs(LIGHT_PALETTE)[
                     admonition_body_tag_name(AdmonitionKind.NOTE)
                 ].tint
             )
@@ -448,7 +463,7 @@ class ArticleTextViewWashClipTests(unittest.TestCase):
 
     def _blockquote_tint(self) -> tuple[float, float, float, float]:
         return _tuple_of(
-            _rgba_from_tint(build_wash_specs()[TagName.BLOCKQUOTE_BODY].tint)
+            _rgba_from_tint(build_wash_specs(LIGHT_PALETTE)[TagName.BLOCKQUOTE_BODY].tint)
         )
 
     def test_scrolled_to_top_paints_only_the_on_screen_wash(self) -> None:
@@ -541,7 +556,7 @@ class SheetRectTests(unittest.TestCase):
     """
 
     def setUp(self) -> None:
-        self.sheet_tint = build_sheet_wash().tint
+        self.sheet_tint = build_sheet_wash(LIGHT_PALETTE).tint
 
     def test_short_content_sheet_spans_top_to_content(self) -> None:
         # A short note scrolled to the top: a top desk band of 30 px, then
@@ -798,3 +813,253 @@ class RgbaFromTintTests(unittest.TestCase):
         a = _rgba_from_tint((0.5, 0.5, 0.5, 0.5))
         b = _rgba_from_tint((0.5, 0.5, 0.5, 0.5))
         self.assertIsNot(a, b)
+
+
+@unittest.skipUnless(_display_available(), "requires a display")
+class ColorSchemeReThemeTests(unittest.TestCase):
+    """Switching colour scheme re-colours a live surface in place.
+
+    The scheme is driven through the injected probe rather than through
+    a real theme, so these assert the re-theme *mechanism* without
+    depending on what theme the test compositor happens to run.
+    :class:`ThemeChangeTests` covers the real trigger.
+    """
+
+    text_view: ArticleTextView
+    buffer: Gtk.TextBuffer
+    table: Gtk.TextTagTable
+
+    def setUp(self) -> None:
+        self.text_view, self.buffer, self.table = (
+            _build_article_text_view_with_buffer()
+        )
+
+    def _go_dark(self) -> None:
+        self.text_view.install_scheme_probe(lambda: ColorScheme.DARK)
+
+    def test_starts_in_the_light_scheme(self) -> None:
+        # An unrealised widget has no resolved style to measure, so the
+        # view starts light and is corrected by the first css change.
+        self.assertIs(self.text_view.color_scheme(), ColorScheme.LIGHT)
+
+    def test_probe_switches_the_scheme(self) -> None:
+        self._go_dark()
+        self.assertIs(self.text_view.color_scheme(), ColorScheme.DARK)
+
+    def test_probe_switches_the_palette(self) -> None:
+        self._go_dark()
+        self.assertIs(self.text_view.palette(), DARK_PALETTE)
+
+    def test_sheet_follows_the_scheme(self) -> None:
+        self._go_dark()
+        self.assertEqual(
+            self.text_view._sheet_wash, build_sheet_wash(DARK_PALETTE),
+        )
+
+    def test_tag_foregrounds_are_recoloured_in_place(self) -> None:
+        # The buffer is bound to this tag table for life, so the
+        # re-theme has to mutate these very tags rather than swap in a
+        # new table.
+        link = self.table.lookup(TagName.LINK.value)
+        assert link is not None
+        self._go_dark()
+        rgba = link.get_property("foreground-rgba")
+        expected = Gdk.RGBA()
+        expected.parse(DARK_PALETTE.link_foreground)
+        self.assertAlmostEqual(rgba.red, expected.red, places=3)
+        self.assertAlmostEqual(rgba.green, expected.green, places=3)
+        self.assertAlmostEqual(rgba.blue, expected.blue, places=3)
+
+    def test_wash_specs_are_reinstalled_with_dark_tints(self) -> None:
+        body_tag = self.table.lookup(
+            admonition_body_tag_name(AdmonitionKind.NOTE).value
+        )
+        assert body_tag is not None
+        self._go_dark()
+        installed = self.text_view._wash_specs_by_tag[body_tag]
+        self.assertEqual(
+            installed.tint,
+            DARK_PALETTE.admonition_tints[AdmonitionKind.NOTE],
+        )
+
+    def test_buffer_text_is_untouched_by_a_re_theme(self) -> None:
+        # The whole point of re-colouring in place: no re-parse, no
+        # re-render, and therefore no lost scroll position.
+        self.buffer.set_text("some rendered text")
+        self._go_dark()
+        start, end = self.buffer.get_bounds()
+        self.assertEqual(
+            self.buffer.get_text(start, end, False), "some rendered text",
+        )
+
+    def test_switching_back_restores_the_light_palette(self) -> None:
+        self._go_dark()
+        self.text_view.install_scheme_probe(lambda: ColorScheme.LIGHT)
+        self.assertIs(self.text_view.palette(), LIGHT_PALETTE)
+
+    def test_an_unchanged_scheme_leaves_the_wash_map_alone(self) -> None:
+        # css_changed also fires on hover and focus, so the no-change
+        # path must be a genuine no-op rather than a silent rebuild.
+        before = self.text_view._wash_specs_by_tag
+        self.text_view.install_scheme_probe(lambda: ColorScheme.LIGHT)
+        self.assertIs(self.text_view._wash_specs_by_tag, before)
+
+    def test_a_view_without_a_tag_table_survives_a_scheme_change(self) -> None:
+        # A bare view (constructed but never wired) has no table to
+        # re-colour; the sheet must still follow the scheme.
+        bare = ArticleTextView()
+        bare.install_scheme_probe(lambda: ColorScheme.DARK)
+        self.assertEqual(bare._sheet_wash, build_sheet_wash(DARK_PALETTE))
+
+
+@unittest.skipUnless(_display_available(), "requires a display")
+class ThemeChangeTests(unittest.TestCase):
+    """The real trigger: GTK's own style-changed hook drives the probe.
+
+    Drives ``gtk-application-prefer-dark-theme`` because it is the one
+    lever a test can pull at runtime to make GTK re-resolve styles.
+    Production never writes that property — it only ever *measures* the
+    foreground it resolves to, which is what makes the detector work for
+    themes this property cannot express.
+    """
+
+    def setUp(self) -> None:
+        self.settings = Gtk.Settings.get_default()
+        assert self.settings is not None
+        self.addCleanup(
+            self.settings.set_property,
+            "gtk-application-prefer-dark-theme",
+            self.settings.get_property("gtk-application-prefer-dark-theme"),
+        )
+
+    def test_the_view_tracks_a_theme_flip(self) -> None:
+        # Asserts the view *agrees with the rule* after the flip, never
+        # that dark won: whether this property darkens the resolved
+        # style depends on the installed theme, and under an explicit
+        # GTK_THEME it changes nothing at all. An earlier version
+        # asserted DARK outright and failed on exactly those boxes.
+        text_view = ArticleTextView()
+        window = Gtk.Window()
+        window.set_child(text_view)
+        window.present()
+        _settle_real_main_loop()
+        self.settings.set_property(
+            "gtk-application-prefer-dark-theme",
+            not self.settings.get_property(
+                "gtk-application-prefer-dark-theme"
+            ),
+        )
+        _settle_real_main_loop()
+        parent = text_view.get_parent()
+        assert parent is not None
+        color = parent.get_color()
+        expected = scheme_for_foreground(color.red, color.green, color.blue)
+        scheme = text_view.color_scheme()
+        window.destroy()
+        self.assertIs(scheme, expected)
+
+    def test_the_default_probe_reads_the_parent_foreground(self) -> None:
+        # The production probe classifies what the theme resolved for
+        # the *parent* — neither Gtk.Settings property reports it
+        # reliably, and this widget's own colour is the palette's ink.
+        text_view = ArticleTextView()
+        window = Gtk.Window()
+        window.set_child(text_view)
+        window.present()
+        _settle_real_main_loop()
+        parent = text_view.get_parent()
+        assert parent is not None
+        color = parent.get_color()
+        expected = scheme_for_foreground(color.red, color.green, color.blue)
+        scheme = text_view.color_scheme()
+        window.destroy()
+        self.assertIs(scheme, expected)
+
+
+@unittest.skipUnless(_display_available(), "requires a display")
+class ArticleInkTests(unittest.TestCase):
+    """The note's default ink follows the palette, without a tag.
+
+    The ink is set on the view's ``text`` CSS node, deliberately not on
+    the widget node. That separation is load-bearing rather than
+    incidental: :meth:`ArticleTextView._scheme_from_style` decides the
+    colour scheme by reading the widget node's own resolved foreground,
+    so ink written to the widget node would be read back as if it were
+    the theme's — the view would see its own output as its input and
+    latch. The last test here is what stops that regression.
+    """
+
+    def _ink_css(self) -> str:
+        provider = article_text_view._ink_provider
+        assert provider is not None
+        css: str = provider.to_string()
+        return css
+
+    @staticmethod
+    def _serialised(foreground: str) -> str:
+        """The palette literal as GTK re-serialises it in a stylesheet.
+
+        A provider normalises ``#1a1a18`` to ``rgb(26,26,24)``, so the
+        expected value has to make the same round trip rather than be
+        compared as the literal the palette stores.
+        """
+        rgba = Gdk.RGBA()
+        rgba.parse(foreground)
+        serialised: str = rgba.to_string()
+        return serialised
+
+    def test_light_ink_css_carries_the_palette_body_foreground(self) -> None:
+        _build_article_text_view_with_buffer()
+        self.assertIn(
+            self._serialised(LIGHT_PALETTE.body_foreground), self._ink_css(),
+        )
+
+    def test_ink_is_scoped_to_the_article_text_node(self) -> None:
+        # Not the bare widget: the source editor is a Gtk.TextView too
+        # and must keep following the theme.
+        _build_article_text_view_with_buffer()
+        self.assertIn("article-text-view text", self._ink_css())
+
+    def test_switching_to_dark_rewrites_the_ink(self) -> None:
+        text_view, _, _ = _build_article_text_view_with_buffer()
+        text_view.install_scheme_probe(lambda: ColorScheme.DARK)
+        css = self._ink_css()
+        self.assertIn(self._serialised(DARK_PALETTE.body_foreground), css)
+        self.assertNotIn(
+            self._serialised(LIGHT_PALETTE.body_foreground), css,
+        )
+
+    def test_ink_does_not_feed_back_into_scheme_detection(self) -> None:
+        # The ink is written to this widget's own colour, so the probe
+        # reads the *parent* instead. If it ever reads self, it sees its
+        # own output: dark ink reads as "light theme", and the view can
+        # never leave whichever scheme it is already in. Here the view is
+        # forced dark while the test theme stays light — a self-reading
+        # probe would answer DARK, a parent-reading one answers LIGHT.
+        text_view, _, _ = _build_article_text_view_with_buffer()
+        container = Gtk.Box()
+        container.append(text_view)
+        window = Gtk.Window()
+        window.set_child(container)
+        window.present()
+        _settle_real_main_loop(200)
+        text_view.install_scheme_probe(lambda: ColorScheme.DARK)
+        _settle_real_main_loop(200)
+        probed = ArticleTextView._scheme_from_style(text_view)
+        theme_is_light = scheme_for_foreground(
+            container.get_color().red,
+            container.get_color().green,
+            container.get_color().blue,
+        )
+        window.destroy()
+        self.assertIs(probed, theme_is_light)
+
+    def test_probe_falls_back_to_the_current_scheme_when_unparented(
+        self,
+    ) -> None:
+        # The construction window, before the container adopts the view.
+        text_view = ArticleTextView()
+        self.assertIs(
+            ArticleTextView._scheme_from_style(text_view),
+            text_view.color_scheme(),
+        )

@@ -99,11 +99,12 @@ from typing import Final
 
 from gi.repository import GObject, Gtk, GtkSource
 
-from enums import GResourceSubtree
+from enums import ColorScheme, GResourceSubtree
 from giruntime.controllers.app_state import AppState
 from giruntime.controllers.note_controller import NoteController
 from giruntime.controllers.note_list_store import NoteListStore
 from giruntime.ui import _gresource
+from giruntime.ui.note_render.palette import scheme_for_foreground
 from giruntime.ui._file_picker import (
     FileDialogOpener,
     default_file_dialog_opener,
@@ -192,6 +193,39 @@ def _configure_search_path(manager: GtkSource.LanguageManager) -> None:
     # ``notes-asciidoc`` (none ships, but defending against an id
     # collision is cheap and keeps surprising debug stories at bay).
     manager.set_search_path([language_specs_dir, *existing])
+
+
+_STYLE_SCHEME_IDS: dict[ColorScheme, str] = {
+    ColorScheme.LIGHT: "classic",
+    ColorScheme.DARK: "classic-dark",
+}
+"""The GtkSourceView style scheme to highlight against, per scheme.
+
+``classic`` is what GtkSourceView 5 assigns to a fresh buffer anyway, so
+the light editor is untouched by this pairing; ``classic-dark`` is its
+published counterpart. The pair matters more than either half: a scheme
+carries the syntax colours *and* the current-line highlight, so a light
+scheme under a dark theme shows a bright band across the cursor's line —
+which is exactly how this gap was noticed.
+
+Deliberately **not** ``Adwaita``/``Adwaita-dark``. They would match the
+chrome more closely, but switching the light scheme to Adwaita would
+restyle an editor nobody asked to have restyled.
+"""
+
+
+def _style_scheme_for(color_scheme: ColorScheme) -> GtkSource.StyleScheme | None:
+    """Resolve the style scheme for ``color_scheme``, if it is installed.
+
+    Returns :data:`None` when the scheme is absent, which leaves the
+    buffer on whatever it already had. Both ids here have shipped with
+    GtkSourceView for many years, so this is a guard against an
+    unusually stripped installation rather than an expected path — but
+    an editor with slightly wrong colours beats an editor that fails to
+    open.
+    """
+    manager = GtkSource.StyleSchemeManager.get_default()
+    return manager.get_scheme(_STYLE_SCHEME_IDS[color_scheme])
 
 
 _LANGUAGE_MANAGER: GtkSource.LanguageManager | None = None
@@ -290,6 +324,7 @@ class NoteEditor(Gtk.Box):  # pylint: disable=too-many-instance-attributes
 
     _buffer: GtkSource.Buffer
     _source_view: GtkSource.View
+    _color_scheme: ColorScheme
     _attachments_panel: AttachmentsPanel
 
     _current_note_id: str | None
@@ -359,6 +394,12 @@ class NoteEditor(Gtk.Box):  # pylint: disable=too-many-instance-attributes
         # delimiters, so giving the user a visual cue at edit time is
         # in keeping with the strict error policy.
         self._buffer.set_highlight_matching_brackets(True)
+        # Pinned explicitly rather than left to GtkSourceView's default:
+        # that default is ``classic`` whatever the theme, and it never
+        # changes. Corrected by the first ``css_changed`` if the chrome
+        # turns out to be dark.
+        self._color_scheme = ColorScheme.LIGHT
+        self._apply_color_scheme(self._color_scheme)
 
         self._source_view = GtkSource.View.new_with_buffer(self._buffer)
         self._source_view.set_show_line_numbers(True)
@@ -516,6 +557,38 @@ class NoteEditor(Gtk.Box):  # pylint: disable=too-many-instance-attributes
     # ------------------------------------------------------------------
     # Auto-save plumbing
     # ------------------------------------------------------------------
+
+    def do_css_changed(  # pylint: disable=arguments-differ
+        self, change: Gtk.CssStyleChange,
+    ) -> None:
+        """Re-scheme the editor when the widget's resolved style changes.
+
+        GtkSourceView has no dark-mode switching of its own: a fresh
+        buffer is given the ``classic`` scheme and keeps it, so under a
+        dark theme the editor kept light syntax colours and a bright
+        current-line band. This is the same hook and the same luminance
+        rule the reading view uses (see
+        :mod:`giruntime.ui.note_render.article_text_view`), so the two
+        panes cannot end up disagreeing about which scheme is in effect.
+
+        The colour is read from *this* widget — unlike the article view,
+        the editor overrides no foreground of its own, so what it
+        resolves is the theme's.
+        """
+        Gtk.Box.do_css_changed(self, change)
+        color = self.get_color()
+        scheme = scheme_for_foreground(color.red, color.green, color.blue)
+        if scheme is self._color_scheme:
+            return
+        self._color_scheme = scheme
+        self._apply_color_scheme(scheme)
+
+    def _apply_color_scheme(self, color_scheme: ColorScheme) -> None:
+        """Point the buffer at the style scheme for ``color_scheme``."""
+        style_scheme = _style_scheme_for(color_scheme)
+        if style_scheme is None:
+            return
+        self._buffer.set_style_scheme(style_scheme)
 
     def _on_buffer_changed(self, _buffer: GtkSource.Buffer) -> None:
         """Schedule (or reschedule) an auto-save 300 ms in the future.
