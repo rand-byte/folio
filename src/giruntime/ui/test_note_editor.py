@@ -30,6 +30,7 @@ from giruntime.controllers.app_state import AppState
 from giruntime.controllers.note_controller import NoteController
 from giruntime.controllers.note_list_store import NoteListStore
 from giruntime.ui.attachments_panel import AttachmentsPanel
+from giruntime.ui.note_render.palette import scheme_for_foreground
 from giruntime.ui.note_editor import (
     AUTOSAVE_DEBOUNCE_MS,
     LANGUAGE_ID,
@@ -675,14 +676,73 @@ class StyleSchemeLookupTests(unittest.TestCase):
         )
 
 
+def _settle_real_main_loop(timeout_ms: int = 400) -> None:
+    """Run a real :class:`GLib.MainLoop`, quitting after ``timeout_ms``.
+
+    A pumped ``MainContext`` never advances the frame clock, so a widget
+    that has not been mapped yet may never resolve its style — and a
+    style-dependent assertion then reads whatever the widget was
+    constructed with. The real loop is what makes ``css_changed``
+    actually arrive.
+    """
+    loop = GLib.MainLoop()
+
+    def _quit() -> bool:
+        loop.quit()
+        result: bool = GLib.SOURCE_REMOVE
+        return result
+
+    GLib.timeout_add(timeout_ms, _quit)
+    loop.run()
+
+
+def _expected_scheme_id(editor: NoteEditor) -> str:
+    """The style scheme this editor *should* be on, given its own colour.
+
+    Derived from the same luminance rule production uses, rather than
+    hard-coded, so the assertion holds whatever theme the machine
+    running the suite happens to have. An earlier version asserted
+    ``classic-dark`` outright after flipping
+    ``gtk-application-prefer-dark-theme``, which assumed that property
+    flips *this* box's resolved foreground — true under the container's
+    Adwaita, not true everywhere, and the test failed on a real desktop.
+    """
+    color = editor.get_color()
+    return _STYLE_SCHEME_IDS[
+        scheme_for_foreground(color.red, color.green, color.blue)
+    ]
+
+
+@unittest.skipUnless(_display_available(), "no GDK display")
+class ApplyColorSchemeTests(unittest.TestCase):
+    """The scheme swap itself, driven directly and deterministically."""
+
+    def test_dark_puts_the_buffer_on_the_dark_scheme(self) -> None:
+        editor, _, _, _, _ = _build_editor()
+        editor._apply_color_scheme(ColorScheme.DARK)
+        scheme = editor._buffer.get_style_scheme()
+        assert scheme is not None
+        self.assertEqual(scheme.get_id(), "classic-dark")
+
+    def test_light_puts_the_buffer_back_on_the_light_scheme(self) -> None:
+        editor, _, _, _, _ = _build_editor()
+        editor._apply_color_scheme(ColorScheme.DARK)
+        editor._apply_color_scheme(ColorScheme.LIGHT)
+        scheme = editor._buffer.get_style_scheme()
+        assert scheme is not None
+        self.assertEqual(scheme.get_id(), "classic")
+
+
 @unittest.skipUnless(_display_available(), "no GDK display")
 class StyleSchemeFollowsThemeTests(unittest.TestCase):
-    """The editor re-schemes when the theme flips.
+    """The editor's scheme agrees with the theme it is sitting in.
 
     GtkSourceView does no dark-mode switching of its own — a fresh
-    buffer gets 'classic' and keeps it — so under a dark theme the
+    buffer gets ``classic`` and keeps it — so under a dark theme the
     editor kept light syntax colours and a bright current-line band
-    across the cursor's row. These pin the correction.
+    across the cursor's row. What is asserted is *agreement with the
+    luminance rule*, never a particular scheme id: the suite has to pass
+    on a light desktop and a dark one alike.
     """
 
     def setUp(self) -> None:
@@ -694,23 +754,37 @@ class StyleSchemeFollowsThemeTests(unittest.TestCase):
             self.settings.get_property("gtk-application-prefer-dark-theme"),
         )
 
-    def test_editor_starts_on_the_light_scheme(self) -> None:
-        editor, _, _, _, _ = _build_editor()
-        scheme = editor._buffer.get_style_scheme()
-        assert scheme is not None
-        self.assertEqual(scheme.get_id(), "classic")
-
-    def test_a_dark_theme_switches_the_editor_scheme(self) -> None:
-        editor, _, _, _, _ = _build_editor()
+    def _present(self, editor: NoteEditor) -> Gtk.Window:
         window = Gtk.Window()
         window.set_child(editor)
         window.present()
-        _pump_main_context()
-        self.settings.set_property(
-            "gtk-application-prefer-dark-theme", True,
-        )
-        _pump_main_context()
+        _settle_real_main_loop()
+        return window
+
+    def test_scheme_matches_the_theme_once_realised(self) -> None:
+        editor, _, _, _, _ = _build_editor()
+        window = self._present(editor)
         scheme = editor._buffer.get_style_scheme()
+        expected = _expected_scheme_id(editor)
         window.destroy()
         assert scheme is not None
-        self.assertEqual(scheme.get_id(), "classic-dark")
+        self.assertEqual(scheme.get_id(), expected)
+
+    def test_scheme_still_matches_after_a_theme_flip(self) -> None:
+        # Whether flipping this property actually darkens the resolved
+        # style depends on the installed theme, so the assertion is that
+        # the editor *tracked* whatever happened — not that dark won.
+        editor, _, _, _, _ = _build_editor()
+        window = self._present(editor)
+        self.settings.set_property(
+            "gtk-application-prefer-dark-theme",
+            not self.settings.get_property(
+                "gtk-application-prefer-dark-theme"
+            ),
+        )
+        _settle_real_main_loop()
+        scheme = editor._buffer.get_style_scheme()
+        expected = _expected_scheme_id(editor)
+        window.destroy()
+        assert scheme is not None
+        self.assertEqual(scheme.get_id(), expected)

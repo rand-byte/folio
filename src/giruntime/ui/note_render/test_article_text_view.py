@@ -66,12 +66,21 @@ def _build_article_text_view_with_buffer() -> tuple[
     :class:`NoteView` and :class:`HelpWindow` use. Returns the trio so
     individual tests can populate the buffer with tagged content and
     probe the painter.
+
+    The colour scheme is **pinned to light**, not left to the ambient
+    theme. Every wash and geometry assertion in this module compares
+    against ``LIGHT_PALETTE`` tints, and an unpinned view re-themes
+    itself the moment it resolves a dark style — so on a dark desktop
+    those tests would compare light expectations against dark output and
+    fail for reasons that have nothing to do with what they test. Cases
+    that are *about* the dark path install their own probe afterwards.
     """
     table = build_tag_table(char_width_px=9, palette=LIGHT_PALETTE)
     text_view = ArticleTextView()
     buffer = Gtk.TextBuffer.new(table)
     text_view.set_buffer(buffer)
     text_view.install_wash_specs_from_table(table)
+    text_view.install_scheme_probe(lambda: ColorScheme.LIGHT)
     return text_view, buffer, table
 
 
@@ -923,30 +932,44 @@ class ThemeChangeTests(unittest.TestCase):
             self.settings.get_property("gtk-application-prefer-dark-theme"),
         )
 
-    def test_a_theme_flip_switches_the_view_to_the_dark_palette(self) -> None:
-        text_view, _, _ = _build_article_text_view_with_buffer()
-        window = Gtk.Window()
-        window.set_child(text_view)
-        window.present()
-        _settle_real_main_loop()
-        self.settings.set_property(
-            "gtk-application-prefer-dark-theme", True,
-        )
-        _settle_real_main_loop()
-        scheme = text_view.color_scheme()
-        window.destroy()
-        self.assertIs(scheme, ColorScheme.DARK)
-
-    def test_the_default_probe_reads_the_widget_foreground(self) -> None:
-        # The production probe classifies what the theme actually
-        # resolved for this widget — the measurement neither
-        # Gtk.Settings property reports reliably.
+    def test_the_view_tracks_a_theme_flip(self) -> None:
+        # Asserts the view *agrees with the rule* after the flip, never
+        # that dark won: whether this property darkens the resolved
+        # style depends on the installed theme, and under an explicit
+        # GTK_THEME it changes nothing at all. An earlier version
+        # asserted DARK outright and failed on exactly those boxes.
         text_view = ArticleTextView()
         window = Gtk.Window()
         window.set_child(text_view)
         window.present()
         _settle_real_main_loop()
-        color = text_view.get_color()
+        self.settings.set_property(
+            "gtk-application-prefer-dark-theme",
+            not self.settings.get_property(
+                "gtk-application-prefer-dark-theme"
+            ),
+        )
+        _settle_real_main_loop()
+        parent = text_view.get_parent()
+        assert parent is not None
+        color = parent.get_color()
+        expected = scheme_for_foreground(color.red, color.green, color.blue)
+        scheme = text_view.color_scheme()
+        window.destroy()
+        self.assertIs(scheme, expected)
+
+    def test_the_default_probe_reads_the_parent_foreground(self) -> None:
+        # The production probe classifies what the theme resolved for
+        # the *parent* — neither Gtk.Settings property reports it
+        # reliably, and this widget's own colour is the palette's ink.
+        text_view = ArticleTextView()
+        window = Gtk.Window()
+        window.set_child(text_view)
+        window.present()
+        _settle_real_main_loop()
+        parent = text_view.get_parent()
+        assert parent is not None
+        color = parent.get_color()
         expected = scheme_for_foreground(color.red, color.green, color.blue)
         scheme = text_view.color_scheme()
         window.destroy()
