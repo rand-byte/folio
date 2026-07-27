@@ -18,6 +18,7 @@ from giruntime.ui.application import NotesApplication
 from giruntime.ui._filesize import format_byte_size
 from giruntime.ui.help_window import HelpWindow, _section_mark_name
 from giruntime.ui.link_handler import UriLauncherProtocol
+from giruntime.ui.note_render.palette import LIGHT_PALETTE
 from giruntime.ui.note_render.tag_table import build_wash_specs
 from giruntime.ui.article_container import ArticleContainer
 from giruntime.ui.note_render.article_text_view import ArticleTextView
@@ -344,7 +345,7 @@ class HelpWindowTests(unittest.TestCase):
         view = window.text_view
         assert isinstance(view, ArticleTextView)
         installed = view._wash_specs_by_tag
-        self.assertEqual(len(installed), len(build_wash_specs()))
+        self.assertEqual(len(installed), len(build_wash_specs(LIGHT_PALETTE)))
 
     def test_window_hides_rather_than_destroys_on_close(self) -> None:
         # Reuse-and-raise (owned by the application) only holds if the one

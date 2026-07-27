@@ -33,6 +33,7 @@ from giruntime.ui.article_container import (
     LineHeightMeasurer,
 )
 from giruntime.ui.note_render.article_text_view import ArticleTextView
+from giruntime.ui.note_render.palette import LIGHT_PALETTE
 from giruntime.ui.note_render.tag_table import (
     TagName,
     build_wash_specs,
@@ -1155,7 +1156,7 @@ class BuildArticleSurfaceTests(unittest.TestCase):
     def test_block_tints_are_installed(self) -> None:
         surface = self._build()
         self.assertEqual(
-            len(surface.text_view._wash_specs_by_tag), len(build_wash_specs()),
+            len(surface.text_view._wash_specs_by_tag), len(build_wash_specs(LIGHT_PALETTE)),
         )
 
     def test_outer_column_width_matches_the_container(self) -> None:

@@ -3,10 +3,27 @@
 Principles & invariants
 -----------------------
 * This module is the single owner of every styling tag that appears in
-  the rendered view. Other modules apply tags by *name* (looking them up
-  on the table) so the visual definitions live in exactly one place. A
-  tweak to "what bold looks like" is one edit here, not a hunt across
-  the renderer.
+  the rendered view — its *structure*: geometry, typography, and tag
+  identity. Other modules apply tags by *name* (looking them up on the
+  table) so the visual definitions live in exactly one place. A tweak to
+  "what bold looks like" is one edit here, not a hunt across the
+  renderer.
+* **Colour is not here.** Every foreground, block tint, hairline rule
+  and the note sheet live in
+  :mod:`giruntime.ui.note_render.palette` and arrive as a
+  :class:`Palette`. The split is along what varies: colour is the one
+  thing that changes at runtime (a theme flip re-colours a live tag
+  table via :func:`apply_palette`), while every value here is fixed for
+  the surface's life by the measured font. :func:`build_tag_table`
+  therefore sets no colour itself — it builds the tags and delegates to
+  :func:`apply_palette`, so the "build" and "re-theme" paths are one
+  path and cannot drift.
+* The note's *default* ink is deliberately **not** a tag here. Body text
+  and headings carry no foreground, and the colour that saves them from
+  inheriting the theme's is applied as CSS by
+  :func:`giruntime.ui.note_render.article_text_view._apply_article_ink`
+  — see that module for why a whole-buffer tag was the wrong mechanism
+  (it re-invalidates the text layout and mis-paints the sheet).
 * Tag *names* are exposed as :class:`TagName` enum members. The renderer
   and tests reference :data:`TagName.BOLD` rather than the string
   ``"bold"`` — the style rule against magic strings applies inside this
@@ -31,9 +48,8 @@ Principles & invariants
   as a table), and the block's text sits one M-width inside that card
   edge — there is no extra outer indent, so the card lines up with the
   surrounding prose rather than reading as a nested, indented island.
-  The matching *tinted wash* is painted by ``ArticleTextView`` in
-  :mod:`ui.note_view` using :func:`build_wash_specs` to look
-  up tint + inset per tag. This split exists because GTK's
+  The matching *tinted wash* is painted by ``ArticleTextView`` using
+  :func:`build_wash_specs` to look up tint + inset per tag. This split exists because GTK's
   ``paragraph-background-rgba`` paints exactly between the paragraph's
   effective ``left-margin`` and ``right-margin`` — there is no
   property that decouples "where the wash paints" from "where the
@@ -65,10 +81,11 @@ Principles & invariants
   instance per buffer avoids accidental cross-buffer aliasing in tests.
   It requires the measured M-width of the body font as
   ``char_width_px`` so the paragraph-tag margins encode "inset + one
-  M-width" — there is no sensible default, so the parameter is
-  required.
+  M-width", and a :class:`Palette` for the colours — neither has a
+  sensible default, so both parameters are required.
 * :func:`build_wash_specs` returns the per-tag :class:`WashSpec`
-  records the article TextView paints. Tag names that don't paint a
+  records the article TextView paints, tinted from the palette it is
+  given. Tag names that don't paint a
   wash (e.g. :data:`TagName.BLOCKQUOTE_ATTRIBUTION`) are absent from
   the returned dict on purpose — the painter must paint nothing
   behind them. The :data:`TagName.METADATA` line and every
@@ -82,9 +99,9 @@ Principles & invariants
   vertical rule at the box's left edge with no fill, so a quote reads
   as unmistakably distinct from the filled admonition / code cards.
 * This module imports ``gi`` because the tag table *is* a GTK object —
-  there is no useful pure-Python representation of a tag. The renderer
-  is the only other place in :mod:`asciidoc` that imports
-  ``gi``; everything else stays display-agnostic.
+  there is no useful pure-Python representation of a tag. Its palette,
+  by contrast, is plain data and imports no ``gi`` at all, so every
+  colour invariant is testable without a display.
 """
 
 # The module's size reflects the breadth of visual styles it is the sole
@@ -107,7 +124,8 @@ from config.defaults import (
     LIST_MARKER_GAP_CHARS,
     TABLE_CELL_HPADDING_PX,
 )
-from enums import AdmonitionKind, WashShape
+from enums import AdmonitionKind, ErrorNoticeLine, WashShape
+from giruntime.ui.note_render.palette import Palette, Rgba
 
 
 class TagName(StrEnum):
@@ -205,10 +223,10 @@ class TagName(StrEnum):
     (:data:`ERROR_NOTICE_ICON`), a headline (:data:`ERROR_NOTICE_TITLE`),
     the kind-specific message (:data:`ERROR_NOTICE_DETAIL`), and a faint
     recovery hint (:data:`ERROR_NOTICE_HINT`). All four set
-    ``justification = CENTER`` and an explicit foreground so they read on
-    the opaque white sheet regardless of OS theme — like
-    :data:`METADATA`, they are buffer-tag names only and carry **no**
-    wash (they are absent from :func:`build_wash_specs`).
+    ``justification = CENTER`` and take an explicit palette foreground so
+    they read on the opaque sheet whichever colour scheme it is in —
+    like :data:`METADATA`, they are buffer-tag names only and carry
+    **no** wash (they are absent from :func:`build_wash_specs`).
     """
 
     BOLD = "bold"
@@ -305,7 +323,7 @@ class WashSpec:
     other shape.
     """
 
-    tint: tuple[float, float, float, float]
+    tint: Rgba
     box_left_inset_px: int
     box_right_inset_px: int
     shape: WashShape = WashShape.FILL
@@ -330,7 +348,7 @@ class SheetWash:
     sheet meets the desk directly, with no rule drawn at the boundary.
     """
 
-    tint: tuple[float, float, float, float]
+    tint: Rgba
 
 
 # ---------------------------------------------------------------------------
@@ -470,53 +488,22 @@ _ADMONITION_KIND_TAG_NAMES: dict[AdmonitionKind, TagName] = {
 
 
 # ---------------------------------------------------------------------------
-# Visual constants for monospace, link, and block-level styling
+# Visual constants for monospace and block-level *structure*
 # ---------------------------------------------------------------------------
+#
+# What remains here is geometry and typography: the values that depend on
+# the measured font, not on the colour scheme. Every *colour* the
+# rendered view paints — foregrounds, block tints, hairline rules, the
+# sheet — lives in :mod:`giruntime.ui.note_render.palette` and reaches
+# these builders as a :class:`Palette`, because colour is the one thing
+# that varies at runtime (see :func:`apply_palette`).
 #
 # These are not exposed as enum values because they describe *visual*
 # settings rather than categorical concepts — there's no closed set of
-# legal monospace families or tint colours, only one current choice
-# each. They live as module constants so a one-line edit changes the
-# look across every rendered note.
+# legal monospace families or paddings, only one current choice each.
 
 _MONOSPACE_FAMILY: str = "monospace"
 
-# A blue close to the GTK Adwaita "accent" colour. Encoded as a CSS-style
-# RGB string because :class:`Gtk.TextTag`'s ``foreground`` property
-# accepts that form directly. If the renderer ever gains a dark-mode
-# variant we'll switch this to a callable that picks per-theme.
-_LINK_FOREGROUND: str = "#1a73e8"
-
-
-# Per-kind tint for admonition paragraph backgrounds. RGBA tuples; the
-# alpha is intentionally low so the tint reads as a wash, not a fill.
-# The values follow the same palette validated by the rendering
-# harness in ``admonition_test/render_admonition.py`` (option A).
-_ADMONITION_TINTS: dict[AdmonitionKind, tuple[float, float, float, float]] = {
-    AdmonitionKind.NOTE: (0.96, 0.78, 0.55, 0.35),
-    AdmonitionKind.TIP: (0.55, 0.85, 0.65, 0.30),
-    AdmonitionKind.IMPORTANT: (0.85, 0.55, 0.85, 0.30),
-    AdmonitionKind.WARNING: (0.95, 0.65, 0.45, 0.35),
-    AdmonitionKind.CAUTION: (0.95, 0.55, 0.55, 0.35),
-}
-
-# Per-kind foreground for the bold kind-label text (NOTE / TIP / …).
-# Darker shades of each kind's tint so the kind name reads as the
-# accent within the tinted block.
-_ADMONITION_KIND_FOREGROUNDS: dict[AdmonitionKind, str] = {
-    AdmonitionKind.NOTE: "#8a5a00",
-    AdmonitionKind.TIP: "#1f6a3a",
-    AdmonitionKind.IMPORTANT: "#6a2d6a",
-    AdmonitionKind.WARNING: "#a04018",
-    AdmonitionKind.CAUTION: "#a02828",
-}
-
-# Neutral grey tint for code blocks and the blockquote left rule. Code
-# blocks keep a low-alpha wash so the tint reads as a fill, not a card;
-# the blockquote rule is a fairly opaque, near-solid grey since it is a
-# thin line rather than a wash behind the text.
-_CODE_BLOCK_TINT: tuple[float, float, float, float] = (0.5, 0.5, 0.5, 0.08)
-_BLOCKQUOTE_BAR_TINT: tuple[float, float, float, float] = (0.5, 0.5, 0.5, 0.5)
 
 # Paragraph metrics applied to admonition paragraph tags. ``HMARGIN``
 # is the *box inset* from the textview's widget left/right margin to
@@ -572,78 +559,79 @@ _BLOCKQUOTE_ATTRIBUTION_SCALE: float = 0.9
 # line; each *data* row paints a 1-px rule at its bottom (a hairline
 # wash — the same painter shape the metadata divider uses) to separate
 # it from the next row. Two distinct insets apply here and must not be
-# confused. The **wash** inset (these box-inset constants) is zero so the
+# confused. The **wash** inset (this box-inset constant) is zero so the
 # band / rule span the *full* body text column (the table itself fills
 # that column). The **text** inset is separate: the row tags carry
 # ``TABLE_CELL_HPADDING_PX`` as a ``left-margin`` so each column's cell
 # *text* sits that far inside its column boundary, while the band / rule
-# behind it still reach both column edges. The header's tint shares the
-# neutral-grey family of the code block, a hair stronger so the header
-# reads as a band; the rule reuses the metadata rule's grey so the two
-# hairlines match. The vertical padding is applied *symmetrically*
-# (``pixels-above-lines`` == ``pixels-below-lines``) on both row kinds,
-# so a data row's hairline rule sits clear of the text on both sides —
-# the gap below row N and above row N+1 each contribute, and the rule
-# lands centred between them — and the header's text is centred within
-# its tint band rather than hugging the top edge.
-_TABLE_HEADER_TINT: tuple[float, float, float, float] = (0.5, 0.5, 0.5, 0.16)
-_TABLE_RULE_TINT: tuple[float, float, float, float] = (0.5, 0.5, 0.5, 0.30)
+# behind it still reach both column edges. The vertical padding is
+# applied *symmetrically* (``pixels-above-lines`` == ``pixels-below-lines``)
+# on both row kinds, so a data row's hairline rule sits clear of the text
+# on both sides — the gap below row N and above row N+1 each contribute,
+# and the rule lands centred between them — and the header's text is
+# centred within its tint band rather than hugging the top edge.
 _TABLE_BOX_INSET_PX: int = 0
 _TABLE_ROW_VPADDING_PX: int = 7
 _TABLE_HEADER_VPADDING_PX: int = 8
 
 
 # Metadata line (Created / Modified / tags) under the document title.
-# A neutral dim grey for the text, a slightly reduced scale so it reads
-# as secondary to the title and body, and a gap below the text that
-# separates it from the hairline rule the wash painter draws. The rule
-# itself is a light grey RGBA painted as a 1-px band spanning the text
-# column — its colour lives here so the whole metadata treatment is one
-# place, matching the "one place per visual style" invariant.
-_METADATA_FOREGROUND: str = "#808080"
+# A slightly reduced scale so it reads as secondary to the title and
+# body, and a gap below the text that separates it from the hairline
+# rule the wash painter draws. Both the text colour and the rule colour
+# come from the palette.
 _METADATA_SCALE: float = 0.85
 _METADATA_PIXELS_BELOW_LINES_PX: int = 8
-_METADATA_RULE_TINT: tuple[float, float, float, float] = (0.5, 0.5, 0.5, 0.30)
 _METADATA_RULE_INSET_PX: int = 0
 
 
 # Parse-error notice (the "empty state" shown in the rendered surface
-# when a note's source fails to parse). Four centred lines on the normal
-# white sheet: a large warning glyph, a headline, the kind-specific
-# message, and a faint recovery hint. The accent is amber — it reads as
-# a fixable warning and matches the inline notice this replaced; flip
-# ``_ERROR_NOTICE_ICON_FOREGROUND`` to a red (e.g. ``"#c0392b"``) to read
-# as a harder error. The title/detail/hint foregrounds are explicit
-# (not inherited) because the sheet is an opaque light paper regardless
-# of OS theme, so a theme-default foreground could land light-on-white;
-# the dim greys mirror :data:`_METADATA_FOREGROUND`. Scales are
-# multipliers on the body size so the notice tracks the user's font.
-_ERROR_NOTICE_ICON_FOREGROUND: str = "#d4a017"
-_ERROR_NOTICE_ICON_SCALE: float = 3.0
-_ERROR_NOTICE_ICON_PIXELS_ABOVE_PX: int = 24
-_ERROR_NOTICE_TITLE_FOREGROUND: str = "#2c2c2a"
-_ERROR_NOTICE_TITLE_SCALE: float = 1.2
-_ERROR_NOTICE_TITLE_PIXELS_ABOVE_PX: int = 8
-_ERROR_NOTICE_DETAIL_FOREGROUND: str = "#5f5e5a"
-_ERROR_NOTICE_DETAIL_SCALE: float = 1.0
-_ERROR_NOTICE_DETAIL_PIXELS_ABOVE_PX: int = 6
-_ERROR_NOTICE_HINT_FOREGROUND: str = "#888780"
-_ERROR_NOTICE_HINT_SCALE: float = 0.9
-_ERROR_NOTICE_HINT_PIXELS_ABOVE_PX: int = 12
+# when a note's source fails to parse). Four centred lines: a large
+# warning glyph, a headline, the kind-specific message, and a faint
+# recovery hint. Scales are multipliers on the body size so the notice
+# tracks the user's font; the pixel gaps set the rhythm between the four
+# lines. Their foregrounds are palette-owned and always explicit — the
+# notice sits on the sheet, whose colour the application chooses, so an
+# inherited theme foreground could land invisibly on it (which is
+# precisely what used to happen to body text under a dark theme).
+_ERROR_NOTICE_TAG_NAMES: dict[ErrorNoticeLine, TagName] = {
+    ErrorNoticeLine.ICON: TagName.ERROR_NOTICE_ICON,
+    ErrorNoticeLine.TITLE: TagName.ERROR_NOTICE_TITLE,
+    ErrorNoticeLine.DETAIL: TagName.ERROR_NOTICE_DETAIL,
+    ErrorNoticeLine.HINT: TagName.ERROR_NOTICE_HINT,
+}
 
 
-# Note "sheet". The sheet is the paper the rendered note sits on; it is
-# painted by the article text view itself (its CSS background is
-# transparent) from the top down to the end of the content, so that below
-# the content the view is transparent and the scroller's own background —
-# the "desk" — shows through. The sheet is therefore an *opaque* colour
-# (it stands in for the page background); the rendered foregrounds and
-# block tints are all tuned for this light paper. The sheet meets the desk
-# directly, with no rule painted at the boundary.
-_SHEET_BACKGROUND: tuple[float, float, float, float] = (1.0, 1.0, 1.0, 1.0)
+@dataclass(frozen=True)
+class _ErrorNoticeMetrics:
+    """Non-colour styling for one line of the parse-error notice.
+
+    Paired with the line's palette foreground by :func:`build_tag_table`,
+    so the four lines are built in one loop over
+    :class:`ErrorNoticeLine` rather than four near-identical calls.
+    ``weight`` is :data:`None` for every line but the headline.
+    """
+
+    scale: float
+    pixels_above_px: int
+    weight: Pango.Weight | None = None
 
 
-def build_tag_table(*, char_width_px: int) -> Gtk.TextTagTable:
+_ERROR_NOTICE_METRICS: dict[ErrorNoticeLine, _ErrorNoticeMetrics] = {
+    ErrorNoticeLine.ICON: _ErrorNoticeMetrics(scale=3.0, pixels_above_px=24),
+    ErrorNoticeLine.TITLE: _ErrorNoticeMetrics(
+        scale=1.2, pixels_above_px=8, weight=Pango.Weight.SEMIBOLD,
+    ),
+    ErrorNoticeLine.DETAIL: _ErrorNoticeMetrics(
+        scale=1.0, pixels_above_px=6,
+    ),
+    ErrorNoticeLine.HINT: _ErrorNoticeMetrics(scale=0.9, pixels_above_px=12),
+}
+
+
+def build_tag_table(
+    *, char_width_px: int, palette: Palette,
+) -> Gtk.TextTagTable:
     """Construct the rendered-view tag table for the current subset.
 
     ``char_width_px`` is the measured M-width of the body font in
@@ -651,12 +639,21 @@ def build_tag_table(*, char_width_px: int) -> Gtk.TextTagTable:
     default — a wrong default would silently mis-size the inner inset
     on every block-level paragraph tag. Tests pass an explicit small
     int (e.g. ``9``); production passes the result of
-    :meth:`ui.note_view.ArticleContainer.char_width_px`.
+    :meth:`ui.article_container.ArticleContainer.char_width_px`.
+
+    ``palette`` supplies every colour. It is required for the same
+    reason: defaulting to the light set would make "which sheet is this
+    table for?" invisible at the call site.
 
     The returned table contains exactly one tag per :class:`TagName`
     member. Tag names are unique within a table, so callers that need
     a tag by name use :meth:`Gtk.TextTagTable.lookup` with the
     corresponding :class:`TagName` value.
+
+    **This function sets no colour itself.** It builds the structural
+    tags and then hands the table to :func:`apply_palette`, which is the
+    single place any foreground is written. That is what keeps the
+    "build" and "re-theme" paths from drifting: there is only one path.
 
     Note that link *identity* (which URL each link points at) is
     carried by a separate, anonymous :class:`Gtk.TextTag` per link,
@@ -672,11 +669,7 @@ def build_tag_table(*, char_width_px: int) -> Gtk.TextTagTable:
     table.add(_make_inline_tag(TagName.UNDERLINE, underline=Pango.Underline.SINGLE))
     table.add(_make_inline_tag(TagName.MONOSPACE, family=_MONOSPACE_FAMILY))
     table.add(
-        _make_inline_tag(
-            TagName.LINK,
-            foreground=_LINK_FOREGROUND,
-            underline=Pango.Underline.SINGLE,
-        )
+        _make_inline_tag(TagName.LINK, underline=Pango.Underline.SINGLE)
     )
     for level, scale in _HEADING_SCALES.items():
         table.add(
@@ -690,7 +683,7 @@ def build_tag_table(*, char_width_px: int) -> Gtk.TextTagTable:
                 list_item_name, depth=depth, char_width_px=char_width_px,
             )
         )
-    for kind in _ADMONITION_TINTS:
+    for kind in AdmonitionKind:
         table.add(
             _make_admonition_paragraph_tag(
                 _ADMONITION_LABEL_TAG_NAMES[kind],
@@ -709,7 +702,6 @@ def build_tag_table(*, char_width_px: int) -> Gtk.TextTagTable:
             _make_inline_tag(
                 _ADMONITION_KIND_TAG_NAMES[kind],
                 weight=Pango.Weight.BOLD,
-                foreground=_ADMONITION_KIND_FOREGROUNDS[kind],
             )
         )
     table.add(
@@ -736,49 +728,81 @@ def build_tag_table(*, char_width_px: int) -> Gtk.TextTagTable:
     table.add(_make_table_row_tag(TagName.TABLE_ROW, is_header=False))
     table.add(_make_table_row_tag(TagName.TABLE_HEADER, is_header=True))
     table.add(_make_metadata_tag(TagName.METADATA))
-    table.add(
-        _make_error_notice_tag(
-            TagName.ERROR_NOTICE_ICON,
-            foreground=_ERROR_NOTICE_ICON_FOREGROUND,
-            scale=_ERROR_NOTICE_ICON_SCALE,
-            pixels_above_px=_ERROR_NOTICE_ICON_PIXELS_ABOVE_PX,
+    for line, metrics in _ERROR_NOTICE_METRICS.items():
+        table.add(
+            _make_error_notice_tag(
+                _ERROR_NOTICE_TAG_NAMES[line], metrics=metrics,
+            )
         )
-    )
-    table.add(
-        _make_error_notice_tag(
-            TagName.ERROR_NOTICE_TITLE,
-            foreground=_ERROR_NOTICE_TITLE_FOREGROUND,
-            scale=_ERROR_NOTICE_TITLE_SCALE,
-            pixels_above_px=_ERROR_NOTICE_TITLE_PIXELS_ABOVE_PX,
-            weight=Pango.Weight.SEMIBOLD,
-        )
-    )
-    table.add(
-        _make_error_notice_tag(
-            TagName.ERROR_NOTICE_DETAIL,
-            foreground=_ERROR_NOTICE_DETAIL_FOREGROUND,
-            scale=_ERROR_NOTICE_DETAIL_SCALE,
-            pixels_above_px=_ERROR_NOTICE_DETAIL_PIXELS_ABOVE_PX,
-        )
-    )
-    table.add(
-        _make_error_notice_tag(
-            TagName.ERROR_NOTICE_HINT,
-            foreground=_ERROR_NOTICE_HINT_FOREGROUND,
-            scale=_ERROR_NOTICE_HINT_SCALE,
-            pixels_above_px=_ERROR_NOTICE_HINT_PIXELS_ABOVE_PX,
-        )
-    )
+    apply_palette(table, palette)
     return table
 
 
-def build_wash_specs() -> dict[TagName, WashSpec]:
+def apply_palette(table: Gtk.TextTagTable, palette: Palette) -> None:
+    """Write every colour in ``palette`` onto ``table``'s tags, in place.
+
+    The single writer of every foreground the rendered view shows.
+    :func:`build_tag_table` calls it last, and
+    :meth:`ArticleTextView.do_css_changed` calls it again whenever the
+    theme flips — so a re-theme takes the identical code path a fresh
+    build does, and the two cannot drift apart.
+
+    Re-colouring in place is not an optimisation but a requirement: a
+    :class:`Gtk.TextBuffer` is bound to its tag table for life (the
+    renderer raises on a mismatch), so a theme change cannot swap in a
+    freshly built table without also rebuilding the buffer — that is, a
+    full re-parse and re-render of the note. Mutating the existing tags
+    restyles the live buffer instead: GTK repaints the ranges they cover,
+    the buffer's text is untouched, and the reader keeps their scroll
+    position.
+
+    Only foregrounds live on the tags. The block tints, hairline rules
+    and the sheet are painted by ``ArticleTextView`` from
+    :func:`build_wash_specs` / :func:`build_sheet_wash`, which take the
+    same palette, so the caller re-installs those alongside this call.
+
+    Raises :class:`LookupError` if ``table`` is missing a tag the palette
+    addresses — i.e. if it was not built by :func:`build_tag_table`.
+    That is a wiring bug and deserves to fail loudly.
+    """
+    _set_foreground(table, TagName.LINK, palette.link_foreground)
+    _set_foreground(table, TagName.METADATA, palette.metadata_foreground)
+    for kind in AdmonitionKind:
+        _set_foreground(
+            table,
+            _ADMONITION_KIND_TAG_NAMES[kind],
+            palette.admonition_kind_foregrounds[kind],
+        )
+    for line in ErrorNoticeLine:
+        _set_foreground(
+            table,
+            _ERROR_NOTICE_TAG_NAMES[line],
+            palette.error_notice_foregrounds[line],
+        )
+
+
+def _set_foreground(
+    table: Gtk.TextTagTable, name: TagName, foreground: str,
+) -> None:
+    """Set one tag's ``foreground``, looked up by name on ``table``."""
+    tag = table.lookup(name.value)
+    if tag is None:
+        raise LookupError(f"tag {name.value!r} missing from tag table")
+    tag.set_property("foreground", foreground)
+
+
+def build_wash_specs(palette: Palette) -> dict[TagName, WashSpec]:
     """Return the per-tag wash spec the article TextView paints.
 
     Keys are :class:`TagName` values for every paragraph tag that
     carries a wash. Tag names that *don't* paint a wash (e.g.
     :data:`TagName.BLOCKQUOTE_ATTRIBUTION`) are absent on purpose —
     the painter must paint nothing behind them.
+
+    The tints come from ``palette``; the box insets are structural and
+    live here. A theme change therefore rebuilds this map and re-installs
+    it on the view, which is why the map is returned fresh rather than
+    cached.
 
     The admonition label and body for the same kind share an
     *identical* :class:`WashSpec` instance by design so they read as
@@ -788,42 +812,42 @@ def build_wash_specs() -> dict[TagName, WashSpec]:
     and the user sees one block.
     """
     specs: dict[TagName, WashSpec] = {}
-    for kind, tint in _ADMONITION_TINTS.items():
+    for kind in AdmonitionKind:
         spec = WashSpec(
-            tint=tint,
+            tint=palette.admonition_tints[kind],
             box_left_inset_px=_ADMONITION_HMARGIN_PX,
             box_right_inset_px=_ADMONITION_HMARGIN_PX,
         )
         specs[_ADMONITION_LABEL_TAG_NAMES[kind]] = spec
         specs[_ADMONITION_BODY_TAG_NAMES[kind]] = spec
     specs[TagName.BLOCKQUOTE_BODY] = WashSpec(
-        tint=_BLOCKQUOTE_BAR_TINT,
+        tint=palette.blockquote_bar_tint,
         box_left_inset_px=_BLOCKQUOTE_HMARGIN_PX,
         box_right_inset_px=_BLOCKQUOTE_RIGHT_MARGIN_PX,
         shape=WashShape.LEFT_BAR,
         bar_width_px=_BLOCKQUOTE_BAR_WIDTH_PX,
     )
     specs[TagName.CODE_BLOCK] = WashSpec(
-        tint=_CODE_BLOCK_TINT,
+        tint=palette.code_block_tint,
         box_left_inset_px=_CODE_BLOCK_HMARGIN_PX,
         box_right_inset_px=_CODE_BLOCK_HMARGIN_PX,
     )
     # Table header: a tint band (full fill) spanning the body column.
     specs[TagName.TABLE_HEADER] = WashSpec(
-        tint=_TABLE_HEADER_TINT,
+        tint=palette.table_header_tint,
         box_left_inset_px=_TABLE_BOX_INSET_PX,
         box_right_inset_px=_TABLE_BOX_INSET_PX,
     )
     # Table data row: a 1-px rule at the line's bottom (hairline), the
     # same painter shape the metadata divider uses.
     specs[TagName.TABLE_ROW] = WashSpec(
-        tint=_TABLE_RULE_TINT,
+        tint=palette.table_rule_tint,
         box_left_inset_px=_TABLE_BOX_INSET_PX,
         box_right_inset_px=_TABLE_BOX_INSET_PX,
         shape=WashShape.HAIRLINE,
     )
     specs[TagName.METADATA] = WashSpec(
-        tint=_METADATA_RULE_TINT,
+        tint=palette.metadata_rule_tint,
         box_left_inset_px=_METADATA_RULE_INSET_PX,
         box_right_inset_px=_METADATA_RULE_INSET_PX,
         shape=WashShape.HAIRLINE,
@@ -831,15 +855,15 @@ def build_wash_specs() -> dict[TagName, WashSpec]:
     return specs
 
 
-def build_sheet_wash() -> SheetWash:
-    """Return the note sheet colour.
+def build_sheet_wash(palette: Palette) -> SheetWash:
+    """Return the note sheet colour for ``palette``.
 
     The sheet is painted by the article text view behind the content
     (the view's CSS background is transparent so the desk shows below).
-    Sourced here so every rendered-view colour lives in this one module,
-    the same way :func:`build_wash_specs` owns the paragraph washes.
+    It is opaque in every palette: it stands in for the page background,
+    and the palette's foregrounds are tuned against it.
     """
-    return SheetWash(tint=_SHEET_BACKGROUND)
+    return SheetWash(tint=palette.sheet)
 
 
 def _make_inline_tag(  # pylint: disable=too-many-arguments
@@ -850,21 +874,25 @@ def _make_inline_tag(  # pylint: disable=too-many-arguments
     strikethrough: bool | None = None,
     underline: Pango.Underline | None = None,
     family: str | None = None,
-    foreground: str | None = None,
 ) -> Gtk.TextTag:
     """Build a single inline-style tag with the requested visual rule.
 
     Only the property the caller passes is set; the rest are left at
     their inherited defaults so multiple tags on the same range
     compose without one tag erasing another's contribution. This is
-    why ``LINK`` (foreground + underline) and ``UNDERLINE`` (just
+    why ``LINK`` (colour + underline) and ``UNDERLINE`` (just
     underline) coexist cleanly when both apply to the same range.
+
+    There is no ``foreground`` parameter: colour is
+    :func:`apply_palette`'s alone to write, so the tags this builds
+    (``LINK`` and the admonition kind labels among them) get their
+    structure here and their colour there.
 
     The argument list grows one element each time we add an inline
     construct, which is unavoidable: each is a distinct
     :class:`Gtk.TextTag` property. Refactoring to a single ``props``
     mapping would lose the type-checked keyword surface — and there
-    are only six properties total in the closed AsciiDoc subset, so
+    are only five properties total in the closed AsciiDoc subset, so
     the explicit list stays readable.
     """
     tag = Gtk.TextTag.new(name.value)
@@ -878,8 +906,6 @@ def _make_inline_tag(  # pylint: disable=too-many-arguments
         tag.set_property("underline", underline)
     if family is not None:
         tag.set_property("family", family)
-    if foreground is not None:
-        tag.set_property("foreground", foreground)
     return tag
 
 
@@ -1166,50 +1192,45 @@ def _make_table_row_tag(name: TagName, *, is_header: bool) -> Gtk.TextTag:
 def _make_metadata_tag(name: TagName) -> Gtk.TextTag:
     """Build the metadata-line tag (Created / Modified / tags).
 
-    Carries the *text* appearance only — a dim grey foreground and a
-    slightly reduced scale so the line reads as secondary to the title
-    and body. ``pixels-below-lines`` opens the gap that separates the
-    text from the hairline rule the wash painter draws at the bottom of
-    the line. The line sits in the same column as the body, so it sets
-    no left/right margins — unlike the block-level paragraph tags it
-    is not inset. The rule itself is painted separately by
-    ``ArticleTextView`` in :mod:`ui.note_view` via the ``hairline``
-    :class:`WashSpec` returned for :data:`TagName.METADATA` by
-    :func:`build_wash_specs`.
+    Carries the *non-colour* text appearance: a slightly reduced scale
+    so the line reads as secondary to the title and body, plus
+    ``pixels-below-lines`` to open the gap that separates the text from
+    the hairline rule the wash painter draws at the bottom of the line.
+    The dim foreground is applied by :func:`apply_palette`. The line
+    sits in the same column as the body, so it sets no left/right
+    margins — unlike the block-level paragraph tags it is not inset.
+    The rule itself is painted separately by ``ArticleTextView`` via the
+    ``hairline`` :class:`WashSpec` returned for
+    :data:`TagName.METADATA` by :func:`build_wash_specs`.
     """
     tag = Gtk.TextTag.new(name.value)
-    tag.set_property("foreground", _METADATA_FOREGROUND)
     tag.set_property("scale", _METADATA_SCALE)
     tag.set_property("pixels-below-lines", _METADATA_PIXELS_BELOW_LINES_PX)
     return tag
 
 
 def _make_error_notice_tag(
-    name: TagName,
-    *,
-    foreground: str,
-    scale: float,
-    pixels_above_px: int,
-    weight: Pango.Weight | None = None,
+    name: TagName, *, metrics: _ErrorNoticeMetrics,
 ) -> Gtk.TextTag:
     """Build one centred line of the in-surface parse-error notice.
 
     Each notice line is its own paragraph, so the tag carries both the
-    *paragraph* property (``justification = CENTER``, plus
+    *paragraph* properties (``justification = CENTER``, plus
     ``pixels-above-lines`` for the gap above the line) and the
-    *character* appearance (``foreground`` + ``scale``, and an optional
-    ``weight`` for the headline). The foreground is always explicit
-    because the rendered note sits on an opaque light sheet whatever the
-    OS theme — an inherited theme-default foreground could be invisible.
+    *character* metrics (``scale``, and an optional ``weight`` for the
+    headline). The foreground is applied separately by
+    :func:`apply_palette` — always explicitly, never inherited, because
+    the notice sits on the sheet, whose colour the application chooses
+    rather than the theme.
+
     Unlike the block-level tags these set no margins (the notice sits in
     the body column) and paint no wash, so they never appear in
     :func:`build_wash_specs`.
     """
     tag = Gtk.TextTag.new(name.value)
     tag.set_property("justification", Gtk.Justification.CENTER)
-    tag.set_property("foreground", foreground)
-    tag.set_property("scale", scale)
-    tag.set_property("pixels-above-lines", pixels_above_px)
-    if weight is not None:
-        tag.set_property("weight", weight)
+    tag.set_property("scale", metrics.scale)
+    tag.set_property("pixels-above-lines", metrics.pixels_above_px)
+    if metrics.weight is not None:
+        tag.set_property("weight", metrics.weight)
     return tag

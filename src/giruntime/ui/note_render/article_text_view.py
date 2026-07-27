@@ -19,21 +19,74 @@ Principles & invariants
   the tag table whose :class:`WashSpec` / :class:`SheetWash` it consumes. It
   owns no geometry: the fixed-width column and scrolling belong to
   :class:`giruntime.ui.article_container.ArticleContainer`.
+* **The view decides which colour scheme the note is drawn in**, because it
+  is the widget that knows: :meth:`Gtk.Widget.get_color` reports the
+  foreground the active theme resolved *for this widget*, and its luminance
+  says whether the chrome around the sheet is light or dark. That is a
+  measurement of the outcome, so it is correct however the user got there —
+  the settings portal, ``GTK_THEME``, a ``settings.ini``, a third-party dark
+  theme — with no D-Bus, no gsettings and no libadwaita. Neither
+  ``Gtk.Settings`` probe would do: under ``GTK_THEME=Adwaita:dark`` the theme
+  name still reads ``"Default"`` and ``gtk-application-prefer-dark-theme``
+  still reads :data:`False`.
+* The trigger is :meth:`do_css_changed`, GTK's own "your style changed"
+  hook, so a live theme flip re-themes the note with no polling and no
+  subscription bookkeeping. Because each surface measures itself, a note
+  window and the help window agree by construction rather than by sharing a
+  theme-manager singleton.
+* **The note's default ink is a widget property, not a tag.** Body text
+  and headings set no foreground of their own, so without this they
+  inherit the *theme's* — invisible on the application-painted sheet
+  whenever the two disagree (white ink on the white sheet under a dark
+  theme). The ink is therefore applied as ``color`` on the view's CSS
+  node, from the palette, via a display-wide provider scoped to this
+  widget's style class.
+
+  It was briefly a lowest-priority :class:`Gtk.TextTag` applied across
+  the whole buffer instead. That is *correct* but not *safe*: applying a
+  tag over the entire buffer after the content is inserted invalidates
+  the text layout again, and the first paint that follows uses estimated
+  line heights — so the sheet and the block washes, which are computed
+  from :meth:`Gtk.TextView.get_line_yrange`, were painted a block short
+  and stayed that way until some unrelated redraw (a mouse move) fixed
+  them. A CSS colour changes no layout at all and cannot reintroduce it.
+* Re-theming **never re-renders**. It re-colours the existing tags in place
+  (:func:`tag_table.apply_palette`), re-installs the wash map and the sheet,
+  and queues a draw — the buffer's text is untouched, so there is no
+  re-parse and the reader keeps their scroll position.
 """
 from __future__ import annotations
 
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 
 from gi.repository import Gdk, Graphene, Gtk
 
-from enums import WashShape
+from enums import ColorScheme, WashShape
+from giruntime.ui.note_render.palette import (
+    Palette,
+    palette_for,
+    scheme_for_foreground,
+)
 from giruntime.ui.note_render.tag_table import (
     SheetWash,
     WashSpec,
+    apply_palette,
     build_sheet_wash,
     build_wash_specs,
 )
+
+
+type ColorSchemeProbe = Callable[[], ColorScheme]
+""""Which colour scheme should the note be drawn in, right now?"
+
+Injected so the re-theme path is testable without depending on the
+compositor's theme: production passes
+:meth:`ArticleTextView._scheme_from_style`, which measures the widget's
+own resolved foreground, and tests pass a fake that returns whichever
+scheme the case is about. Follows the same seam pattern as
+``PaneVisibilityPredicate`` in :mod:`giruntime.ui.note_view`.
+"""
 
 
 _ARTICLE_TEXT_VIEW_CSS_CLASS: str = "article-text-view"
@@ -46,6 +99,56 @@ painted the view's background it would fill the whole viewport and hide
 that. The class name is stable across releases — the stylesheet that
 targets it ships with the application.
 """
+
+
+_ink_provider: Gtk.CssProvider | None = None
+"""The display-wide provider carrying the note's default ink.
+
+Module-level because a :class:`Gtk.CssProvider` is added to a *display*,
+not a widget — per-widget providers need :class:`Gtk.StyleContext`,
+deprecated since GTK 4.10. One provider for every article surface is
+also what we want: the note view and the help window are always in the
+same colour scheme, so there is nothing per-instance to vary.
+"""
+
+
+def _apply_article_ink(palette: Palette) -> None:
+    """Set the default text colour of every article surface.
+
+    Writes ``color`` on both the widget node and its ``text`` child, for
+    widgets carrying :data:`_ARTICLE_TEXT_VIEW_CSS_CLASS` — so it reaches
+    the article view and nothing else, notably not the source editor,
+    which is also a :class:`Gtk.TextView` subclass and correctly follows
+    the theme. Both nodes are needed: the ``text`` node alone leaves the
+    glyphs black, because the text layout takes its default colour from
+    the *widget's* resolved colour (verified by measuring rendered
+    pixels, not by reading the docs).
+
+    The colour still comes from the palette, so
+    :mod:`giruntime.ui.note_render.palette` remains the single home for
+    it; only the *mechanism* is CSS. A :class:`Gtk.TextTag` foreground
+    beats a CSS colour, so every tag that sets its own — link, metadata,
+    admonition kind labels, the notice lines — still wins on its range.
+
+    Returns silently without a display, the same guard the application's
+    stylesheet loading uses for embedded and test contexts.
+    """
+    global _ink_provider  # pylint: disable=global-statement
+    display = Gdk.Display.get_default()
+    if display is None:
+        return
+    if _ink_provider is None:
+        _ink_provider = Gtk.CssProvider.new()
+        Gtk.StyleContext.add_provider_for_display(
+            display,
+            _ink_provider,
+            Gtk.STYLE_PROVIDER_PRIORITY_APPLICATION,
+        )
+    _ink_provider.load_from_string(
+        f".{_ARTICLE_TEXT_VIEW_CSS_CLASS},"
+        f" .{_ARTICLE_TEXT_VIEW_CSS_CLASS} text {{"
+        f" color: {palette.body_foreground}; }}"
+    )
 
 
 _HAIRLINE_THICKNESS_PX: int = 1
@@ -130,6 +233,9 @@ class ArticleTextView(Gtk.TextView):
     _sheet_wash: SheetWash
     _top_gap_px: int
     _end_gap_px: int
+    _color_scheme: ColorScheme
+    _scheme_probe: ColorSchemeProbe
+    _tag_table: Gtk.TextTagTable | None
 
     def __init__(self) -> None:
         super().__init__()
@@ -144,10 +250,6 @@ class ArticleTextView(Gtk.TextView):
         # the subclass directly get a plain :class:`Gtk.TextView` of
         # behaviour, which matches the inert pre-install state.
         self._wash_specs_by_tag = {}
-        # The sheet colour is static (no per-note parameters), so it is
-        # resolved once at construction from the single rendered-view
-        # colour source.
-        self._sheet_wash = build_sheet_wash()
         # The desk bands the sheet does not cover, above and below the
         # content. Both zero until NoteView sets them alongside the
         # margins; at zero the sheet covers the whole top/bottom margin —
@@ -155,6 +257,23 @@ class ArticleTextView(Gtk.TextView):
         # relies on. They are set from the same constant so they match.
         self._top_gap_px = 0
         self._end_gap_px = 0
+        # The scheme starts LIGHT and is corrected by the first
+        # ``css_changed``. It cannot be measured here: an unrealised
+        # widget has no resolved style yet, and guessing from a
+        # not-yet-valid colour would mean building the tag table in one
+        # palette and immediately re-colouring it in another.
+        self._color_scheme = ColorScheme.LIGHT
+        # The sheet colour has no per-note parameters, so it is resolved
+        # from the current palette here and again on every scheme change
+        # (see :meth:`_sync_color_scheme`). It is the one palette value
+        # kept in a field: :meth:`do_snapshot` reads it every frame.
+        self._sheet_wash = build_sheet_wash(self.palette())
+        _apply_article_ink(self.palette())
+        self._scheme_probe = self._scheme_from_style
+        # Set by :meth:`install_wash_specs_from_table`. Until then the
+        # view has no table to re-colour, so a theme change is a no-op
+        # rather than a reach into GTK's default buffer.
+        self._tag_table = None
 
     def install_wash_specs(
         self, specs_by_tag: Mapping[Gtk.TextTag, WashSpec],
@@ -184,13 +303,118 @@ class ArticleTextView(Gtk.TextView):
         tag name; every key in :func:`build_wash_specs` is registered by
         :func:`build_tag_table`, so the lookups succeed — the defensive
         filter merely keeps the type narrow.
+
+        The tints come from the view's *current* palette, and the table
+        is retained so a later theme change can re-colour that same
+        table and re-install the map (see :meth:`do_css_changed`) —
+        which is why this is the seam both consumers already share.
         """
+        self._tag_table = tag_table
         specs_by_tag: dict[Gtk.TextTag, WashSpec] = {}
-        for tag_name, spec in build_wash_specs().items():
+        for tag_name, spec in build_wash_specs(self.palette()).items():
             tag = tag_table.lookup(tag_name.value)
             if tag is not None:
                 specs_by_tag[tag] = spec
         self.install_wash_specs(specs_by_tag)
+
+    def install_scheme_probe(self, probe: ColorSchemeProbe) -> None:
+        """Replace how the view decides its colour scheme, and re-theme.
+
+        The test seam for the whole dark-mode path: production leaves
+        the default (measure the widget's own resolved foreground),
+        while a test installs a fake returning a fixed scheme and gets a
+        deterministic re-theme without a themed compositor. Applying
+        immediately — rather than waiting for the next style change —
+        is what makes it usable as an arrange step.
+        """
+        self._scheme_probe = probe
+        self._sync_color_scheme()
+
+    def color_scheme(self) -> ColorScheme:
+        """Return the colour scheme this view is currently drawn in."""
+        return self._color_scheme
+
+    def palette(self) -> Palette:
+        """Return the palette this view is currently drawn in.
+
+        Derived from the scheme rather than stored beside it: two fields
+        that must agree are two fields that can drift, and the lookup is
+        a dict access.
+
+        :func:`giruntime.ui.note_view.build_article_surface` reads this
+        to build the tag table in the same palette the view will paint
+        its sheet and washes in, so the surface starts self-consistent
+        rather than relying on the first style change to align it.
+        """
+        return palette_for(self._color_scheme)
+
+    def do_css_changed(  # pylint: disable=arguments-differ
+        self, change: Gtk.CssStyleChange,
+    ) -> None:
+        """Re-theme the note when the widget's resolved style changes.
+
+        GTK's own hook for "your CSS style just changed", which fires on
+        a theme switch — and also on ordinary state changes (hover,
+        focus), so this must stay cheap and idempotent.
+        :meth:`_sync_color_scheme` returns immediately when the scheme
+        is unchanged, which is the overwhelmingly common case.
+
+        The parent implementation runs first so the widget's own style
+        bookkeeping is done before the colour is read back.
+        """
+        Gtk.TextView.do_css_changed(self, change)
+        self._sync_color_scheme()
+
+    def _scheme_from_style(self) -> ColorScheme:
+        """Classify the theme's resolved foreground into a colour scheme.
+
+        The default probe. :meth:`Gtk.Widget.get_color` gives the colour
+        the active theme resolved for a widget; its luminance says
+        whether the surrounding chrome is light or dark (see
+        :func:`giruntime.ui.note_render.palette.scheme_for_foreground`).
+
+        It reads the **parent**, not ``self``, and that is essential
+        rather than incidental: this view's own colour is the palette's
+        ink, written by :func:`_apply_article_ink`. Measuring it would
+        feed the view its own output — it would read dark ink, conclude
+        "light theme", and could never leave whichever scheme it was
+        already in. The parent (the article container) carries no such
+        override, so its colour is the theme's answer.
+
+        Falls back to the current scheme while unparented, which is the
+        construction window before the container adopts the view; the
+        first style change after that corrects it.
+        """
+        parent = self.get_parent()
+        if parent is None:
+            return self._color_scheme
+        color = parent.get_color()
+        return scheme_for_foreground(color.red, color.green, color.blue)
+
+    def _sync_color_scheme(self) -> None:
+        """Adopt the probed colour scheme, re-theming if it changed.
+
+        The whole re-theme, and deliberately short: re-colour the tags
+        in place, rebuild and re-install the wash map, swap the sheet,
+        queue a draw. No text is touched, so no re-parse and no re-render
+        happen and the reader's scroll position survives.
+
+        Returns early when the scheme is unchanged (every hover and
+        focus change lands here) or when no tag table has been installed
+        yet (a bare view built by a test, or the window between
+        construction and :meth:`install_wash_specs_from_table`).
+        """
+        scheme = self._scheme_probe()
+        if scheme is self._color_scheme:
+            return
+        self._color_scheme = scheme
+        palette = self.palette()
+        self._sheet_wash = build_sheet_wash(palette)
+        _apply_article_ink(palette)
+        if self._tag_table is not None:
+            apply_palette(self._tag_table, palette)
+            self.install_wash_specs_from_table(self._tag_table)
+        self.queue_draw()
 
     def set_top_gap_px(self, top_gap_px: int) -> None:
         """Set the desk band (in px) reserved above the painted sheet.

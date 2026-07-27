@@ -147,6 +147,7 @@ from giruntime.controllers.note_list_store import NoteListStore
 from giruntime.ui import _gresource
 from giruntime.ui.help_window import HelpWindow
 from giruntime.ui.main_window import MainWindow
+from giruntime.ui.system_color_scheme import SystemColorSchemeWatcher
 from models.session_state import SessionState
 from storage.attachment_store import AttachmentStore
 from storage.database import Database
@@ -163,6 +164,16 @@ application's resource bundles. The string is fixed across releases —
 changing it would orphan any per-application user settings the OS may
 record under it.
 """
+
+_PREFER_DARK_THEME_PROPERTY: str = "gtk-application-prefer-dark-theme"
+"""The ``Gtk.Settings`` property that selects a theme's dark variant.
+
+Process-local: it styles this application only. libadwaita deprecates it
+in favour of ``AdwStyleManager``, but this is a plain GTK 4 application
+and it is the supported lever here — a port to libadwaita would replace
+this line, not merely drop it.
+"""
+
 
 
 _APPLICATION_CSS_PACKAGE: str = "giruntime.ui.css"
@@ -276,6 +287,7 @@ class NotesApplication(  # pylint: disable=too-many-instance-attributes
     _help_window: HelpWindow | None
     _session_state_store: SessionStateStore | None
     _main_window: MainWindow | None
+    _color_scheme_watcher: SystemColorSchemeWatcher | None
 
     def __init__(self) -> None:
         super().__init__(
@@ -291,6 +303,7 @@ class NotesApplication(  # pylint: disable=too-many-instance-attributes
         self._help_window = None
         self._session_state_store = None
         self._main_window = None
+        self._color_scheme_watcher = None
 
     def do_activate(self) -> None:  # pylint: disable=arguments-differ
         """Build the world if it does not yet exist, then present a
@@ -304,6 +317,8 @@ class NotesApplication(  # pylint: disable=too-many-instance-attributes
         """
         if self._database is None:
             self._initialise_runtime()
+        if self._color_scheme_watcher is None:
+            self._color_scheme_watcher = _start_color_scheme_watcher()
 
         # Reuse the existing window when one is already open
         # (subsequent activations) — otherwise build the first one.
@@ -743,3 +758,40 @@ def _register_application_icon_resources() -> None:
     icon_theme = Gtk.IconTheme.get_for_display(display)
     icon_theme.add_resource_path(_gresource.resource_path(GResourceSubtree.ICONS))
     Gtk.Window.set_default_icon_name(_APPLICATION_ID)
+
+
+def _start_color_scheme_watcher() -> SystemColorSchemeWatcher | None:
+    """Follow the desktop's dark/light preference, if GTK can be told.
+
+    Plain GTK 4 does not act on the cross-desktop ``color-scheme``
+    preference — that is libadwaita's job, and this application is not a
+    libadwaita application. So the preference is read from the XDG
+    portal here and pushed into
+    ``Gtk.Settings:gtk-application-prefer-dark-theme``, which restyles
+    the chrome; the article view then notices its own foreground change
+    and re-themes the note (see
+    :mod:`giruntime.ui.note_render.article_text_view`). Without this,
+    switching GNOME to Dark Style left the whole application light.
+
+    The write is **process-local**: it styles this application, and
+    touches neither the user's settings nor any other process.
+
+    Returns :data:`None` when there is no :class:`Gtk.Settings` to write
+    to — the same no-display guard :func:`_load_application_css` uses.
+    The watcher is returned rather than discarded because it owns the
+    D-Bus subscription that keeps the preference live; dropping it would
+    let the proxy be collected and freeze the app at whatever the
+    preference was on startup.
+    """
+    settings = Gtk.Settings.get_default()
+    if settings is None:
+        return None
+
+    def apply_prefer_dark(prefer_dark: bool) -> None:
+        settings.set_property(
+            _PREFER_DARK_THEME_PROPERTY, prefer_dark,
+        )
+
+    watcher = SystemColorSchemeWatcher(apply_prefer_dark)
+    watcher.start()
+    return watcher

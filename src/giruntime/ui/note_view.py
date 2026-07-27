@@ -469,8 +469,10 @@ def build_article_surface() -> ArticleSurface:
     2. the body-font measurers (M-width + line height) off that view's
        Pango context — :func:`_build_font_measurers` is the single seam
        tests stub;
-    3. the shared tag table, parameterised by the measured M-width, and a
-       buffer on it;
+    3. the shared tag table, parameterised by the measured M-width and by
+       the view's own palette (the view owns the colour-scheme decision,
+       so asking it here is what starts the surface self-consistent), and
+       a buffer on it;
     4. the block-tint wash map, installed via the one shared seam
        :meth:`ArticleTextView.install_wash_specs_from_table`;
     5. the fixed-width :class:`ArticleContainer` wrapping the view, with
@@ -479,6 +481,12 @@ def build_article_surface() -> ArticleSurface:
     Returns the bundle; the caller owns the renderer (its image resolver
     is caller-specific) and parents :attr:`ArticleSurface.container` into
     its own scroller.
+
+    Nothing here has to handle a *later* theme change: the view re-colours
+    the tag table it was given and re-installs its own washes when the
+    style changes (see :meth:`ArticleTextView.do_css_changed`), so both
+    callers of this factory get dark-mode support without knowing about
+    it.
     """
     text_view = ArticleTextView()
     text_view.set_editable(False)
@@ -491,7 +499,10 @@ def build_article_surface() -> ArticleSurface:
         text_view,
     )
 
-    tag_table = build_tag_table(char_width_px=char_width_measurer())
+    tag_table = build_tag_table(
+        char_width_px=char_width_measurer(),
+        palette=text_view.palette(),
+    )
     buffer = Gtk.TextBuffer.new(tag_table)
     text_view.set_buffer(buffer)
     text_view.install_wash_specs_from_table(tag_table)
