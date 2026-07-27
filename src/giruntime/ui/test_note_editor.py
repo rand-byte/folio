@@ -15,9 +15,10 @@ from collections.abc import Callable
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
-from gi.repository import Gdk, Gtk, GtkSource
+from gi.repository import Gdk, GLib, Gtk, GtkSource
 
 from enums import (
+    ColorScheme,
     AttachmentExportFailureReason,
     AttachmentRejectionReason,
     GResourceSubtree,
@@ -33,6 +34,8 @@ from giruntime.ui.note_editor import (
     AUTOSAVE_DEBOUNCE_MS,
     LANGUAGE_ID,
     NoteEditor,
+    _STYLE_SCHEME_IDS,
+    _style_scheme_for,
     _configure_search_path,
     buffer_text,
     load_asciidoc_language,
@@ -626,3 +629,88 @@ class NoteEditorAutosaveTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+def _pump_main_context(iterations: int = 40) -> None:
+    """Let GTK deliver pending style changes.
+
+    ``css_changed`` is dispatched through the main context, so a theme
+    flip is not visible to the widget on the very next line — the
+    scheme assertion has to run after GTK has had a turn.
+    """
+    context = GLib.MainContext.default()
+    for _ in range(iterations):
+        if not context.pending():
+            break
+        context.iteration(False)
+
+
+class StyleSchemeLookupTests(unittest.TestCase):
+    """The light/dark scheme pairing, resolved without a display."""
+
+    def test_light_resolves_to_classic(self) -> None:
+        scheme = _style_scheme_for(ColorScheme.LIGHT)
+        assert scheme is not None
+        self.assertEqual(scheme.get_id(), "classic")
+
+    def test_dark_resolves_to_classic_dark(self) -> None:
+        scheme = _style_scheme_for(ColorScheme.DARK)
+        assert scheme is not None
+        self.assertEqual(scheme.get_id(), "classic-dark")
+
+    def test_every_color_scheme_has_a_style_scheme(self) -> None:
+        # A ColorScheme member added without a pairing would leave the
+        # editor on whichever scheme it happened to have.
+        for color_scheme in ColorScheme:
+            with self.subTest(color_scheme=color_scheme):
+                self.assertIsNotNone(_style_scheme_for(color_scheme))
+
+    def test_light_pairing_is_gtksourceview_s_own_default(self) -> None:
+        # The light editor must be untouched by this pairing: 'classic'
+        # is what a fresh buffer is given anyway.
+        default = GtkSource.Buffer.new(None).get_style_scheme()
+        assert default is not None
+        self.assertEqual(
+            default.get_id(), _STYLE_SCHEME_IDS[ColorScheme.LIGHT],
+        )
+
+
+@unittest.skipUnless(_display_available(), "no GDK display")
+class StyleSchemeFollowsThemeTests(unittest.TestCase):
+    """The editor re-schemes when the theme flips.
+
+    GtkSourceView does no dark-mode switching of its own — a fresh
+    buffer gets 'classic' and keeps it — so under a dark theme the
+    editor kept light syntax colours and a bright current-line band
+    across the cursor's row. These pin the correction.
+    """
+
+    def setUp(self) -> None:
+        self.settings = Gtk.Settings.get_default()
+        assert self.settings is not None
+        self.addCleanup(
+            self.settings.set_property,
+            "gtk-application-prefer-dark-theme",
+            self.settings.get_property("gtk-application-prefer-dark-theme"),
+        )
+
+    def test_editor_starts_on_the_light_scheme(self) -> None:
+        editor, _, _, _, _ = _build_editor()
+        scheme = editor._buffer.get_style_scheme()
+        assert scheme is not None
+        self.assertEqual(scheme.get_id(), "classic")
+
+    def test_a_dark_theme_switches_the_editor_scheme(self) -> None:
+        editor, _, _, _, _ = _build_editor()
+        window = Gtk.Window()
+        window.set_child(editor)
+        window.present()
+        _pump_main_context()
+        self.settings.set_property(
+            "gtk-application-prefer-dark-theme", True,
+        )
+        _pump_main_context()
+        scheme = editor._buffer.get_style_scheme()
+        window.destroy()
+        assert scheme is not None
+        self.assertEqual(scheme.get_id(), "classic-dark")
