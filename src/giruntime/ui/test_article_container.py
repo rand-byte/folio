@@ -934,6 +934,26 @@ class ArticleContainerScrollableTests(unittest.TestCase):
         self.assertEqual(hadj.get_upper(), float(outer))
         self.assertEqual(hadj.get_page_size(), float(viewport))
 
+    def test_wide_allocation_does_not_publish_a_sub_page_extent(
+        self,
+    ) -> None:
+        # Above the column width there is nothing to scroll, so upper
+        # must equal the page rather than drop to the column.
+        # Gtk.ScrolledWindow reads value > upper − page_size as a
+        # horizontal overshoot and paints the theme's overshoot glow
+        # over the desk for as long as that holds.
+        container, _child = self._capturing()
+        outer = container.outer_column_width()
+        hadj = Gtk.Adjustment()
+        container.set_property("hadjustment", hadj)
+        viewport = outer + 200
+
+        container.do_size_allocate(viewport, 600, -1)
+
+        self.assertEqual(hadj.get_lower(), 0.0)
+        self.assertEqual(hadj.get_upper(), float(viewport))
+        self.assertEqual(hadj.get_page_size(), float(viewport))
+
     def test_horizontal_scroll_offsets_child_by_negative_value(self) -> None:
         # A scroll within range translates the column left by the scroll
         # value — the container, not the text view, does the panning.

@@ -127,8 +127,9 @@ class ArticleContainer(Gtk.Widget, Gtk.Scrollable):
       text view can do by scrolling its own (wrapped-to-width) content.
       So the container keeps ownership of the :attr:`hadjustment`: in
       :meth:`do_size_allocate` it configures the adjustment
-      (``upper = outer column width``, ``page_size = allocated width``,
-      value clamped to ``column − viewport``), allocates the child at the
+      (``upper = max(outer column width, allocated width)``,
+      ``page_size = allocated width``, value clamped to
+      ``column − viewport``), allocates the child at the
       full column width, and translates it horizontally — centring it
       when the viewport is wider than the column and offsetting it by
       ``−hadjustment.value`` when narrower. Its overflow is ``HIDDEN`` so
@@ -508,13 +509,29 @@ class ArticleContainer(Gtk.Widget, Gtk.Scrollable):
           scrollbar pans across the column.
 
         The container owns the horizontal axis, so it configures its
-        :attr:`hadjustment` here: ``upper`` is the column width, the page
-        is the viewport ``width``, and the value is clamped to
-        ``column − viewport`` so a stale scroll position from a wider
-        layout cannot leave the column pinned off-screen. ``HIDDEN``
-        overflow (set in ``__init__``) clips the column to the viewport.
-        The vertical axis is untouched here — the child owns it as the
-        forwarded vertical scrollport.
+        :attr:`hadjustment` here: the page is the viewport ``width``,
+        ``upper`` is the column width but **never less than that page**,
+        and the value is clamped to ``column − viewport`` so a stale
+        scroll position from a wider layout cannot leave the column
+        pinned off-screen. ``HIDDEN`` overflow (set in ``__init__``)
+        clips the column to the viewport. The vertical axis is untouched
+        here — the child owns it as the forwarded vertical scrollport.
+
+        The ``max`` in ``upper`` is not cosmetic. A scrollable's extent
+        is the pair ``(upper, page_size)``, and ``Gtk.ScrolledWindow``
+        reads ``value > upper − page_size`` as a horizontal **overshoot**
+        — the elastic state a kinetic scroll enters past the end. A bare
+        ``upper = column`` makes that difference negative for every
+        viewport wider than the column, i.e. the common case, so the
+        scrolled window sits in a permanent ``width − column`` overshoot
+        and the theme paints its ``overshoot.right`` node (a
+        ``currentColor`` radial gradient) over the right half of the
+        desk for as long as the pane is wide. Reporting
+        ``upper == page_size`` instead says "nothing to scroll", which is
+        what a viewport wider than its content means, and matches how the
+        vertical axis already behaves (the text view writes an ``upper``
+        of at least its page, so a short note draws no glow below the
+        sheet).
         """
         if self._child is None:
             return
@@ -526,7 +543,7 @@ class ArticleContainer(Gtk.Widget, Gtk.Scrollable):
             adjustment.configure(
                 value,
                 0.0,
-                float(outer),
+                float(max(outer, width)),
                 width * _HSCROLL_STEP_FRACTION,
                 width * _HSCROLL_PAGE_FRACTION,
                 float(width),
