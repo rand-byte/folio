@@ -18,7 +18,7 @@ from enum import Enum, auto
 from pathlib import Path
 from unittest.mock import patch
 
-from gi.repository import GLib, Gdk, Gtk
+from gi.repository import GLib, Gtk
 
 from giruntime.ui._file_picker import (
     FileDialogOpener,
@@ -28,14 +28,7 @@ from giruntime.ui._file_picker import (
     default_file_dialog_opener,
     default_file_save_dialog_opener,
 )
-
-
-def _display_available() -> bool:
-    """True iff a GDK display can be opened — required for any
-    :class:`Gtk.FileDialog` construction.
-    """
-    Gtk.init_check()
-    return Gdk.Display.get_default() is not None
+from giruntime.ui.test_display_guard import display_available
 
 
 # ---------------------------------------------------------------------------
@@ -215,7 +208,7 @@ def _run_opener_with_probe() -> tuple[_DialogProbe, list[Path | None]]:
     return probe, results
 
 
-@unittest.skipUnless(_display_available(), "no GDK display")
+@unittest.skipUnless(display_available(), "no GDK display")
 class DefaultFileDialogOpenerConfigurationTests(unittest.TestCase):
     """The opener configures the dialog with the right metadata
     before delegating to ``open``.
@@ -242,7 +235,7 @@ class DefaultFileDialogOpenerConfigurationTests(unittest.TestCase):
         self.assertEqual(len(probe.open_calls), 1)
 
 
-@unittest.skipUnless(_display_available(), "no GDK display")
+@unittest.skipUnless(display_available(), "no GDK display")
 class DefaultFileDialogOpenerCallbackTests(unittest.TestCase):
     """Each terminal branch of the post-pick callback flow."""
 
@@ -366,7 +359,7 @@ class FileSaveDialogOpenerTypeAliasTests(unittest.TestCase):
         self.assertIs(opener, default_file_save_dialog_opener)
 
 
-@unittest.skipUnless(_display_available(), "no GDK display")
+@unittest.skipUnless(display_available(), "no GDK display")
 class DefaultFileSaveDialogOpenerConfigurationTests(unittest.TestCase):
     def test_dialog_title_is_the_save_title(self) -> None:
         probe, _ = _run_save_opener_with_probe()
@@ -389,7 +382,7 @@ class DefaultFileSaveDialogOpenerConfigurationTests(unittest.TestCase):
         self.assertIsNone(probe.save_calls[0][1])
 
 
-@unittest.skipUnless(_display_available(), "no GDK display")
+@unittest.skipUnless(display_available(), "no GDK display")
 class DefaultFileSaveDialogOpenerResultTests(unittest.TestCase):
     """The three "no path" outcomes all forward :data:`None`."""
 

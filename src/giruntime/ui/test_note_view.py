@@ -13,7 +13,7 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 from unittest import mock
 
-from gi.repository import Gdk, GLib, Gtk
+from gi.repository import GLib, Gtk
 
 from config.defaults import (
     ARTICLE_BOTTOM_MARGIN_LINES,
@@ -44,18 +44,13 @@ from giruntime.ui.note_view import (
     _placeholder_image_bytes,
     build_article_surface,
 )
+from giruntime.ui.test_display_guard import display_available
 from models.attachment import Attachment
 from models.note import Note
 from storage.protocols import AttachmentExportFailed
 
 
 _FIXED_NOW: datetime = datetime(2026, 4, 28, 12, 0, 0, tzinfo=UTC)
-
-
-def _display_available() -> bool:
-    """True iff a GDK display can be opened — required for widget construction."""
-    Gtk.init_check()
-    return Gdk.Display.get_default() is not None
 
 
 def _fixed_measurer(value: int) -> CharWidthMeasurer:
@@ -302,7 +297,7 @@ class PlaceholderImageBytesTests(unittest.TestCase):
         )
 
 
-@unittest.skipUnless(_display_available(), "no GDK display")
+@unittest.skipUnless(display_available(), "no GDK display")
 class NoteViewSmokeTests(unittest.TestCase):
     """Per §10: smoke-test only — ``NoteView`` constructs and reacts to
     selection changes through :class:`AppState`. No interaction tests.
@@ -386,7 +381,7 @@ class NoteViewSmokeTests(unittest.TestCase):
         )
 
 
-@unittest.skipUnless(_display_available(), "no GDK display")
+@unittest.skipUnless(display_available(), "no GDK display")
 class NoteViewHiddenPaneRerenderTests(unittest.TestCase):
     """§2.2: the store-driven (``items-changed``) re-render is deferred
     while the pane is hidden and performed exactly once on reveal; the
@@ -621,7 +616,7 @@ _PNG_FIXTURE: bytes = bytes.fromhex(
 )
 
 
-@unittest.skipUnless(_display_available(), "no GDK display")
+@unittest.skipUnless(display_available(), "no GDK display")
 class NoteViewImageResolverTests(unittest.TestCase):
     """Pin the wiring between :class:`NoteView` and the injected
     :class:`AttachmentStoreProtocol`. The resolver is the
@@ -740,7 +735,7 @@ class NoteViewImageResolverTests(unittest.TestCase):
         self.assertEqual(view.image_bytes_resolver("photo.png"), b"")
 
 
-@unittest.skipUnless(_display_available(), "no GDK display")
+@unittest.skipUnless(display_available(), "no GDK display")
 class NoteViewAttachmentSmokeTests(unittest.TestCase):
     """Construction smoke: ``NoteView`` accepts an ``attachments``
     parameter and renders cleanly with one wired."""
@@ -770,7 +765,7 @@ class NoteViewAttachmentSmokeTests(unittest.TestCase):
         self.assertEqual(view.image_bytes_resolver("any.png"), b"")
 
 
-@unittest.skipUnless(_display_available(), "no GDK display")
+@unittest.skipUnless(display_available(), "no GDK display")
 class NoteViewMarginWiringTests(unittest.TestCase):
     """Pin the four breathing-space margins on the rendered-view
     ``Gtk.TextView``.
@@ -878,7 +873,7 @@ class NoteViewMarginWiringTests(unittest.TestCase):
         self.assertEqual(tv_large.get_bottom_margin(), 2 * tv_small.get_bottom_margin())
 
 
-@unittest.skipUnless(_display_available(), "no GDK display")
+@unittest.skipUnless(display_available(), "no GDK display")
 class NoteViewPreferredColumnWidthTests(unittest.TestCase):
     """Pin :meth:`NoteView.preferred_column_width_px`.
 
@@ -919,7 +914,7 @@ class NoteViewPreferredColumnWidthTests(unittest.TestCase):
         )
 
 
-@unittest.skipUnless(_display_available(), "no GDK display")
+@unittest.skipUnless(display_available(), "no GDK display")
 class NoteViewRendererWiringTests(unittest.TestCase):
     """The renderer must be fed the *text* column width — not the
     outer (padded) width — so tables and images continue to lay out
@@ -968,7 +963,7 @@ class NoteViewRendererWiringTests(unittest.TestCase):
                 )
 
 
-@unittest.skipUnless(_display_available(), "no GDK display")
+@unittest.skipUnless(display_available(), "no GDK display")
 class NoteViewErrorNoticeTests(unittest.TestCase):
     """The in-surface parse-error notice is absent by default, rendered
     into the buffer on parse failure with a kind-specific message, and
@@ -1125,7 +1120,7 @@ class NoteViewErrorNoticeTests(unittest.TestCase):
         self.assertTrue(view.error_notice_visible)
 
 
-@unittest.skipUnless(_display_available(), "no GDK display")
+@unittest.skipUnless(display_available(), "no GDK display")
 class BuildArticleSurfaceTests(unittest.TestCase):
     """The shared article-surface constructor.
 
@@ -1193,7 +1188,7 @@ def _buffer_text(buffer: Gtk.TextBuffer) -> str:
     return text
 
 
-@unittest.skipUnless(_display_available(), "no GDK display")
+@unittest.skipUnless(display_available(), "no GDK display")
 class NoteViewMetadataTests(unittest.TestCase):
     """The metadata line is inserted as plain tagged text directly under
     the title — ``Created … · Modified … · #tag …`` — not as an
@@ -1375,7 +1370,7 @@ class _RecordingExportController:
         return True
 
 
-@unittest.skipUnless(_display_available(), "no GDK display")
+@unittest.skipUnless(display_available(), "no GDK display")
 class NoteViewAttachmentActivationTests(unittest.TestCase):
     """Clicking a save link: resolve → dialog → controller export."""
 
@@ -1481,7 +1476,7 @@ class NoteViewAttachmentActivationTests(unittest.TestCase):
         self.assertEqual(dialog.suggested_names, [])
 
 
-@unittest.skipUnless(_display_available(), "no GDK display")
+@unittest.skipUnless(display_available(), "no GDK display")
 class NoteViewAttachmentListResolverTests(unittest.TestCase):
     """The metadata-only resolver the ``attachments::[]`` macro expands with."""
 
@@ -1540,7 +1535,7 @@ class NoteViewAttachmentListResolverTests(unittest.TestCase):
         self.assertEqual(store.get_bytes_calls, [])
 
 
-@unittest.skipUnless(_display_available(), "no GDK display")
+@unittest.skipUnless(display_available(), "no GDK display")
 class NoteViewAttachmentNamedTests(unittest.TestCase):
     """The image macro and the save link share one lookup."""
 

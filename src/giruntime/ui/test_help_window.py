@@ -22,7 +22,8 @@ from giruntime.ui.note_render.palette import LIGHT_PALETTE
 from giruntime.ui.note_render.tag_table import build_wash_specs
 from giruntime.ui.article_container import ArticleContainer
 from giruntime.ui.note_render.article_text_view import ArticleTextView
-from giruntime.ui.test_main_window import _display_available, _test_application
+from giruntime.ui.test_display_guard import display_available
+from giruntime.ui.test_main_window import _test_application
 from models.parse_error import ParseError
 from system_docs import load_bytes, load_text
 
@@ -213,7 +214,7 @@ def _fake_launcher_factory(url: str) -> UriLauncherProtocol:
 # ---------------------------------------------------------------------------
 
 
-@unittest.skipUnless(_display_available(), "no GDK display")
+@unittest.skipUnless(display_available(), "no GDK display")
 class HelpWindowTests(unittest.TestCase):
     def _build_window(self) -> HelpWindow:
         window = HelpWindow(
@@ -370,7 +371,7 @@ class HelpWindowTests(unittest.TestCase):
 # ---------------------------------------------------------------------------
 
 
-@unittest.skipUnless(_display_available(), "no GDK display")
+@unittest.skipUnless(display_available(), "no GDK display")
 class HelpActionTests(unittest.TestCase):
     """The app registers ``help`` (F1) and reuses one help window.
 
@@ -443,7 +444,7 @@ class _RecordingSaveDialog:
         on_result(self.result)
 
 
-@unittest.skipUnless(_display_available(), "no GDK display")
+@unittest.skipUnless(display_available(), "no GDK display")
 class HelpWindowDemoAttachmentTests(unittest.TestCase):
     """The help's attachment macros work against a static demo list."""
 

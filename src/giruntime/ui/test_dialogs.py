@@ -4,15 +4,10 @@ from __future__ import annotations
 
 import unittest
 
-from gi.repository import Gdk, Gtk
+from gi.repository import Gtk
 
 from giruntime.ui.dialogs import default_confirm_dialog_presenter
-
-
-def _display_available() -> bool:
-    """True iff a GDK display can be opened — required for widget construction."""
-    Gtk.init_check()
-    return Gdk.Display.get_default() is not None
+from giruntime.ui.test_display_guard import display_available
 
 
 # ---------------------------------------------------------------------------
@@ -20,7 +15,7 @@ def _display_available() -> bool:
 # ---------------------------------------------------------------------------
 
 
-@unittest.skipUnless(_display_available(), "no GDK display")
+@unittest.skipUnless(display_available(), "no GDK display")
 class DefaultConfirmDialogPresenterTests(unittest.TestCase):
     """The production presenter constructs without raising.
 

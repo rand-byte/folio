@@ -69,6 +69,14 @@ resource: $(GRES)
 # and cheaply (it is also what makes test_check_version.py visible at all --
 # the `src` pass cannot see it); `src` is the application suite that needs the
 # compositor below.
+#
+# FOLIO_REQUIRE_DISPLAY=1 is what makes the compositor mandatory rather than
+# best-effort. Without it, a weston that failed to start leaves ~90 widget test
+# classes skipping and the run still reports OK -- a green suite that proves
+# nothing about the GTK widgets. Only this recipe sets it, because only this
+# recipe launched the compositor and therefore knows one should exist; a
+# hand-run against your own session leaves it unset and skips as before. See
+# src/giruntime/ui/test_display_guard.py.
 test: $(GRES)
 	python3 -B -m unittest discover -s build-aux -t build-aux -f
 	@export XDG_RUNTIME_DIR=$${XDG_RUNTIME_DIR:-$$(mktemp -d)}; \
@@ -81,6 +89,7 @@ test: $(GRES)
 			sleep 0.1; \
 		done; \
 		WAYLAND_DISPLAY=test_notes GDK_BACKEND=wayland GSK_RENDERER=cairo \
+			FOLIO_REQUIRE_DISPLAY=1 \
 			python3 -B -m unittest discover -s src -t src -f
 
 type:

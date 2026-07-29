@@ -30,6 +30,7 @@ from asciidoc.ast import (
     Underline,
 )
 from asciidoc.inline_parser import parse_inline
+from config.defaults import MAX_INLINE_DEPTH
 from enums import LinkScheme, ParseErrorKind
 from models.parse_error import ParseError
 
@@ -87,6 +88,18 @@ def _link(
         text=tuple(children),
         source_line=line,
     )
+
+
+def _nested_spans(levels: int, body: str = "x") -> str:
+    """Build a source line nesting ``levels`` formatting spans around ``body``.
+
+    Markers alternate between ``*`` and ``_`` because same-marker
+    self-nesting is impossible by construction — an inner ``*`` always
+    closes the outer one. Each marker therefore contributes exactly one
+    nesting level, so ``levels`` is the depth the scanner will reach.
+    """
+    markers = ["*" if index % 2 == 0 else "_" for index in range(levels)]
+    return "".join(markers) + body + "".join(reversed(markers))
 
 
 # ---------------------------------------------------------------------------
@@ -1094,6 +1107,76 @@ class ActivatableNestingTests(unittest.TestCase):
         self.assertEqual(
             ctx.exception.kind,
             ParseErrorKind.BAD_ATTACHMENT_MACRO,
+        )
+
+
+class InlineNestingDepthTests(unittest.TestCase):
+    """Nesting is capped at :data:`MAX_INLINE_DEPTH` enclosing spans.
+
+    Without the cap the scanner recurses one Python frame per level, so
+    a long enough line raised ``RecursionError`` — an exception outside
+    the :class:`ParseError` contract. These tests pin both edges of the
+    cap and the three recursive descents it guards (the span dispatch
+    table, a link's display text, an attachment macro's label).
+    """
+
+    def test_nesting_at_the_cap_is_accepted(self) -> None:
+        nodes = parse_inline(_nested_spans(MAX_INLINE_DEPTH), _LINE)
+        self.assertEqual(len(nodes), 1)
+
+    def test_nesting_past_the_cap_is_rejected(self) -> None:
+        with self.assertRaises(ParseError) as ctx:
+            parse_inline(_nested_spans(MAX_INLINE_DEPTH + 1), _LINE)
+        self.assertEqual(
+            ctx.exception.kind,
+            ParseErrorKind.INLINE_NESTING_TOO_DEEP,
+        )
+        self.assertEqual(ctx.exception.line, _LINE)
+        # Column 0 is the documented "whole line" sentinel.
+        self.assertEqual(ctx.exception.column, 0)
+
+    def test_sibling_spans_do_not_accumulate_depth(self) -> None:
+        """``*a* *b* *c*`` is depth 1, however many siblings there are.
+
+        The guard unwinds each level on the way out, so only *enclosing*
+        spans count. A paragraph full of bold words must never trip a
+        cap meant for nesting.
+        """
+        source = " ".join(["*w*"] * (MAX_INLINE_DEPTH * 4))
+        nodes = parse_inline(source, _LINE)
+        self.assertEqual(len(nodes), MAX_INLINE_DEPTH * 8 - 1)
+
+    def test_monospace_body_costs_no_nesting_level(self) -> None:
+        """Monospace is consumed verbatim, so it never recurses."""
+        source = _nested_spans(MAX_INLINE_DEPTH, body="`code`")
+        nodes = parse_inline(source, _LINE)
+        self.assertEqual(len(nodes), 1)
+
+    def test_link_display_text_counts_towards_the_cap(self) -> None:
+        inner = _nested_spans(MAX_INLINE_DEPTH)
+        with self.assertRaises(ParseError) as ctx:
+            parse_inline(f"link:https://example.com[{inner}]", _LINE)
+        self.assertEqual(
+            ctx.exception.kind,
+            ParseErrorKind.INLINE_NESTING_TOO_DEEP,
+        )
+
+    def test_attachment_label_counts_towards_the_cap(self) -> None:
+        inner = _nested_spans(MAX_INLINE_DEPTH)
+        with self.assertRaises(ParseError) as ctx:
+            parse_inline(f"attachment:notes.pdf[{inner}]", _LINE)
+        self.assertEqual(
+            ctx.exception.kind,
+            ParseErrorKind.INLINE_NESTING_TOO_DEEP,
+        )
+
+    def test_a_rejected_line_does_not_poison_the_next_parse(self) -> None:
+        """Depth is per-call state, not module state."""
+        with self.assertRaises(ParseError):
+            parse_inline(_nested_spans(MAX_INLINE_DEPTH + 1), _LINE)
+        self.assertEqual(
+            parse_inline("*bold*", _LINE),
+            (_bold(_t("bold")),),
         )
 
 

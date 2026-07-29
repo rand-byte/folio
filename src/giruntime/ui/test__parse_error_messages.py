@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import unittest
 
+from config.defaults import MAX_INLINE_DEPTH
 from enums import ParseErrorKind
 from giruntime.ui._parse_error_messages import _message_for
 
@@ -46,3 +47,11 @@ class MessageForTests(unittest.TestCase):
         # not a developer dump.
         message = _message_for(ParseErrorKind.BAD_COLS_DIRECTIVE, 7)
         self.assertNotIn("'", message)
+
+    def test_inline_nesting_message_states_the_configured_cap(self) -> None:
+        # The copy interpolates MAX_INLINE_DEPTH rather than spelling
+        # the number out, so retuning the cap cannot leave the notice
+        # quoting a figure the parser no longer enforces.
+        message = _message_for(ParseErrorKind.INLINE_NESTING_TOO_DEEP, 12)
+        self.assertIn("Line 12", message)
+        self.assertIn(str(MAX_INLINE_DEPTH), message)

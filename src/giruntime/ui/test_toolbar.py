@@ -30,7 +30,7 @@ Three surfaces are covered here:
   primary-menu coverage now that both menus are gone.
 
 The display-gating mirrors :mod:`ui.test_main_window`: each widget test
-is decorated ``@unittest.skipUnless(_display_available(), ...)`` so a
+is decorated ``@unittest.skipUnless(display_available(), ...)`` so a
 run without a GDK display skips rather than fails.
 """
 
@@ -43,7 +43,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from unittest.mock import patch
 
-from gi.repository import Gdk, Gtk, Pango
+from gi.repository import Gtk, Pango
 
 from enums import AttachmentExportFailureReason, HeaderCentrePage
 from storage.protocols import AttachmentExportFailed
@@ -53,17 +53,11 @@ from giruntime.controllers.note_list_store import NoteListStore
 from models.attachment import Attachment
 from models.note import Note
 import giruntime.ui.toolbar as toolbar_module
+from giruntime.ui.test_display_guard import display_available
 from giruntime.ui.toolbar import Toolbar
 
 
 _FIXED_NOW: datetime = datetime(2026, 4, 28, 12, 0, 0, tzinfo=UTC)
-
-
-def _display_available() -> bool:
-    """True iff a GDK display can be opened — required for widget
-    construction."""
-    Gtk.init_check()
-    return Gdk.Display.get_default() is not None
 
 
 # ---------------------------------------------------------------------------
@@ -201,7 +195,7 @@ class ToolbarSmokeTests(unittest.TestCase):
         self.assertFalse(hasattr(toolbar_module, "resolve_target_notebook"))
 
 
-@unittest.skipUnless(_display_available(), "no GDK display")
+@unittest.skipUnless(display_available(), "no GDK display")
 class SearchBindingTests(unittest.TestCase):
     """The ``query ↔ search-entry`` bidirectional binding."""
 
@@ -259,7 +253,7 @@ def _make_note(note_id: str, title: str) -> Note:
     )
 
 
-@unittest.skipUnless(_display_available(), "no GDK display")
+@unittest.skipUnless(display_available(), "no GDK display")
 class HeaderSearchTests(unittest.TestCase):
     """The collapsible centre search driven by the toggle."""
 
@@ -336,7 +330,7 @@ class HeaderSearchTests(unittest.TestCase):
         self.assertFalse(toolbar.search_toggle.has_css_class("flat"))
 
 
-@unittest.skipUnless(_display_available(), "no GDK display")
+@unittest.skipUnless(display_available(), "no GDK display")
 class CentreTitleTests(unittest.TestCase):
     """The centre title label mirroring the selected note."""
 
@@ -386,7 +380,7 @@ class CentreTitleTests(unittest.TestCase):
         self.assertGreater(toolbar.title_label.get_max_width_chars(), 0)
 
 
-@unittest.skipUnless(_display_available(), "no GDK display")
+@unittest.skipUnless(display_available(), "no GDK display")
 class DeleteButtonTests(unittest.TestCase):
     """The note-scoped, standalone *Delete* button."""
 
@@ -414,7 +408,7 @@ class DeleteButtonTests(unittest.TestCase):
         self.assertTrue(toolbar.delete_button.get_sensitive())
 
 
-@unittest.skipUnless(_display_available(), "no GDK display")
+@unittest.skipUnless(display_available(), "no GDK display")
 class HelpButtonTests(unittest.TestCase):
     """The app-scoped *Help* button replacing the primary menu."""
 
@@ -451,7 +445,7 @@ def _iter_descendants(widget: Gtk.Widget) -> list[Gtk.Widget]:
     return found
 
 
-@unittest.skipUnless(_display_available(), "no GDK display")
+@unittest.skipUnless(display_available(), "no GDK display")
 class KeyboardActionMethodTests(unittest.TestCase):
     """The public methods the window's ``win.*`` actions delegate to —
     :meth:`Toolbar.focus_search` and :meth:`Toolbar.delete_selected`.

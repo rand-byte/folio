@@ -112,6 +112,33 @@ contention degrades into a short retry rather than an instant error. 5000 ms
 is the conventional desktop default. A tunable, not a typography metric.
 """
 
+MAX_INLINE_DEPTH: int = 16
+"""Maximum nesting depth for inline formatting spans within one line.
+
+One level per *nested* span whose body is re-parsed: ``*bold*``,
+``_italic_``, ``[.underline]#…#``, ``[.line-through]#…#``, a ``link:``
+macro's display text, and an ``attachment:`` macro's label. Monospace does
+not count (its body is consumed verbatim), nor do bare URLs, plain text, or
+spans that merely sit side by side — ``*a* *b* *c*`` is depth 1, not 3.
+Block nesting is a separate axis with its own cap
+(:data:`MAX_LIST_DEPTH`), and the count resets on every line because
+inline parsing is line-scoped.
+
+The cap exists because :func:`asciidoc.inline_parser.parse_inline` descends
+recursively, one Python frame per level, so without it a sufficiently
+nested line exhausts the interpreter stack and raises ``RecursionError``
+— breaking both the parser's "every syntactic failure is a
+:class:`ParseError`" contract and :func:`asciidoc.summary.derive_summary`'s
+"never raises" contract, the latter on the autosave path. Going deeper is
+therefore a hard parse error
+(:data:`ParseErrorKind.INLINE_NESTING_TOO_DEEP`), consistent with how
+:data:`MAX_LIST_DEPTH` treats over-deep lists.
+
+16 is far above anything hand-authored — real prose reaches 0–3, and 4
+already takes deliberate effort — while leaving the stack depth per parse
+trivially small.
+"""
+
 MAX_LIST_DEPTH: int = 3
 """Maximum nesting depth for ordered and unordered lists.
 

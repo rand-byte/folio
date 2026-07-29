@@ -40,15 +40,10 @@ from giruntime.ui.application import (
     _register_application_icon_resources,
 )
 from giruntime.ui.main_window import MainWindow
+from giruntime.ui.test_display_guard import display_available
 from models.note import Note
 from storage.database import Database
 from storage.session_state_store import SessionStateStore
-
-
-def _display_available() -> bool:
-    """True iff a GDK display can be opened — required for icon-theme lookups."""
-    Gtk.init_check()
-    return Gdk.Display.get_default() is not None
 
 
 _EARLIER: datetime = datetime(2026, 1, 1, tzinfo=UTC)
@@ -446,7 +441,7 @@ class SelectInitialNoteTests(unittest.TestCase):
         self.assertIsNone(app_state.selected_note_id)
 
 
-@unittest.skipUnless(_display_available(), "no GDK display")
+@unittest.skipUnless(display_available(), "no GDK display")
 class RegisterApplicationIconResourcesTests(unittest.TestCase):
     """The bundled icon resolves by name once registration has run."""
 

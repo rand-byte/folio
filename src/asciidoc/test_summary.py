@@ -277,5 +277,59 @@ class AttachmentMacroSnippetTests(unittest.TestCase):
         self.assertEqual(summary.snippet, "")
 
 
+class SnippetStructureRuleScopeTests(unittest.TestCase):
+    """The prose/structure rule governs the strict path, not the fallback.
+
+    "A snippet never leaks macro syntax" reads as absolute, but it is a
+    statement about walking an AST — and there is no AST when the source
+    does not parse. These two tests pin both halves so the distinction
+    is executable rather than implied.
+    """
+
+    _MACROS: str = "image::diagram.png[]\nattachments::[]"
+
+    def test_clean_source_keeps_macro_syntax_out_of_the_snippet(self) -> None:
+        summary = derive_summary(f"= T\n\n{self._MACROS}\n\nProse.\n")
+        self.assertEqual(summary.snippet, "Prose.")
+
+    def test_fallback_may_echo_a_macro_line_verbatim(self) -> None:
+        """Intended, not a leak.
+
+        The unterminated code fence makes the document unparseable, so
+        the permissive extractor takes raw non-blank lines. Showing the
+        source the user actually typed beats showing nothing for a note
+        that is mid-edit.
+        """
+        source = f"= T\n\n----\nunterminated\n\n{self._MACROS}\n"
+        summary = derive_summary(source)
+        self.assertIn("image::diagram.png[]", summary.snippet)
+
+
+class DeriveSummaryNeverRaisesTests(unittest.TestCase):
+    """:func:`derive_summary` is total, including on pathological source.
+
+    It runs on every save (``NoteRepository.insert`` / ``update_source``)
+    and in the v2/v3 migration backfills, and the controller layer only
+    captures ``sqlite3.DatabaseError`` — so anything else escaping here
+    reaches the user as a crash on the autosave path. Deeply nested
+    inline spans used to raise ``RecursionError`` from the parser and
+    straight out through this function; see
+    :data:`config.defaults.MAX_INLINE_DEPTH`.
+    """
+
+    def test_deeply_nested_inline_falls_back_instead_of_raising(self) -> None:
+        body = "*_" * 600 + "deep" + "_*" * 600
+        summary = derive_summary(f"= Title\n\n{body}\n")
+        self.assertIsInstance(summary, NoteSummary)
+        # The parse failed, so the permissive extractor supplied both
+        # fields: the title line is still recognised by shape.
+        self.assertEqual(summary.title, "Title")
+
+    def test_deeply_nested_inline_in_a_titleless_note(self) -> None:
+        summary = derive_summary("*_" * 600 + "deep" + "_*" * 600)
+        self.assertIsInstance(summary, NoteSummary)
+        self.assertEqual(summary.title, UNTITLED)
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -32,6 +32,7 @@ from giruntime.ui.note_render.textbuffer_renderer import (
     _table_tab_stops,
     _truncate_cell,
 )
+from giruntime.ui.test_display_guard import display_available
 from enums import AdmonitionKind, ListNumberStyle
 from models.attachment import Attachment
 from models.parse_error import ParseError
@@ -94,12 +95,6 @@ def _make_solid_png(width: int, height: int) -> bytes:
 
 
 _PNG_200X100: bytes = _make_solid_png(200, 100)
-
-
-def _display_available() -> bool:
-    """True iff a GDK display can be opened — required for widget construction."""
-    Gtk.init_check()
-    return Gdk.Display.get_default() is not None
 
 
 _FAKE_CHAR_PX: int = 9
@@ -240,7 +235,7 @@ def _build_renderer(
 # ---------------------------------------------------------------------------
 
 
-@unittest.skipUnless(_display_available(), "no GDK display")
+@unittest.skipUnless(display_available(), "no GDK display")
 class HeadingRenderingTests(unittest.TestCase):
     def test_document_title_is_tagged_heading_0(self) -> None:
         renderer, buffer, _ = _build_renderer()
@@ -330,7 +325,7 @@ class HeadingRenderingTests(unittest.TestCase):
         self.assertEqual(text, "Title\nMETA\nA Heading")
 
 
-@unittest.skipUnless(_display_available(), "no GDK display")
+@unittest.skipUnless(display_available(), "no GDK display")
 class InlineRenderingTests(unittest.TestCase):
     def test_bold_italic_strikethrough_underline(self) -> None:
         src = (
@@ -387,7 +382,7 @@ class InlineRenderingTests(unittest.TestCase):
         self.assertEqual(_tag_names_at(buffer, plain_start), set())
 
 
-@unittest.skipUnless(_display_available(), "no GDK display")
+@unittest.skipUnless(display_available(), "no GDK display")
 class ListRenderingTests(unittest.TestCase):
     def test_unordered_list_uses_bullet_glyphs(self) -> None:
         src = "= D\n\n* one\n* two\n* three\n"
@@ -603,7 +598,7 @@ class FormatOrdinalTests(unittest.TestCase):
         self.assertEqual(_format_ordinal(ListNumberStyle.LOWER_ROMAN, 9), "ix.")
 
 
-@unittest.skipUnless(_display_available(), "no GDK display")
+@unittest.skipUnless(display_available(), "no GDK display")
 class CodeBlockRenderingTests(unittest.TestCase):
     """Code blocks render as a tinted, monospace paragraph range.
 
@@ -709,7 +704,7 @@ class CodeBlockRenderingTests(unittest.TestCase):
         self.assertEqual(_anchor_offsets(buffer), [])
 
 
-@unittest.skipUnless(_display_available(), "no GDK display")
+@unittest.skipUnless(display_available(), "no GDK display")
 class ImageRenderingTests(unittest.TestCase):
     def test_image_invokes_resolver_with_filename(self) -> None:
         calls: list[str] = []
@@ -849,7 +844,7 @@ class ImageRenderingTests(unittest.TestCase):
         self.assertEqual(calls, [])
 
 
-@unittest.skipUnless(_display_available(), "no GDK display")
+@unittest.skipUnless(display_available(), "no GDK display")
 class ColumnWidthResolverTests(unittest.TestCase):
     def test_resolver_is_not_called_for_text_only_blocks(self) -> None:
         # The renderer only invokes the column-width resolver when a
@@ -910,7 +905,7 @@ class ColumnWidthResolverTests(unittest.TestCase):
         self.assertGreaterEqual(calls, 1)
 
 
-@unittest.skipUnless(_display_available(), "no GDK display")
+@unittest.skipUnless(display_available(), "no GDK display")
 class RebuildSemanticsTests(unittest.TestCase):
     def test_render_clears_existing_buffer_content(self) -> None:
         renderer, buffer, _ = _build_renderer()
@@ -967,7 +962,7 @@ class RebuildSemanticsTests(unittest.TestCase):
             renderer.render_into("= D\n", wrong_buffer, note_id="n1")
 
 
-@unittest.skipUnless(_display_available(), "no GDK display")
+@unittest.skipUnless(display_available(), "no GDK display")
 class ParseErrorPropagationTests(unittest.TestCase):
     def test_parse_error_propagates_to_caller(self) -> None:
         # An unterminated code fence should reach the caller as a
@@ -982,7 +977,7 @@ class ParseErrorPropagationTests(unittest.TestCase):
             )
 
 
-@unittest.skipUnless(_display_available(), "no GDK display")
+@unittest.skipUnless(display_available(), "no GDK display")
 class EmptyDocumentTests(unittest.TestCase):
     def test_empty_source_yields_empty_buffer(self) -> None:
         renderer, buffer, _ = _build_renderer()
@@ -1002,7 +997,7 @@ class EmptyDocumentTests(unittest.TestCase):
 # ---------------------------------------------------------------------------
 
 
-@unittest.skipUnless(_display_available(), "no GDK display")
+@unittest.skipUnless(display_available(), "no GDK display")
 class MonospaceRenderingTests(unittest.TestCase):
     """The MONOSPACE tag is applied to the literal content of `…`."""
 
@@ -1066,7 +1061,7 @@ class MonospaceRenderingTests(unittest.TestCase):
 # ---------------------------------------------------------------------------
 
 
-@unittest.skipUnless(_display_available(), "no GDK display")
+@unittest.skipUnless(display_available(), "no GDK display")
 class LinkRenderingTests(unittest.TestCase):
     """LINK shared tag + per-link anonymous URL tag are both applied."""
 
@@ -1448,7 +1443,7 @@ def _tab_array_on_line(
     return None
 
 
-@unittest.skipUnless(_display_available(), "no GDK display")
+@unittest.skipUnless(display_available(), "no GDK display")
 class TabArrayTableRenderingTests(unittest.TestCase):
     """Tables render as tab-separated buffer text, not a child widget."""
 
@@ -1610,7 +1605,7 @@ class TabArrayTableRenderingTests(unittest.TestCase):
 # ---------------------------------------------------------------------------
 
 
-@unittest.skipUnless(_display_available(), "no GDK display")
+@unittest.skipUnless(display_available(), "no GDK display")
 class AdmonitionRenderingTests(unittest.TestCase):
     """Admonitions render as two tinted paragraphs (label + body).
 
@@ -1784,7 +1779,7 @@ class AdmonitionRenderingTests(unittest.TestCase):
 # ---------------------------------------------------------------------------
 
 
-@unittest.skipUnless(_display_available(), "no GDK display")
+@unittest.skipUnless(display_available(), "no GDK display")
 class BlockquoteRenderingTests(unittest.TestCase):
     """Blockquotes render as italic indented paragraphs + optional attribution.
 
@@ -1923,7 +1918,7 @@ class BlockquoteRenderingTests(unittest.TestCase):
 # ---------------------------------------------------------------------------
 
 
-@unittest.skipUnless(_display_available(), "no GDK display")
+@unittest.skipUnless(display_available(), "no GDK display")
 class DocumentCompositionRenderingTests(unittest.TestCase):
     """The renderer walks a heterogeneous document in a single pass.
 
@@ -1997,7 +1992,7 @@ class DocumentCompositionRenderingTests(unittest.TestCase):
         self.assertNotIn("wraps\nonto", text)
 
 
-@unittest.skipUnless(_display_available(), "no GDK display")
+@unittest.skipUnless(display_available(), "no GDK display")
 class SoftBreakRenderingTests(unittest.TestCase):
     """An in-paragraph source newline renders as a single space, not a
     hard break (the soft-line-break fix).
@@ -2022,7 +2017,7 @@ class SoftBreakRenderingTests(unittest.TestCase):
         self.assertNotIn("first part\nsecond part", text)
 
 
-@unittest.skipUnless(_display_available(), "no GDK display")
+@unittest.skipUnless(display_available(), "no GDK display")
 class HardBreakRenderingTests(unittest.TestCase):
     """A `` +`` hard break renders a forced newline (not a reflow space),
     and the literal ``+`` marker never reaches the buffer.
@@ -2075,7 +2070,7 @@ text.
 """
 
 
-@unittest.skipUnless(_display_available(), "no GDK display")
+@unittest.skipUnless(display_available(), "no GDK display")
 class PostTitleHookTests(unittest.TestCase):
     """``post_title_hook`` fires exactly once per render with the
     ``buffer`` positioned (at its end iter) at the title/body boundary
@@ -2219,7 +2214,7 @@ def _attachment(filename: str, byte_size: int) -> Attachment:
     )
 
 
-@unittest.skipUnless(_display_available(), "no GDK display")
+@unittest.skipUnless(display_available(), "no GDK display")
 class AttachmentLinkRenderingTests(unittest.TestCase):
     """A save link wears the shared LINK styling and its own target tag."""
 
@@ -2287,7 +2282,7 @@ class AttachmentLinkRenderingTests(unittest.TestCase):
         )
 
 
-@unittest.skipUnless(_display_available(), "no GDK display")
+@unittest.skipUnless(display_available(), "no GDK display")
 class AttachmentTableExpansionTests(unittest.TestCase):
     """``attachments::[]`` renders through the ordinary table path."""
 

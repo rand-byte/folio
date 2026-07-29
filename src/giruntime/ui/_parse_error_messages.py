@@ -13,6 +13,7 @@ Principles & invariants
 """
 from __future__ import annotations
 
+from config.defaults import MAX_INLINE_DEPTH
 from enums import AttachmentTableColumn, LinkScheme, ParseErrorKind
 
 
@@ -79,6 +80,11 @@ def _message_for(kind: ParseErrorKind, line: int) -> str:
             return (
                 f"Line {line}: an inline formatting marker (`*`, `_`, or "
                 "`#`) was opened but not closed on the same line."
+            )
+        case ParseErrorKind.INLINE_NESTING_TOO_DEEP:
+            return (
+                f"Line {line}: inline formatting is nested more than "
+                f"{MAX_INLINE_DEPTH} levels deep."
             )
         case ParseErrorKind.EMPTY_HEADING:
             return f"Line {line}: a heading marker has no text after it."
