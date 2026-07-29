@@ -26,12 +26,7 @@ from giruntime.ui.note_render.tag_table import (
     build_tag_table,
     build_wash_specs,
 )
-
-
-def _display_available() -> bool:
-    """True iff a GDK display can be opened — required for widget construction."""
-    Gtk.init_check()
-    return Gdk.Display.get_default() is not None
+from giruntime.ui.test_display_guard import display_available
 
 
 def _settle_real_main_loop(timeout_ms: int = 400) -> None:
@@ -175,7 +170,7 @@ def _scroll_wash_view_to(text_view: ArticleTextView, value: float) -> None:
     _settle_real_main_loop(timeout_ms=200)
 
 
-@unittest.skipUnless(_display_available(), "no GDK display")
+@unittest.skipUnless(display_available(), "no GDK display")
 class InstallWashSpecsFromTableTests(unittest.TestCase):
     """The shared seam that wires the block-tint painter.
 
@@ -195,7 +190,7 @@ class InstallWashSpecsFromTableTests(unittest.TestCase):
         )
 
 
-@unittest.skipUnless(_display_available(), "no GDK display")
+@unittest.skipUnless(display_available(), "no GDK display")
 class ArticleTextViewWashRectTests(unittest.TestCase):
     """Drive :meth:`ArticleTextView._compute_wash_rects` directly.
 
@@ -407,7 +402,7 @@ class ArticleTextViewWashRectTests(unittest.TestCase):
         self.assertEqual(rect.get_height(), float(line_h))
 
 
-@unittest.skipUnless(_display_available(), "no GDK display")
+@unittest.skipUnless(display_available(), "no GDK display")
 class ArticleTextViewWashClipTests(unittest.TestCase):
     """The wash walk is clipped to the visible line span (perf, §2.1).
 
@@ -608,7 +603,7 @@ def _tuple_of(rgba: Gdk.RGBA) -> tuple[float, float, float, float]:
     return (rgba.red, rgba.green, rgba.blue, rgba.alpha)
 
 
-@unittest.skipUnless(_display_available(), "no GDK display")
+@unittest.skipUnless(display_available(), "no GDK display")
 class ArticleTextViewSheetBottomTests(unittest.TestCase):
     """Drive :meth:`ArticleTextView._sheet_bottom_px` on a live view.
 
@@ -678,7 +673,7 @@ class ArticleTextViewSheetBottomTests(unittest.TestCase):
             _destroy_window_of(text_view)
 
 
-@unittest.skipUnless(_display_available(), "no GDK display")
+@unittest.skipUnless(display_available(), "no GDK display")
 class ArticleTextViewSheetTopTests(unittest.TestCase):
     """Drive :meth:`ArticleTextView._sheet_top_px` on a live view.
 
@@ -768,7 +763,7 @@ def _destroy_window_of(widget: Gtk.Widget) -> None:
             context.iteration(False)
 
 
-@unittest.skipUnless(_display_available(), "no GDK display")
+@unittest.skipUnless(display_available(), "no GDK display")
 class ArticleTextViewMutualExclusionTests(unittest.TestCase):
     """Defensive: two wash-bearing tags on one iter must raise.
 
@@ -815,7 +810,7 @@ class RgbaFromTintTests(unittest.TestCase):
         self.assertIsNot(a, b)
 
 
-@unittest.skipUnless(_display_available(), "requires a display")
+@unittest.skipUnless(display_available(), "requires a display")
 class ColorSchemeReThemeTests(unittest.TestCase):
     """Switching colour scheme re-colours a live surface in place.
 
@@ -912,7 +907,7 @@ class ColorSchemeReThemeTests(unittest.TestCase):
         self.assertEqual(bare._sheet_wash, build_sheet_wash(DARK_PALETTE))
 
 
-@unittest.skipUnless(_display_available(), "requires a display")
+@unittest.skipUnless(display_available(), "requires a display")
 class ThemeChangeTests(unittest.TestCase):
     """The real trigger: GTK's own style-changed hook drives the probe.
 
@@ -976,7 +971,7 @@ class ThemeChangeTests(unittest.TestCase):
         self.assertIs(scheme, expected)
 
 
-@unittest.skipUnless(_display_available(), "requires a display")
+@unittest.skipUnless(display_available(), "requires a display")
 class ArticleInkTests(unittest.TestCase):
     """The note's default ink follows the palette, without a tag.
 

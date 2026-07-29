@@ -8,7 +8,7 @@ from datetime import UTC, datetime
 from functools import cache
 from pathlib import Path
 
-from gi.repository import Gdk, Gio, GLib, Gtk
+from gi.repository import Gio, GLib, Gtk
 
 from asciidoc.summary import derive_summary
 from enums import AttachmentExportFailureReason, ViewMode, WindowAction
@@ -33,6 +33,7 @@ from giruntime.ui.note_editor import NoteEditor
 from giruntime.ui.note_list import NoteList
 from giruntime.ui.note_view import NoteView
 from giruntime.ui.sidebar import Sidebar
+from giruntime.ui.test_display_guard import display_available
 
 
 _FIXED_NOW: datetime = datetime(2026, 4, 28, 12, 0, 0, tzinfo=UTC)
@@ -47,13 +48,6 @@ def _id_sequence() -> Callable[[], str]:
         return f"gen-{counter['n']}"
 
     return factory
-
-
-def _display_available() -> bool:
-    """True iff a GDK display can be opened — required for widget
-    construction."""
-    Gtk.init_check()
-    return Gdk.Display.get_default() is not None
 
 
 def _pump_main_loop() -> None:
@@ -287,7 +281,7 @@ class DefaultWindowWidthTests(unittest.TestCase):
         )
 
 
-@unittest.skipUnless(_display_available(), "no GDK display")
+@unittest.skipUnless(display_available(), "no GDK display")
 class MainWindowConstructionTests(unittest.TestCase):
     """End-to-end smoke tests: the shell composes its panes without
     raising."""
@@ -385,7 +379,7 @@ class MainWindowConstructionTests(unittest.TestCase):
         self.assertIs(stack.get_child_by_name("edit"), window._note_editor)
 
 
-@unittest.skipUnless(_display_available(), "no GDK display")
+@unittest.skipUnless(display_available(), "no GDK display")
 class RestoredSessionStateTests(unittest.TestCase):
     """A restored :class:`SessionState` overrides the computed default
     window size and drives the maximized state; omitting it (the
@@ -463,7 +457,7 @@ class RestoredSessionStateTests(unittest.TestCase):
         self.assertFalse(window.is_maximized())
 
 
-@unittest.skipUnless(_display_available(), "no GDK display")
+@unittest.skipUnless(display_available(), "no GDK display")
 class MainWindowViewModeStackTests(unittest.TestCase):
     """The right-pane stack tracks :attr:`AppState.view_mode`."""
 
@@ -524,7 +518,7 @@ class MainWindowViewModeStackTests(unittest.TestCase):
         )
 
 
-@unittest.skipUnless(_display_available(), "no GDK display")
+@unittest.skipUnless(display_available(), "no GDK display")
 class MainWindowViewModeChangeFlushAndRefreshTests(unittest.TestCase):
     """The view-mode-change handler must flush the editor's pending
     autosave AND refresh the rendered view before swapping the stack.
@@ -746,7 +740,7 @@ class MainWindowViewModeChangeFlushAndRefreshTests(unittest.TestCase):
         )
 
 
-@unittest.skipUnless(_display_available(), "no GDK display")
+@unittest.skipUnless(display_available(), "no GDK display")
 class MainWindowFlushEditorTests(unittest.TestCase):
     """`MainWindow.flush_editor` forces a pending debounced autosave to
     the store.
@@ -837,7 +831,7 @@ class MainWindowFlushEditorTests(unittest.TestCase):
         self.assertEqual(store.get_note("n1").source, "= Hello\n")
 
 
-@unittest.skipUnless(_display_available(), "no GDK display")
+@unittest.skipUnless(display_available(), "no GDK display")
 class MainWindowStorePropagationTests(unittest.TestCase):
     """A store mutation propagates to the data-driven panes.
 
@@ -938,7 +932,7 @@ class MainWindowStorePropagationTests(unittest.TestCase):
         self.assertIsNone(selection.get_selected_item())
 
 
-@unittest.skipUnless(_display_available(), "no GDK display")
+@unittest.skipUnless(display_available(), "no GDK display")
 class MainWindowKeyboardActionTests(unittest.TestCase):
     """The window-scoped ``win.*`` keyboard actions: that they are
     registered, carry the right accelerators (and that Delete carries

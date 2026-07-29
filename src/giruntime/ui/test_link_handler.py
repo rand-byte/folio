@@ -22,17 +22,12 @@ from giruntime.ui.link_handler import (
     UriLauncherProtocol,
     default_launcher_factory,
 )
+from giruntime.ui.test_display_guard import display_available
 
 
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
-
-
-def _display_available() -> bool:
-    """True iff a GDK display can be opened — required for widget construction."""
-    Gtk.init_check()
-    return Gdk.Display.get_default() is not None
 
 
 @dataclass
@@ -167,7 +162,7 @@ def _spare_iter_for(text_view: Gtk.TextView) -> Gtk.TextIter:
 # ---------------------------------------------------------------------------
 
 
-@unittest.skipUnless(_display_available(), "no GDK display")
+@unittest.skipUnless(display_available(), "no GDK display")
 class DefaultLauncherFactoryTests(unittest.TestCase):
     """The production factory should build a real :class:`Gtk.UriLauncher`."""
 
@@ -192,7 +187,7 @@ class DefaultLauncherFactoryTests(unittest.TestCase):
 # ---------------------------------------------------------------------------
 
 
-@unittest.skipUnless(_display_available(), "no GDK display")
+@unittest.skipUnless(display_available(), "no GDK display")
 class ActivateUrlTests(unittest.TestCase):
     """The plan's "launch invoked exactly once with the stored URL" test."""
 
@@ -242,7 +237,7 @@ class ActivateUrlTests(unittest.TestCase):
 # ---------------------------------------------------------------------------
 
 
-@unittest.skipUnless(_display_available(), "no GDK display")
+@unittest.skipUnless(display_available(), "no GDK display")
 class ResolveParentWindowTests(unittest.TestCase):
     def test_returns_none_when_view_has_no_window_root(self) -> None:
         # A freshly-constructed text view's root is the widget
@@ -280,7 +275,7 @@ class ResolveParentWindowTests(unittest.TestCase):
 # ---------------------------------------------------------------------------
 
 
-@unittest.skipUnless(_display_available(), "no GDK display")
+@unittest.skipUnless(display_available(), "no GDK display")
 class UrlAtIterTests(unittest.TestCase):
     """The iter-driven URL lookup is the testable seam used by both
     the motion and click controllers. These tests verify the seam
@@ -311,7 +306,7 @@ class UrlAtIterTests(unittest.TestCase):
 # ---------------------------------------------------------------------------
 
 
-@unittest.skipUnless(_display_available(), "no GDK display")
+@unittest.skipUnless(display_available(), "no GDK display")
 class SetCursorToLinkTests(unittest.TestCase):
     """The cursor toggle uses an idempotency check on
     :attr:`_showing_link_cursor`. Behavioural tests use a counting
@@ -414,7 +409,7 @@ class SetCursorToLinkTests(unittest.TestCase):
 # ---------------------------------------------------------------------------
 
 
-@unittest.skipUnless(_display_available(), "no GDK display")
+@unittest.skipUnless(display_available(), "no GDK display")
 class LeaveCallbackTests(unittest.TestCase):
     def test_leave_clears_a_lingering_link_cursor(self) -> None:
         # Set up the "currently showing link" state, then fire
@@ -460,7 +455,7 @@ class LeaveCallbackTests(unittest.TestCase):
 # ---------------------------------------------------------------------------
 
 
-@unittest.skipUnless(_display_available(), "no GDK display")
+@unittest.skipUnless(display_available(), "no GDK display")
 class IterPipelineTests(unittest.TestCase):
     """Verify the iter → URL → cursor / launch flows independently
     of coord translation.
@@ -512,7 +507,7 @@ class IterPipelineTests(unittest.TestCase):
         self.assertEqual(factory.launchers, [])
 
 
-@unittest.skipUnless(_display_available(), "no GDK display")
+@unittest.skipUnless(display_available(), "no GDK display")
 class ControllerCallbackUnrealisedFallbackTests(unittest.TestCase):
     """When the controllers fire on an unrealised text view (or a
     point outside the laid-out text), :meth:`_iter_at_widget_coords`
@@ -568,7 +563,7 @@ class ControllerCallbackUnrealisedFallbackTests(unittest.TestCase):
 # ---------------------------------------------------------------------------
 
 
-@unittest.skipUnless(_display_available(), "no GDK display")
+@unittest.skipUnless(display_available(), "no GDK display")
 class UrlRecoveryFromLinkTagTests(unittest.TestCase):
     """End-to-end: render a doc, look up tags at the link offset, launch.
 
@@ -725,7 +720,7 @@ class UrlRecoveryFromLinkTagTests(unittest.TestCase):
 # ---------------------------------------------------------------------------
 
 
-@unittest.skipUnless(_display_available(), "no GDK display")
+@unittest.skipUnless(display_available(), "no GDK display")
 class InstallSmokeTests(unittest.TestCase):
     """``install`` should attach controllers without raising.
 
@@ -773,7 +768,7 @@ def _make_attachment_handler() -> tuple[
     return handler, factory, activator, text_view
 
 
-@unittest.skipUnless(_display_available(), "no GDK display")
+@unittest.skipUnless(display_available(), "no GDK display")
 class AttachmentTargetDispatchTests(unittest.TestCase):
     """An :class:`AttachmentTarget` goes to the activator, not the launcher."""
 
@@ -816,7 +811,7 @@ class AttachmentTargetDispatchTests(unittest.TestCase):
         self.assertIs(text_view.get_cursor(), handler._link_cursor)
 
 
-@unittest.skipUnless(_display_available(), "no GDK display")
+@unittest.skipUnless(display_available(), "no GDK display")
 class AttachmentRecoveryFromRealRendererTests(unittest.TestCase):
     """End-to-end: render a save link, click it, the activator fires."""
 

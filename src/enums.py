@@ -190,6 +190,7 @@ class ParseErrorKind(StrEnum):
     UNKNOWN_BLOCK = auto()
     BAD_IMAGE_MACRO = auto()
     BAD_INLINE_SPAN = auto()
+    INLINE_NESTING_TOO_DEEP = auto()
     EMPTY_HEADING = auto()
     UNTERMINATED_TABLE = auto()
     EMPTY_TABLE = auto()

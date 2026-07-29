@@ -2101,5 +2101,44 @@ class AttachmentLinkInBlocksTests(unittest.TestCase):
         )
 
 
+class InlineNestingRegressionTests(unittest.TestCase):
+    """A pathologically nested line is a parse error, not a stack overflow.
+
+    :func:`parse` promises that every syntactic failure surfaces as a
+    :class:`ParseError`. Before :data:`MAX_INLINE_DEPTH` existed, a line
+    nesting a few hundred spans exhausted the interpreter stack and
+    raised ``RecursionError`` instead — an exception type callers are
+    explicitly told not to catch broadly, and one that escaped the
+    autosave path through :func:`asciidoc.summary.derive_summary`.
+
+    The depth here is far past the cap *and* past the recursion limit
+    that used to be hit, so a regression re-raises ``RecursionError``
+    rather than quietly passing.
+    """
+
+    _PAIRS: int = 600
+
+    def test_deeply_nested_inline_raises_a_parse_error(self) -> None:
+        source = "*_" * self._PAIRS + "x" + "_*" * self._PAIRS
+        with self.assertRaises(ParseError) as ctx:
+            parse(source)
+        self.assertEqual(
+            ctx.exception.kind,
+            ParseErrorKind.INLINE_NESTING_TOO_DEEP,
+        )
+        self.assertEqual(ctx.exception.line, 1)
+
+    def test_deeply_nested_inline_inside_a_section_body(self) -> None:
+        """The cap applies wherever inline content is parsed."""
+        body = "*_" * self._PAIRS + "x" + "_*" * self._PAIRS
+        with self.assertRaises(ParseError) as ctx:
+            parse(f"= Title\n\n== Section\n\n{body}\n")
+        self.assertEqual(
+            ctx.exception.kind,
+            ParseErrorKind.INLINE_NESTING_TOO_DEEP,
+        )
+        self.assertEqual(ctx.exception.line, 5)
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -35,6 +35,12 @@ Principles & invariants
   attachments table's rows do not exist until render time, and a snippet
   must never leak the macro's source syntax) (a section's nested blocks are
   still descended into to reach prose under deeper headings).
+  **This rule governs the strict path only** — it is a statement about
+  walking an AST, and there is no AST when the source does not parse. The
+  fallback below takes raw source lines and therefore *may* echo an
+  ``image::`` or ``attachments::`` line verbatim; that is intended, not a
+  leak, because the alternative is showing nothing for a note the user is
+  midway through typing.
 * This module is pure: it imports only the parser, the lexer (for the
   fallback tag walk), the AST, the :class:`NoteSummary` value type, the
   :class:`ParseError` type, and the ``config`` constants. No ``gi``, no

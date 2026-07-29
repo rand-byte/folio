@@ -15,7 +15,7 @@ from collections.abc import Callable
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
-from gi.repository import Gdk, GLib, Gtk, GtkSource
+from gi.repository import GLib, Gtk, GtkSource
 
 from enums import (
     ColorScheme,
@@ -41,6 +41,7 @@ from giruntime.ui.note_editor import (
     buffer_text,
     load_asciidoc_language,
 )
+from giruntime.ui.test_display_guard import display_available
 
 
 # ---------------------------------------------------------------------------
@@ -49,18 +50,6 @@ from giruntime.ui.note_editor import (
 
 
 _FIXED_NOW: datetime = datetime(2026, 4, 28, 12, 0, 0, tzinfo=UTC)
-
-
-def _display_available() -> bool:
-    """True iff a GDK display can be opened — required for any
-    :class:`Gtk.Widget` subclass construction.
-
-    The pure helper (:func:`buffer_text`) operates on
-    :class:`Gtk.TextBuffer`, which does NOT need a display — those
-    tests run unconditionally.
-    """
-    Gtk.init_check()
-    return Gdk.Display.get_default() is not None
 
 
 def _make_note(
@@ -379,7 +368,7 @@ def _build_editor(
     return editor, repo, state, backend, controller
 
 
-@unittest.skipUnless(_display_available(), "no GDK display")
+@unittest.skipUnless(display_available(), "no GDK display")
 class NoteEditorConstructionTests(unittest.TestCase):
     def test_constructs_with_no_selection(self) -> None:
         editor, repo, _, _, _ = _build_editor()
@@ -460,7 +449,7 @@ class NoteEditorConstructionTests(unittest.TestCase):
         self.assertTrue(buffer.get_highlight_syntax())
 
 
-@unittest.skipUnless(_display_available(), "no GDK display")
+@unittest.skipUnless(display_available(), "no GDK display")
 class NoteEditorAutosaveTests(unittest.TestCase):
     """The debounce contract: every change reschedules the timer; the
     save fires only once on the timer's expiry."""
@@ -713,7 +702,7 @@ def _expected_scheme_id(editor: NoteEditor) -> str:
     ]
 
 
-@unittest.skipUnless(_display_available(), "no GDK display")
+@unittest.skipUnless(display_available(), "no GDK display")
 class ApplyColorSchemeTests(unittest.TestCase):
     """The scheme swap itself, driven directly and deterministically."""
 
@@ -733,7 +722,7 @@ class ApplyColorSchemeTests(unittest.TestCase):
         self.assertEqual(scheme.get_id(), "classic")
 
 
-@unittest.skipUnless(_display_available(), "no GDK display")
+@unittest.skipUnless(display_available(), "no GDK display")
 class StyleSchemeFollowsThemeTests(unittest.TestCase):
     """The editor's scheme agrees with the theme it is sitting in.
 

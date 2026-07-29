@@ -1,0 +1,54 @@
+# Mechanical enforcement of `make validate` (= type + lint + test).
+#
+# This file is deliberately thin: it provisions the packages
+# dev-environment.md lists, then calls an existing Makefile target. The
+# Makefile stays the single definition of *what* each target does, so the
+# workflow and the docs cannot disagree about anything except which packages
+# are present.
+#
+# Runs in a debian:trixie container rather than on a runner image because
+# pyproject.toml sets requires-python >= 3.13 and PyGObject is a system
+# package, not a pip install: the interpreter that carries `gi` has to be the
+# distro's. Trixie is also the platform debian/control targets, so CI matches
+# the packaging target exactly.
+name: validate
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    container: debian:trixie
+    strategy:
+      # One red job must not hide the state of the other two.
+      fail-fast: false
+      matrix:
+        target: [type, lint, test]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Provision
+        run: |
+          set -eux
+          apt-get update
+          apt-get install -y --no-install-recommends \
+            python3 python3-gi python3-pip make \
+            gir1.2-gtk-4.0 libgtk-4-1 \
+            gir1.2-gtksource-5 libgtksourceview-5-0 \
+            libglib2.0-dev-bin weston
+          # pylint<4 is load-bearing: an unpinned install pulls pylint 4,
+          # which miscounts branches in note_view.py and fails `make lint` on
+          # a pristine checkout. The quoting matters. See dev-environment.md.
+          pip install --break-system-packages "mypy>=1.16" "pylint<4"
+
+      - name: Report the environment
+        run: |
+          python3 -V
+          mypy --version
+          pylint --version
+
+      - name: make ${{ matrix.target }}
+        run: make ${{ matrix.target }}

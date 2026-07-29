@@ -62,6 +62,15 @@ Principles & invariants
   for ``*`` and ``_`` is impossible by construction (the inner ``*``
   always closes the outer ``*``); different-marker nesting is allowed.
   Monospace does not recurse — its body is consumed verbatim.
+* Nesting is **bounded** by
+  :data:`config.defaults.MAX_INLINE_DEPTH`. Recursion costs one Python
+  frame per level, so an unbounded depth would let one pathological
+  line exhaust the interpreter stack and raise ``RecursionError`` —
+  outside the :class:`ParseError` contract. Going deeper is therefore
+  an ordinary parse error
+  (:class:`ParseErrorKind.INLINE_NESTING_TOO_DEEP`), as over-deep lists
+  are in the block parser. Only *enclosing* spans count; siblings on
+  one line do not accumulate.
 * There is no escape mechanism. Users cannot place a literal ``*``,
   ``_``, ``#``, or backtick inside a same-marker context. This is a
   documented limitation of the subset, not an oversight. URLs cannot
@@ -74,10 +83,18 @@ Principles & invariants
   the error indicator.
 """
 
+# The module's size reflects the inline grammar's full surface area — the
+# span dispatch table, the URL/link/attachment macro scanners, and the
+# nesting guard all live here because they share the one `_Scanner` cursor
+# and its private helpers. Splitting purely to satisfy the line counter
+# would cut through that shared state. Same rationale as parser.py.
+# pylint: disable=too-many-lines
+
 from __future__ import annotations
 
 import re
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
+from contextlib import contextmanager
 from dataclasses import dataclass
 
 from asciidoc.ast import (
@@ -91,6 +108,7 @@ from asciidoc.ast import (
     Text,
     Underline,
 )
+from config.defaults import MAX_INLINE_DEPTH
 from enums import LinkScheme, ParseErrorKind
 from models.parse_error import ParseError
 
@@ -236,7 +254,8 @@ def parse_inline(text: str, line: int) -> tuple[InlineNode, ...]:
     ParseError
         With one of the inline-related :class:`ParseErrorKind` values:
         :data:`BAD_INLINE_SPAN`, :data:`UNTERMINATED_MONOSPACE`,
-        :data:`UNSUPPORTED_LINK_SCHEME`, or :data:`BAD_LINK_MACRO`.
+        :data:`UNSUPPORTED_LINK_SCHEME`, :data:`BAD_LINK_MACRO`, or
+        :data:`INLINE_NESTING_TOO_DEEP`.
     """
     scanner = _Scanner(text, line)
     nodes = scanner.parse_top_level()
@@ -265,16 +284,55 @@ class _Scanner:
     inline formatting is still accepted, so the display text of a link
     (or of an attachment macro, which sets the same flag) may still
     contain bold, italic, monospace, etc.
+
+    ``depth`` is the number of spans currently enclosing the cursor —
+    a scanner cursor like ``pos``, maintained by :meth:`_nested_span`
+    around every recursive descent rather than threaded through the six
+    helper methods that sit between :meth:`_parse_until` and its nested
+    call sites. Siblings do not accumulate: the level unwinds on the way
+    out, so ``*a* *b*`` reaches depth 1, not 2.
     """
 
     text: str
     line: int
     pos: int
+    depth: int
 
     def __init__(self, text: str, line: int) -> None:
         self.text = text
         self.line = line
         self.pos = 0
+        self.depth = 0
+
+    # ------------------------------------------------------------------
+    # Nesting guard
+    # ------------------------------------------------------------------
+
+    @contextmanager
+    def _nested_span(self) -> Iterator[None]:
+        """Enter one nesting level, refusing to go past the cap.
+
+        Wraps every recursive :meth:`_parse_until` call. Raising at the
+        point of descent — before the frame is pushed — is what keeps a
+        pathological line from exhausting the interpreter stack and
+        surfacing a ``RecursionError`` instead of a
+        :class:`ParseError`.
+        """
+        if self.depth >= MAX_INLINE_DEPTH:
+            raise ParseError(
+                line=self.line,
+                column=0,
+                message=(
+                    "inline formatting is nested more than "
+                    f"{MAX_INLINE_DEPTH} levels deep"
+                ),
+                kind=ParseErrorKind.INLINE_NESTING_TOO_DEEP,
+            )
+        self.depth += 1
+        try:
+            yield
+        finally:
+            self.depth -= 1
 
     # ------------------------------------------------------------------
     # Top-level entry
@@ -376,7 +434,10 @@ class _Scanner:
             if opener is not None:
                 flush()
                 self.pos += len(opener.open_marker)
-                children = self._parse_until(close_marker=opener.close_marker)
+                with self._nested_span():
+                    children = self._parse_until(
+                        close_marker=opener.close_marker
+                    )
                 nodes.append(opener.factory(tuple(children), self.line))
                 continue
 
@@ -827,16 +888,17 @@ class _Scanner:
             )
         # Move onto the opening bracket and parse the label body.
         self.pos = open_index + len(_DISPLAY_TEXT_OPEN)
-        label = tuple(
-            self._parse_until(
-                close_marker=_DISPLAY_TEXT_CLOSE,
-                forbid_link=True,
-                unmatched_kind=ParseErrorKind.BAD_ATTACHMENT_MACRO,
-                unmatched_message=(
-                    "attachment: macro is missing the closing ']'"
-                ),
+        with self._nested_span():
+            label = tuple(
+                self._parse_until(
+                    close_marker=_DISPLAY_TEXT_CLOSE,
+                    forbid_link=True,
+                    unmatched_kind=ParseErrorKind.BAD_ATTACHMENT_MACRO,
+                    unmatched_message=(
+                        "attachment: macro is missing the closing ']'"
+                    ),
+                )
             )
-        )
         if not label:
             label = (Text(content=target, source_line=self.line),)
         return AttachmentLink(
@@ -933,12 +995,13 @@ class _Scanner:
         """
         # Skip the opening bracket.
         self.pos += len(_DISPLAY_TEXT_OPEN)
-        children = self._parse_until(
-            close_marker=_DISPLAY_TEXT_CLOSE,
-            forbid_link=True,
-            unmatched_kind=ParseErrorKind.BAD_LINK_MACRO,
-            unmatched_message="link macro is missing the closing ']'",
-        )
+        with self._nested_span():
+            children = self._parse_until(
+                close_marker=_DISPLAY_TEXT_CLOSE,
+                forbid_link=True,
+                unmatched_kind=ParseErrorKind.BAD_LINK_MACRO,
+                unmatched_message="link macro is missing the closing ']'",
+            )
         if required and not children:
             raise ParseError(
                 line=self.line,

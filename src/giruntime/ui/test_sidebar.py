@@ -20,7 +20,7 @@ from __future__ import annotations
 import unittest
 from datetime import UTC, datetime
 
-from gi.repository import Gdk, GLib, Gtk
+from gi.repository import GLib, Gtk
 
 from asciidoc.summary import derive_summary
 from enums import SmartFilter
@@ -34,16 +34,10 @@ from giruntime.ui.sidebar import (
     count_untagged,
     tags_header_accent_text,
 )
+from giruntime.ui.test_display_guard import display_available
 
 
 _FIXED_NOW: datetime = datetime(2026, 4, 28, 12, 0, 0, tzinfo=UTC)
-
-
-def _display_available() -> bool:
-    """True iff a GDK display can be opened — required for widget
-    construction."""
-    Gtk.init_check()
-    return Gdk.Display.get_default() is not None
 
 
 class CountUntaggedTests(unittest.TestCase):
@@ -154,7 +148,7 @@ def _tag_position(sidebar: Sidebar, name: str) -> int:
     raise AssertionError(f"tag {name!r} not found in the store")
 
 
-@unittest.skipUnless(_display_available(), "no GDK display")
+@unittest.skipUnless(display_available(), "no GDK display")
 class SidebarSelectionRenderingTests(unittest.TestCase):
     """A selected tag row reads as the theme selection pill (no leading
     ✓), and the header accent tracks the tag selection. Builds a real
@@ -217,7 +211,7 @@ class SidebarSelectionRenderingTests(unittest.TestCase):
         self.assertEqual(accent.get_text(), "")
 
 
-@unittest.skipUnless(_display_available(), "no GDK display")
+@unittest.skipUnless(display_available(), "no GDK display")
 class SidebarMultiSelectTests(unittest.TestCase):
     """A plain single click toggles a tag additively — no modifier key.
 
@@ -373,7 +367,7 @@ def _tag_row_count_text(sidebar: Sidebar, name: str) -> str:
     raise AssertionError(f"no realised tag row for {name!r}")
 
 
-@unittest.skipUnless(_display_available(), "no GDK display")
+@unittest.skipUnless(display_available(), "no GDK display")
 class SidebarTagCountLiveUpdateTests(unittest.TestCase):
     """A new note carrying an existing tag bumps that tag's *rendered*
     count live.

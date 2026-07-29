@@ -18,7 +18,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from unittest.mock import patch
 
-from gi.repository import Gdk, GLib, Gtk, Pango
+from gi.repository import GLib, Gtk, Pango
 
 from enums import (
     AttachmentExportFailureReason,
@@ -41,19 +41,13 @@ from giruntime.ui.note_list import (
     _message_text,
     _selection_empty_reason,
 )
+from giruntime.ui.test_display_guard import display_available
 from models.attachment import Attachment
 from models.note import Note
 from search.note_filter import SmartSelection, TagSelection
 
 
 _FIXED_NOW: datetime = datetime(2026, 4, 28, 12, 0, 0, tzinfo=UTC)
-
-
-def _display_available() -> bool:
-    """True iff a GDK display can be opened — required for widget
-    construction."""
-    Gtk.init_check()
-    return Gdk.Display.get_default() is not None
 
 
 def _note(
@@ -266,7 +260,7 @@ class NoteListSmokeTests(unittest.TestCase):
         self.assertFalse(hasattr(note_list_module, "compute_display_notes"))
 
 
-@unittest.skipUnless(_display_available(), "no GDK display")
+@unittest.skipUnless(display_available(), "no GDK display")
 class NoteListModelChainTests(unittest.TestCase):
     """The widget binds the store through Filter/Sort and stays in step."""
 
@@ -371,7 +365,7 @@ def _row_label_texts(note_list: NoteList, note_id: str) -> list[str]:
     return texts
 
 
-@unittest.skipUnless(_display_available(), "no GDK display")
+@unittest.skipUnless(display_available(), "no GDK display")
 class NoteListAttachmentBadgeTests(unittest.TestCase):
     """The 📎 badge re-binds on the controller's ``attachments-changed``.
 
@@ -441,7 +435,7 @@ class NoteListAttachmentBadgeTests(unittest.TestCase):
         self.controller.emit("attachments-changed", "not-bound")
 
 
-@unittest.skipUnless(_display_available(), "no GDK display")
+@unittest.skipUnless(display_available(), "no GDK display")
 class NoteListDeleteShortcutTests(unittest.TestCase):
     """The ``Delete`` key is a *focus-local* shortcut on the note list
     that activates ``win.delete-note`` — never an application accelerator,
@@ -588,7 +582,7 @@ class EmptyStateMessageTests(unittest.TestCase):
         self.assertEqual(text, "No notes here yet.")
 
 
-@unittest.skipUnless(_display_available(), "no GDK display")
+@unittest.skipUnless(display_available(), "no GDK display")
 class EmptyStateLabelWidthTests(unittest.TestCase):
     """No empty-state message may widen the pane.
 
@@ -669,7 +663,7 @@ class EmptyStateLabelWidthTests(unittest.TestCase):
             )
 
 
-@unittest.skipUnless(_display_available(), "no GDK display")
+@unittest.skipUnless(display_available(), "no GDK display")
 class EmptyStateLayoutTests(unittest.TestCase):
     """The empty label wraps, is inset, and sits at the top of the list."""
 
@@ -705,7 +699,7 @@ class EmptyStateLayoutTests(unittest.TestCase):
         self.assertTrue(note_list._list_scroller.get_visible())
 
 
-@unittest.skipUnless(_display_available(), "no GDK display")
+@unittest.skipUnless(display_available(), "no GDK display")
 class SearchDebounceTests(unittest.TestCase):
     """The query is coalesced behind one timer; clearing is immediate."""
 
@@ -804,7 +798,7 @@ class SearchDebounceTests(unittest.TestCase):
         self.assertEqual(_visible_ids(note_list), ["1"])
 
 
-@unittest.skipUnless(_display_available(), "no GDK display")
+@unittest.skipUnless(display_available(), "no GDK display")
 class FilterChangeHintResultTests(unittest.TestCase):
     """The monotone hints must not change *what* the list shows."""
 
@@ -870,7 +864,7 @@ class FilterChangeHintResultTests(unittest.TestCase):
         self.assertEqual(_visible_ids(note_list), ["1"])
 
 
-@unittest.skipUnless(_display_available(), "no GDK display")
+@unittest.skipUnless(display_available(), "no GDK display")
 class NoteListEmptyStateTests(unittest.TestCase):
     """The empty-state label says *why* the list is empty."""
 

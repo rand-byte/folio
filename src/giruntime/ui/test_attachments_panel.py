@@ -19,7 +19,7 @@ from collections.abc import Callable
 from datetime import UTC, datetime
 from pathlib import Path
 
-from gi.repository import Gdk, Gtk
+from gi.repository import Gtk
 
 from enums import AttachmentExportFailureReason, AttachmentRejectionReason
 from giruntime.controllers.app_state import AppState
@@ -32,19 +32,13 @@ from giruntime.ui.attachments_panel import (
     AttachmentsPanel,
     scroll_cap_height,
 )
+from giruntime.ui.test_display_guard import display_available
 from models.attachment import Attachment
 from models.note import Note
 from storage.protocols import AttachmentExportFailed, AttachmentRejected
 
 
 _FIXED_NOW: datetime = datetime(2026, 4, 28, 12, 0, 0, tzinfo=UTC)
-
-
-def _display_available() -> bool:
-    """True iff a GDK display can be opened — required for any
-    :class:`Gtk.Widget` subclass construction."""
-    Gtk.init_check()
-    return Gdk.Display.get_default() is not None
 
 
 def _make_note(note_id: str) -> Note:
@@ -336,7 +330,7 @@ class ScrollCapHeightTests(unittest.TestCase):
 # ---------------------------------------------------------------------------
 
 
-@unittest.skipUnless(_display_available(), "no GDK display")
+@unittest.skipUnless(display_available(), "no GDK display")
 class AttachmentsPanelRenderingTests(unittest.TestCase):
     def test_renders_one_card_per_attachment(self) -> None:
         panel, store, _, _, state = _build_panel(select_note=False)
@@ -428,7 +422,7 @@ class AttachmentsPanelRenderingTests(unittest.TestCase):
 # ---------------------------------------------------------------------------
 
 
-@unittest.skipUnless(_display_available(), "no GDK display")
+@unittest.skipUnless(display_available(), "no GDK display")
 class AttachmentsPanelGridTests(unittest.TestCase):
     def test_card_pairs_the_name_and_size_in_one_child_box(self) -> None:
         # The regression guard for the reported defect: the size is no
@@ -518,7 +512,7 @@ class AttachmentsPanelGridTests(unittest.TestCase):
 # ---------------------------------------------------------------------------
 
 
-@unittest.skipUnless(_display_available(), "no GDK display")
+@unittest.skipUnless(display_available(), "no GDK display")
 class AttachmentsPanelAddTests(unittest.TestCase):
     def test_add_button_opens_the_dialog(self) -> None:
         panel, _, opener, _, _ = _build_panel()
@@ -596,7 +590,7 @@ class AttachmentsPanelAddTests(unittest.TestCase):
 # ---------------------------------------------------------------------------
 
 
-@unittest.skipUnless(_display_available(), "no GDK display")
+@unittest.skipUnless(display_available(), "no GDK display")
 class AttachmentsPanelRemoveTests(unittest.TestCase):
     def test_remove_routes_to_controller_and_refreshes(self) -> None:
         panel, store, _, _, state = _build_panel(select_note=False)
@@ -624,7 +618,7 @@ class AttachmentsPanelRemoveTests(unittest.TestCase):
 # ---------------------------------------------------------------------------
 
 
-@unittest.skipUnless(_display_available(), "no GDK display")
+@unittest.skipUnless(display_available(), "no GDK display")
 class AttachmentsPanelSignalTests(unittest.TestCase):
     def test_attachments_changed_for_selected_note_reloads(self) -> None:
         # Another observer mutates the selected note's attachments

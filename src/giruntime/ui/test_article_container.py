@@ -15,7 +15,7 @@ from datetime import (
 from pathlib import Path
 from unittest import mock
 
-from gi.repository import Gdk, GLib, GObject, Gsk, Gtk
+from gi.repository import GLib, GObject, Gsk, Gtk
 
 from config.defaults import (
     ARTICLE_INNER_HPADDING_CHARS,
@@ -33,18 +33,13 @@ from giruntime.ui.article_container import (
     _FALLBACK_LINE_HEIGHT_PX,
 )
 from giruntime.ui.note_view import NoteView
+from giruntime.ui.test_display_guard import display_available
 from models.attachment import Attachment
 from models.note import Note
 from storage.protocols import AttachmentExportFailed
 
 
 _FIXED_NOW: datetime = datetime(2026, 4, 28, 12, 0, 0, tzinfo=UTC)
-
-
-def _display_available() -> bool:
-    """True iff a GDK display can be opened — required for widget construction."""
-    Gtk.init_check()
-    return Gdk.Display.get_default() is not None
 
 
 def _fixed_measurer(value: int) -> CharWidthMeasurer:
@@ -321,7 +316,7 @@ class _FakeAttachmentStore:
             ) from exc
 
 
-@unittest.skipUnless(_display_available(), "no GDK display")
+@unittest.skipUnless(display_available(), "no GDK display")
 class ArticleContainerWidthGettersTests(unittest.TestCase):
     """The container exposes two width getters and two unit getters.
 
@@ -501,7 +496,7 @@ def _transform_x_offset(transform: Gsk.Transform | None) -> int:
     return int(dx)
 
 
-@unittest.skipUnless(_display_available(), "no GDK display")
+@unittest.skipUnless(display_available(), "no GDK display")
 class ArticleContainerBaseClassTests(unittest.TestCase):
     """Lock the base class so the GTK 4 ``Gtk.Box``-can't-override-vfuncs
     regression cannot reappear.
@@ -521,7 +516,7 @@ class ArticleContainerBaseClassTests(unittest.TestCase):
         self.assertNotIsInstance(container, Gtk.Box)
 
 
-@unittest.skipUnless(_display_available(), "no GDK display")
+@unittest.skipUnless(display_available(), "no GDK display")
 class ArticleContainerSizeAllocateTests(unittest.TestCase):
     """Pin the column-width rule from §10 of the plan.
 
@@ -655,7 +650,7 @@ class ArticleContainerSizeAllocateTests(unittest.TestCase):
         container.do_size_allocate(outer + 100, 600, -1)
 
 
-@unittest.skipUnless(_display_available(), "no GDK display")
+@unittest.skipUnless(display_available(), "no GDK display")
 class ArticleContainerTeardownTests(unittest.TestCase):
     """Pin the teardown unparent that silences the GTK 4 finalize warning.
 
@@ -725,7 +720,7 @@ class ArticleContainerTeardownTests(unittest.TestCase):
         self.assertIsNone(child.get_parent())
 
 
-@unittest.skipUnless(_display_available(), "no GDK display")
+@unittest.skipUnless(display_available(), "no GDK display")
 class ArticleContainerMeasureTests(unittest.TestCase):
     """Pin the measure contract under Option C (the container is a
     ``Gtk.Scrollable``).
@@ -819,7 +814,7 @@ class ArticleContainerMeasureTests(unittest.TestCase):
         self.assertEqual(child.recorded_measure_calls, [])
 
 
-@unittest.skipUnless(_display_available(), "no GDK display")
+@unittest.skipUnless(display_available(), "no GDK display")
 class ArticleContainerScrollableTests(unittest.TestCase):
     """Pin Option C: :class:`ArticleContainer` implements ``Gtk.Scrollable``.
 
@@ -1077,7 +1072,7 @@ class ArticleContainerScrollableTests(unittest.TestCase):
         window.destroy()
 
 
-@unittest.skipUnless(_display_available(), "no GDK display")
+@unittest.skipUnless(display_available(), "no GDK display")
 class ArticleContainerScrollbarRegressionTests(unittest.TestCase):
     """End-to-end regression for the first-launch scrollbar bug.
 
