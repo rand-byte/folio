@@ -28,7 +28,9 @@ jobs:
       matrix:
         target: [type, lint, test]
     steps:
-      - uses: actions/checkout@v4
+      # v5 and later carry the node24 runtime; v4 is node20, which is EOL and
+      # being removed from the runners.
+      - uses: actions/checkout@v7
 
       - name: Provision
         run: |
