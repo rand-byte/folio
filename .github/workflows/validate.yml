@@ -28,8 +28,10 @@ jobs:
       matrix:
         target: [type, lint, test]
     steps:
-      # v5 and later carry the node24 runtime; v4 is node20, which is EOL and
-      # being removed from the runners.
+      # checkout v5 and later carry the node24 runtime; v4 is node20, which is
+      # EOL and being removed from the runners. The version at which node24
+      # becomes the default is per-action, so this is not a rule to carry over
+      # to other actions unchecked.
       - uses: actions/checkout@v7
 
       - name: Provision

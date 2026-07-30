@@ -43,9 +43,11 @@ jobs:
           apt-get install -y --no-install-recommends \
             git ca-certificates make dpkg-dev devscripts equivs
 
-      # v5 and later carry the node24 runtime; v4 is node20, which is EOL and
-      # being removed from the runners. The default depth of 1 is enough --
-      # `make deb` only ever reads HEAD.
+      # checkout v5 and later carry the node24 runtime; v4 is node20, which is
+      # EOL and being removed from the runners. The version at which node24
+      # becomes the default is per-action -- it is *not* v5 for
+      # upload-artifact below. The default depth of 1 is enough -- `make deb`
+      # only ever reads HEAD.
       - uses: actions/checkout@v7
 
       # Container jobs trip git's dubious-ownership check on the workspace,
@@ -70,7 +72,14 @@ jobs:
       - name: make deb
         run: make deb
 
-      - uses: actions/upload-artifact@v4
+      # v6 is the first release that actually *runs* on node24; v5 advertised
+      # node24 support while still defaulting to node20, so bumping to v5 would
+      # not clear the deprecation warning. v7 adds unzipped single-file uploads
+      # (`archive: false`) and moves the action to ESM -- neither touches the
+      # three inputs used here, so the bump is a drop-in. v7 wants runner
+      # >= 2.327.1, which ubuntu-latest satisfies; the runner injects its own
+      # node into the trixie container, whose glibc clears node24's floor.
+      - uses: actions/upload-artifact@v7
         with:
           name: folio-deb
           path: build/deb/*.deb
