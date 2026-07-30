@@ -29,7 +29,7 @@ not *how it works internally*.
 
 **Full headless suite** (e.g. CI) additionally needs `weston`: the widget-level UI tests are gated behind a display guard and only run when a GDK display can be opened. `make test` supplies one by launching a headless Weston compositor (see §5). Without a display those tests **skip rather than fail** — so a plain `unittest` run with no display can report `OK` while exercising none of the GTK widgets. `make test` closes that hole by exporting `FOLIO_REQUIRE_DISPLAY=1`, which turns a missing display into a named failure (see §5); a hand-run leaves it unset and skips as before.
 
-**CI** runs `make type`, `make lint` and `make test` on every push and pull request — `.github/workflows/validate.yml`, in a `debian:trixie` container (the platform `debian/control` targets, and the one whose system Python satisfies `requires-python >= 3.13` while still carrying `python3-gi`). The workflow only provisions packages and calls `make`, so the Makefile stays the single definition of what each target does.
+**CI** runs `make type`, `make lint` and `make test` on every push and pull request — `.github/workflows/validate.yml`, in a `debian:trixie` container (the platform `debian/control` targets, and the one whose system Python satisfies `requires-python >= 3.13` while still carrying `python3-gi`). The workflow only provisions packages and calls `make`, so the Makefile stays the single definition of what each target does. A second workflow, `.github/workflows/package.yml`, runs `make deb` on the same trigger and uploads the resulting `.deb` as a run artifact (§7).
 
 ---
 
@@ -470,6 +470,43 @@ no relationship to the one Meson compiles. It *does* depend on `version-check`.
 Binary-only (`-us -uc -b`): `dpkg-source` never runs, so **`make deb` produces
 no source package and no orig tarball**.
 
+#### The same build in CI (`.github/workflows/package.yml`)
+
+`make deb` also runs on every push and pull request, in the same `debian:trixie`
+container `validate.yml` uses, and the `.deb` is uploaded as a **run artifact**
+(`folio-deb`). The workflow provisions a host and calls the target — it restates
+neither the build recipe nor the build-dependency list, so it cannot drift from
+the `Makefile` or from `debian/control`.
+
+Three things about that environment are load-bearing, all recorded in the file
+itself:
+
+- **`git` is installed *before* `actions/checkout`.** The trixie image has none,
+  and `actions/checkout` silently falls back to a REST tarball when git is
+  missing — leaving no `.git`, which breaks *both* of `make deb`'s git-shaped
+  preconditions (the dirty-tree guard and `git archive HEAD`). A tarball
+  checkout fails the job at `make deb`, not at checkout, so the cause is not
+  obvious from the failure.
+- **`git config --global --add safe.directory`** on the workspace: container
+  jobs trip git's dubious-ownership check, which would fail the dirty-tree
+  guard before it could evaluate anything.
+- **`mk-build-deps --install --remove … debian/control`** installs
+  `Build-Depends` rather than an inline apt list. `dpkg-dev`, installed
+  alongside `git`, is *not* a restatement of it — it backs the `Makefile`'s own
+  `deb-tools` guard (`dpkg-parsechangelog`, `dpkg-buildpackage`).
+
+Consequently the packaging job needs **no GTK runtime, no typelibs and no
+weston**: the `.deb` build never imports `gi` (Meson's install script pulls only
+`build_pyz._included`) and `debian/rules` disables `dh_auto_test`, so the widget
+suite stays entirely `validate.yml`'s job. Because `make deb` depends on
+`version-check`, a violation of the version table below is a red job on every
+push rather than a surprise at release time.
+
+Run artifacts are **not a distribution channel** — they expire and require a
+GitHub login. Releases remain the published route (§7 intro); the artifact
+exists so that a build failure is caught per-commit and so a reviewer can
+install the exact package a branch produces.
+
 #### Manual orchestration (the documented fallback)
 
 Use the recipe below when you need what `make deb` knowingly does not do:
@@ -512,8 +549,8 @@ same release `type="development"`. The trailing `-1` is the *Debian revision*
 
 Files: `meson.build`, `folio.in` (launcher template),
 `build-aux/install_python_tree.py`, `build-aux/check_version.py` (+ its
-`test_check_version.py`), `data/`, `debian/`, and the `deb*` / `version-check`
-targets in the `Makefile`. None of them live inside `src/` — `src/` is installed
+`test_check_version.py`), `data/`, `debian/`, `.github/workflows/package.yml`,
+and the `deb*` / `version-check` targets in the `Makefile`. None of them live inside `src/` — `src/` is installed
 wholesale. `build-aux/` is build tooling: never shipped, but type-checked,
 linted and tested like everything else (the `Makefile` globs it, so a new script
 is covered by construction).

@@ -1,0 +1,77 @@
+# Builds the Debian package on every push/PR and uploads it as a run artifact.
+#
+# Like validate.yml this file is deliberately thin: it provisions a host and
+# calls an existing Makefile target. `make deb` stays the single definition of
+# *how* the package is built (git archive HEAD -> build/deb/ ->
+# dpkg-buildpackage inside that export), and debian/control stays the single
+# definition of what the build needs -- mk-build-deps reads Build-Depends
+# rather than restating it here, so the workflow cannot drift from the
+# packaging.
+#
+# Runs in a debian:trixie container rather than on a runner image because
+# debian/control build-depends on python3 (>= 3.13) and ubuntu-latest ships
+# 3.12, so dpkg-buildpackage's build-dependency check would fail. Trixie is
+# the platform the package targets, matching validate.yml.
+#
+# Note what is NOT here: no GTK runtime, no typelibs, no weston. The .deb
+# build never imports `gi` -- Meson's install script only pulls
+# `build_pyz._included` -- and debian/rules disables dh_auto_test, so the GTK
+# suite is validate.yml's job (src/README.md section 7).
+name: package
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  deb:
+    runs-on: ubuntu-latest
+    container: debian:trixie
+    steps:
+      # MUST precede checkout. The trixie image carries no git, and
+      # actions/checkout silently falls back to a REST tarball when git is
+      # missing -- which leaves no .git at all, breaking both of `make deb`'s
+      # git-shaped preconditions (the dirty-tree guard and `git archive
+      # HEAD`). devscripts/equivs supply mk-build-deps; dpkg-dev backs the
+      # Makefile's own `deb-tools` guard (dpkg-parsechangelog,
+      # dpkg-buildpackage) and is not a restatement of Build-Depends.
+      - name: Install checkout and packaging prerequisites
+        run: |
+          set -eux
+          apt-get update
+          apt-get install -y --no-install-recommends \
+            git ca-certificates make dpkg-dev devscripts equivs
+
+      # v5 and later carry the node24 runtime; v4 is node20, which is EOL and
+      # being removed from the runners. The default depth of 1 is enough --
+      # `make deb` only ever reads HEAD.
+      - uses: actions/checkout@v7
+
+      # Container jobs trip git's dubious-ownership check on the workspace,
+      # which would fail the dirty-tree guard before it could run.
+      - name: Trust the workspace
+        run: git config --global --add safe.directory "$GITHUB_WORKSPACE"
+
+      - name: Install build dependencies
+        run: |
+          set -eux
+          mk-build-deps --install --remove \
+            --tool="apt-get -y --no-install-recommends" debian/control
+
+      - name: Report the environment
+        run: |
+          python3 -V
+          dpkg-parsechangelog -l debian/changelog -S Version
+
+      # Runs version-check (build-aux/check_version.py) and the dirty-tree
+      # guard before building, so a version disagreement is a red job here
+      # rather than a surprise at release time.
+      - name: make deb
+        run: make deb
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: folio-deb
+          path: build/deb/*.deb
+          if-no-files-found: error
