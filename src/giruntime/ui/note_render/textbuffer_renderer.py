@@ -39,7 +39,7 @@ Principles & invariants
   (``GLib.Error`` from :meth:`Gdk.Texture.new_from_bytes`) produce a
   :class:`_PlaceholderImagePaintable` instead — a tiny grey rectangle
   that signals the missing image without aborting the whole render.
-* The :data:`ColumnWidthResolver` is read once per render (callers can
+* The :data:`ColumnWidthMeasurer` is read once per render (callers can
   call :meth:`render_into` again after a column-width change). It is
   consulted by both the image and table paths: tables divide it into
   per-column tab stops, images cap their intrinsic width against it via
@@ -175,16 +175,54 @@ from giruntime.ui.note_render.tag_table import (
 )
 from config.defaults import TABLE_CELL_HPADDING_PX
 from enums import HeadingTrailing, ListNumberStyle
-from storage.protocols import (
-    AttachmentListResolver,
-    ColumnWidthResolver,
-    ImageBytesResolver,
-)
+from models.attachment import Attachment
 
 
 # ---------------------------------------------------------------------------
 # Public types
 # ---------------------------------------------------------------------------
+
+type ImageBytesResolver = Callable[[str], bytes]
+"""Resolves an image identifier (filename or attachment id, as agreed
+between the renderer and its caller) to the raw image bytes.
+
+Injected at construction of :class:`TextBufferRenderer` so tests can
+pass a fake (e.g. a function returning a 1x1 PNG) and production can
+wire :meth:`~storage.protocols.AttachmentStoreProtocol.get_bytes`
+through a closure that captures the current note context.
+"""
+
+
+type AttachmentListResolver = Callable[[], tuple[Attachment, ...]]
+"""Returns the attachment **metadata** of the note currently rendered.
+
+The renderer calls this once per render to expand an
+``attachments::[]`` macro into an ordinary table. It is deliberately a
+metadata-only surface — no BLOB is touched to *draw* the table, which
+is the whole point of the metadata/bytes split; bytes are pulled only
+when the reader actually saves an attachment.
+
+Injected at construction, like :data:`ImageBytesResolver`: production
+wires it to
+:meth:`~storage.protocols.AttachmentStoreProtocol.list_for_note`
+through a closure that captures the current note context, the help
+window wires it to a static demo list, and tests pass a literal tuple.
+"""
+
+
+type ColumnWidthMeasurer = Callable[[], int]
+"""Returns the live pixel width of the rendered article column.
+
+The renderer calls this when computing ``max-width-chars`` for table
+cell labels so wrapping tracks the user's window size. Tests pass a
+closure returning a fixed integer; production wires it to
+:meth:`~giruntime.ui.article_container.ArticleContainer.target_column_width`.
+
+Named for the measurement it performs, matching its siblings
+:data:`CellWidthMeasurer` and
+:data:`~giruntime.ui.article_container.CharWidthMeasurer`.
+"""
+
 
 type CellWidthMeasurer = Callable[[str, bool, bool], int]
 """Measures the rendered pixel width of a table-cell text run.
@@ -359,7 +397,7 @@ class TextBufferRenderer:
 
     _image_bytes_for: ImageBytesResolver
     _attachments_for: AttachmentListResolver
-    _column_width_px: ColumnWidthResolver
+    _column_width_px: ColumnWidthMeasurer
     _cell_width_px: CellWidthMeasurer
     _tag_table: Gtk.TextTagTable
     _activation_tags: dict[Gtk.TextTag, ActivationTarget]
@@ -370,7 +408,7 @@ class TextBufferRenderer:
         *,
         image_bytes_for: ImageBytesResolver,
         attachments_for: AttachmentListResolver,
-        column_width_px: ColumnWidthResolver,
+        column_width_px: ColumnWidthMeasurer,
         cell_width_px: CellWidthMeasurer,
         tag_table: Gtk.TextTagTable,
     ) -> None:

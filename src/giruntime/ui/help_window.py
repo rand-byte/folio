@@ -37,15 +37,17 @@ Principles & invariants
   or the gresource — the help is package data, not user content.
 * The renderer's two injected dependencies are wired here:
 
-  * the :data:`~storage.protocols.ImageBytesResolver` is a small map from
-    the help's image filename(s) to the bundled demo bytes. The help
+  * the :data:`~ui.note_render.textbuffer_renderer.ImageBytesResolver`
+    is a small map from the help's image filename(s) to the bundled
+    demo bytes. The help
     *must* demonstrate the image capability with a real, decodable image
     (the §7 coverage test forces an ``image::`` macro into the source),
     so the resolver returns real bytes — and a filename the help does not
     bundle is a help-authoring bug that surfaces as a ``KeyError`` rather
     than a silent grey placeholder.
-  * the :data:`~storage.protocols.ColumnWidthResolver` returns a fixed
-    reading-column width derived from the measured body font, so images
+  * the :data:`~ui.note_render.textbuffer_renderer.ColumnWidthMeasurer`
+    returns a fixed reading-column width derived from the measured
+    body font, so images
     and tables lay out against a stable column without depending on the
     window being realised at render time.
 
@@ -53,7 +55,7 @@ Principles & invariants
   Tables are native buffer text (tab-array rows), the demo image is an
   inline paintable, and nothing escapes to a child widget. The renderer's
   table cells are fitted to the column by the
-  :data:`~giruntime.ui.note_render.textbuffer_renderer.CellWidthMeasurer`
+  :data:`~ui.note_render.textbuffer_renderer.CellWidthMeasurer`
   this window wires from the shared article view's Pango context (via
   :func:`giruntime.ui.note_view.make_cell_width_measurer`), exactly as the
   note view does.

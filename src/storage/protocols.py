@@ -1,10 +1,10 @@
-"""Stable typing surface for the storage layer and the renderer's seams.
+"""Stable typing surface for the storage layer.
 
 Principles & invariants
 -----------------------
 * This module is **pure typing** — it defines :class:`typing.Protocol`
-  interfaces, three type aliases for renderer resolvers, and the
-  exceptions that those protocols' contracts mention. It never imports
+  interfaces and the exceptions that those protocols' contracts
+  mention. It never imports
   from a higher layer (controllers, ui), and at runtime it never imports
   ``gi`` or ``sqlite3``. Concrete implementations live in sibling modules
   (``note_repository.py``, ``attachment_store.py``) and depend on this
@@ -34,17 +34,24 @@ Principles & invariants
   callers need to catch. Putting it next to the protocols means
   controllers, repositories, and tests have a single import for
   "everything you need to talk to storage".
-* Resolver aliases (:data:`ImageBytesResolver`,
-  :data:`AttachmentListResolver`, :data:`ColumnWidthResolver`) are
-  defined with PEP 695 ``type`` statements. They name the
-  construction-time dependencies of the concrete renderer, which is why
-  they are aliases rather than protocol methods: they describe
-  ``__init__`` shapes, and a protocol describes a call surface.
+* **The renderer's construction-time seams are not declared here.**
+  ``ImageBytesResolver``, ``AttachmentListResolver`` and
+  ``ColumnWidthMeasurer`` were moved to
+  :mod:`giruntime.ui.note_render.textbuffer_renderer`, beside the
+  aliases that never left it
+  (:data:`~ui.note_render.textbuffer_renderer.CellWidthMeasurer`,
+  :data:`~ui.note_render.textbuffer_renderer.PostTitleHook`).
+  They describe an ``__init__`` shape belonging to one widget-layer
+  class, and this module is the surface *higher layers import from
+  storage* — same reasoning that keeps
+  ``ui/link_handler.py``'s ``TagTargetResolverProtocol`` next to its
+  consumer. A ``Callable`` alias belongs with the module that consumes
+  it; put a new one here only when a layer below ``giruntime`` needs to
+  name it.
 """
 
 from __future__ import annotations
 
-from collections.abc import Callable
 from datetime import datetime
 from pathlib import Path
 from typing import Protocol
@@ -52,47 +59,6 @@ from typing import Protocol
 from enums import AttachmentExportFailureReason, AttachmentRejectionReason
 from models.attachment import Attachment
 from models.note import Note
-
-# ---------------------------------------------------------------------------
-# Resolver type aliases (PEP 695)
-# ---------------------------------------------------------------------------
-
-type ImageBytesResolver = Callable[[str], bytes]
-"""Resolves an image identifier (filename or attachment id, as agreed
-between the renderer and its caller) to the raw image bytes.
-
-Injected at construction of the concrete renderer so tests can pass a
-fake (e.g. a function returning a 1x1 PNG) and production can wire
-:meth:`AttachmentStoreProtocol.get_bytes` through a closure that captures
-the current note context.
-"""
-
-type AttachmentListResolver = Callable[[], tuple[Attachment, ...]]
-"""Returns the attachment **metadata** of the note currently rendered.
-
-The renderer calls this once per render to expand an
-``attachments::[]`` macro into an ordinary table. It is deliberately a
-metadata-only surface — no BLOB is touched to *draw* the table, which
-is the whole point of the metadata/bytes split; bytes are pulled only
-when the reader actually saves an attachment.
-
-Injected at construction of the concrete renderer, like
-:data:`ImageBytesResolver`: production wires it to
-:meth:`AttachmentStoreProtocol.list_for_note` through a closure that
-captures the current note context, the help window wires it to a static
-demo list, and tests pass a literal tuple.
-"""
-
-
-type ColumnWidthResolver = Callable[[], int]
-"""Returns the live pixel width of the rendered article column.
-
-The concrete renderer calls this when computing ``max-width-chars`` for
-table cell labels so wrapping tracks the user's window size. Tests pass
-a closure returning a fixed integer; production wires it to
-``ArticleContainer.target_column_width()``.
-"""
-
 
 # ---------------------------------------------------------------------------
 # Storage-layer exceptions

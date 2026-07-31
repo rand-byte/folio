@@ -9,7 +9,8 @@ Principles & invariants
   :mod:`giruntime.ui.note_render.article_text_view`. It names no
   :class:`~asciidoc.ast.Document`, renderer, or tag-table symbol; the renderer
   merely *reads* the width it exposes, via an injected
-  :data:`~storage.protocols.ColumnWidthResolver`, so the two stay decoupled.
+  :data:`~ui.note_render.textbuffer_renderer.ColumnWidthMeasurer`,
+  so the two stay decoupled.
 * Vertical scrolling is pass-through: the container forwards the scrolled
   window's ``vadjustment`` / ``vscroll-policy`` to the (already scrollable)
   text view, which is the vertical scrollport. Horizontal is container-owned:

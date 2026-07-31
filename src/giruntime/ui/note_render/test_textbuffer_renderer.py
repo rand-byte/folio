@@ -777,7 +777,7 @@ class ImageRenderingTests(unittest.TestCase):
 
     def test_scaled_paintable_zero_column_width_uses_natural_dims(self) -> None:
         # Defensive: before the article container has been allocated
-        # the column-width resolver may return 0. The wrapper falls
+        # the column-width measurer may return 0. The wrapper falls
         # back to the texture's natural dimensions in that case so the
         # paintable doesn't collapse to invisible.
         texture = Gdk.Texture.new_from_bytes(GLib.Bytes.new(_PNG_200X100))
@@ -845,9 +845,9 @@ class ImageRenderingTests(unittest.TestCase):
 
 
 @unittest.skipUnless(display_available(), "no GDK display")
-class ColumnWidthResolverTests(unittest.TestCase):
-    def test_resolver_is_not_called_for_text_only_blocks(self) -> None:
-        # The renderer only invokes the column-width resolver when a
+class ColumnWidthMeasurerTests(unittest.TestCase):
+    def test_measurer_is_not_called_for_text_only_blocks(self) -> None:
+        # The renderer only invokes the column-width measurer when a
         # block actually needs a pixel width: tables (to set the
         # frame's size request) and images (to construct the scaled
         # paintable). Pure-prose blocks — headings, paragraphs, lists,
@@ -872,9 +872,9 @@ class ColumnWidthResolverTests(unittest.TestCase):
         )
         self.assertEqual(calls, 0)
 
-    def test_resolver_is_called_when_image_is_present(self) -> None:
+    def test_measurer_is_called_when_image_is_present(self) -> None:
         # Images need the column width to construct the scaled
-        # paintable. The resolver is read once per image.
+        # paintable. The measurer is read once per image.
         calls = 0
 
         def column_width() -> int:
@@ -888,7 +888,7 @@ class ColumnWidthResolverTests(unittest.TestCase):
         )
         self.assertEqual(calls, 1)
 
-    def test_resolver_is_called_when_table_is_present(self) -> None:
+    def test_measurer_is_called_when_table_is_present(self) -> None:
         # Tables need the column width for both the frame's size
         # request and the cell-label max-width-chars arithmetic.
         calls = 0
@@ -1291,7 +1291,7 @@ class TableColumnPixelsTests(unittest.TestCase):
                 self.assertEqual(len(widths), len(proportions))
 
     def test_non_positive_column_width_yields_zero_widths(self) -> None:
-        # Before the article container is allocated the resolver can
+        # Before the article container is allocated the measurer can
         # return 0; the helper must not divide by zero.
         for column_px in (0, -1, -900):
             with self.subTest(column_px=column_px):

@@ -77,7 +77,8 @@ def load_bytes(document: SystemDocument) -> bytes:
     Reads the file named by ``document``'s value from the
     ``system_docs`` package via :func:`importlib.resources`. Used for the
     help's demo image, whose bytes the help window's
-    :data:`storage.protocols.ImageBytesResolver` serves to the renderer.
+    :data:`ui.note_render.textbuffer_renderer.ImageBytesResolver`
+    serves to the renderer.
     """
     return (
         importlib.resources

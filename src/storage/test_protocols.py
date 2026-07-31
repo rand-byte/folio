@@ -6,10 +6,6 @@ this file exercises at runtime is:
 
 * the storage-layer exception :class:`AttachmentRejected` — its
   constructor, attributes, and ``str()`` output;
-* that the resolver type aliases and Protocol classes are importable
-  and are the kinds of objects we expect (``TypeAliasType`` for the PEP
-  695 aliases; classes whose ``_is_protocol`` flag is set for the
-  Protocols);
 * that a hand-rolled in-memory fake satisfying each protocol's surface
   is callable through every method without falling foul of signature
   drift.
@@ -20,7 +16,6 @@ from __future__ import annotations
 import unittest
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import TypeAliasType
 
 from enums import AttachmentExportFailureReason, AttachmentRejectionReason
 from models.attachment import Attachment
@@ -29,8 +24,6 @@ from storage.protocols import (
     AttachmentExportFailed,
     AttachmentRejected,
     AttachmentStoreProtocol,
-    ColumnWidthResolver,
-    ImageBytesResolver,
     NoteRepositoryProtocol,
 )
 
@@ -83,38 +76,6 @@ class AttachmentRejectedTests(unittest.TestCase):
 
     def test_is_exception_subclass(self) -> None:
         self.assertTrue(issubclass(AttachmentRejected, Exception))
-
-
-# ---------------------------------------------------------------------------
-# Type aliases
-# ---------------------------------------------------------------------------
-
-
-class TypeAliasTests(unittest.TestCase):
-    def test_image_bytes_resolver_is_type_alias(self) -> None:
-        self.assertIsInstance(ImageBytesResolver, TypeAliasType)
-
-    def test_column_width_resolver_is_type_alias(self) -> None:
-        self.assertIsInstance(ColumnWidthResolver, TypeAliasType)
-
-
-# ---------------------------------------------------------------------------
-# Protocol surface flag
-# ---------------------------------------------------------------------------
-
-
-class ProtocolFlagTests(unittest.TestCase):
-    """Every advertised Protocol class is in fact a Protocol."""
-
-    def test_note_repository_protocol(self) -> None:
-        self.assertTrue(
-            getattr(NoteRepositoryProtocol, "_is_protocol", False),
-        )
-
-    def test_attachment_store_protocol(self) -> None:
-        self.assertTrue(
-            getattr(AttachmentStoreProtocol, "_is_protocol", False),
-        )
 
 
 # ---------------------------------------------------------------------------

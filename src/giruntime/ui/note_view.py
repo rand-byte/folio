@@ -266,15 +266,13 @@ from giruntime.ui.note_render.tag_table import (
 )
 from giruntime.ui.note_render.textbuffer_renderer import (
     CellWidthMeasurer,
+    ImageBytesResolver,
     TextBufferRenderer,
 )
 from models.attachment import Attachment
 from models.note import Note
 from models.parse_error import ParseError
-from storage.protocols import (
-    AttachmentStoreProtocol,
-    ImageBytesResolver,
-)
+from storage.protocols import AttachmentStoreProtocol
 
 
 type PaneVisibilityPredicate = Callable[[], bool]

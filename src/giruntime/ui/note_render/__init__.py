@@ -28,8 +28,8 @@ and ``storage.protocols``; keeping them here lets :mod:`asciidoc` stay a pure,
 GTK-free format library. The sub-package imports nothing upward from ``ui`` and
 touches no concrete ``storage``. The renderer depends on a column width only
 abstractly, through an injected
-:data:`~storage.protocols.ColumnWidthResolver`, so it never names the
-container that supplies it.
+:data:`~ui.note_render.textbuffer_renderer.ColumnWidthMeasurer`,
+so it never names the container that supplies it.
 """
 
 from __future__ import annotations
