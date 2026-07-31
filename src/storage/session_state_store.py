@@ -1,4 +1,9 @@
-"""JSON-file-backed implementation of :class:`SessionStateProtocol`.
+"""JSON-file-backed store for the restored :class:`SessionState`.
+
+This class is its own contract: there is no ``SessionStateProtocol`` in
+:mod:`storage.protocols`, because the one consumer
+(:mod:`giruntime.ui.application`) annotates the concrete store. Add a
+protocol only if a second implementation or a typed seam needs one.
 
 Principles & invariants
 ------------------------

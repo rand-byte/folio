@@ -171,10 +171,12 @@ class TagTargetResolverProtocol(Protocol):
     which satisfies this surface without an adapter, and lets test fakes
     stand in structurally.
 
-    This is a deliberately narrower, distinct surface from
-    :class:`storage.protocols.RendererProtocol` (which describes
-    ``render_into``): a consumer depends only on the calls it actually
-    makes, so the two renderer surfaces are kept separate.
+    Declaring it *here* rather than in :mod:`storage.protocols` is the
+    point: a consumer depends only on the calls it actually makes, and
+    the surface lives next to the consumer that names it. It is also
+    what keeps :mod:`storage.protocols` free of ``gi`` entirely — the
+    ``Gtk.TextTag`` in this signature is a widget-layer concern, so it
+    is declared in the widget layer.
     """
 
     def target_for_tags(

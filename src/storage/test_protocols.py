@@ -18,11 +18,9 @@ this file exercises at runtime is:
 from __future__ import annotations
 
 import unittest
-from collections.abc import Callable
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import TYPE_CHECKING, TypeAliasType
-from unittest.mock import Mock
+from typing import TypeAliasType
 
 from enums import AttachmentExportFailureReason, AttachmentRejectionReason
 from models.attachment import Attachment
@@ -34,12 +32,7 @@ from storage.protocols import (
     ColumnWidthResolver,
     ImageBytesResolver,
     NoteRepositoryProtocol,
-    RendererProtocol,
 )
-
-if TYPE_CHECKING:
-    # Mirrors the production module: GTK is only a type-time dependency.
-    from gi.repository import Gtk
 
 
 # ---------------------------------------------------------------------------
@@ -121,11 +114,6 @@ class ProtocolFlagTests(unittest.TestCase):
     def test_attachment_store_protocol(self) -> None:
         self.assertTrue(
             getattr(AttachmentStoreProtocol, "_is_protocol", False),
-        )
-
-    def test_renderer_protocol(self) -> None:
-        self.assertTrue(
-            getattr(RendererProtocol, "_is_protocol", False),
         )
 
 
@@ -242,20 +230,6 @@ class FakeAttachmentStoreSanityTests(unittest.TestCase):
         self.assertEqual(fake.get_bytes(a.id), b"")
         fake.remove(a.id)
         self.assertEqual(fake.list_for_note("n1"), [])
-
-
-# ---------------------------------------------------------------------------
-# Renderer protocol: spot-check via a Mock
-# ---------------------------------------------------------------------------
-
-
-class RendererProtocolMockTests(unittest.TestCase):
-    def test_call_signature_matches_protocol(self) -> None:
-        renderer = Mock(spec=RendererProtocol)
-        # Just confirms the attribute exists; static checkers verify
-        # the typing.
-        called: Callable[..., None] = renderer.render_into
-        self.assertTrue(callable(called))
 
 
 if __name__ == "__main__":

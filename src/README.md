@@ -85,7 +85,7 @@ and the view that paints them — lives under `giruntime/ui/note_render/` (not i
 | `config` | `enums`, `models` | `storage`, `controllers`, `ui`, `asciidoc` |
 | `system_docs` | `enums` (+ stdlib `importlib.resources`) | `storage`, `controllers`, `ui`, `gi`, `asciidoc` |
 | `asciidoc` (`ast`, `lexer`, `inline_parser`, `parser`, `summary`) | `enums`, `models`, `config` | `storage`, `controllers`, `ui`, `gi`, `storage.protocols` |
-| `storage.protocols` | `enums`, `models` (uses `gi` only under `TYPE_CHECKING`) | everything else |
+| `storage.protocols` | `enums`, `models` | everything else (**no `gi` at all**, not even under `TYPE_CHECKING`) |
 | `storage` (concrete) | `enums`, `models`, `config`, `system_docs`, `storage.protocols`, `sqlite3`, `asciidoc` (pure core) | `gi`, `controllers`, `ui` |
 | `search` | `enums`, `models` | `storage` (concrete), `controllers`, `ui`, `gi` |
 | `giruntime/controllers` | `enums`, `models`, `config`, `search`, `storage.protocols`, `gi` (`GObject` / `Gio`) | concrete `storage`, `giruntime/ui`, **`asciidoc`** |
@@ -207,7 +207,7 @@ A **pure** format library: GTK-free and storage-free, importing only `enums` /
 `protocols.py` is the typing surface every higher layer imports; concrete
 classes are siblings.
 
-- **`protocols.py`** — repository / attachment-store / session-state / renderer protocols, plus the `AttachmentRejected` / `AttachmentExportFailed` exceptions and resolver aliases (`ImageBytesResolver`, `AttachmentListResolver`, …). Pure typing — no `sqlite3` or `gi` at runtime.
+- **`protocols.py`** — the repository and attachment-store protocols, plus the `AttachmentRejected` / `AttachmentExportFailed` exceptions and the renderer's resolver aliases (`ImageBytesResolver`, `AttachmentListResolver`, `ColumnWidthResolver`). Pure typing — no `sqlite3`, and no `gi` **at all** (not even under `TYPE_CHECKING`). A protocol lives here only while a call site is annotated with it: `SessionStateProtocol` and `RendererProtocol` were deleted because nothing ever was — `application.py` names the concrete `SessionStateStore`, `note_view.py` names the concrete renderer, and the one renderer surface that *is* typed structurally (`target_for_tags`) is declared next to its consumer in `ui/link_handler.py`. Read the module docstring before adding one back.
 - **`database.py`** — owns the single `sqlite3.Connection` (`autocommit=True`, composable `transaction()` via savepoints) and applies its connection settings from one declarative table (`_CONNECTION_PRAGMAS`): `foreign_keys=ON` (required — a silent failure breaks `ON DELETE CASCADE`), `journal_mode=WAL` (best-effort — `:memory:` and shared-memory-less filesystems keep their mode), and `busy_timeout`. `close()` is an owner responsibility (the app calls it on shutdown so WAL sidecars are checkpointed away); it is idempotent and backs the context-manager protocol.
 - **`migrations.py`** — all schema statements in an append-only `ALL_MIGRATIONS`; `apply_pending()` is idempotent. See the live schema below.
 - **`note_repository.py`** — SQLite-backed repository and **single owner of the `source → cached state` mapping**: `insert` / `update_source` derive title/snippet/tags, write the cached columns and `note_tags`, and return the persisted derived `Note`.

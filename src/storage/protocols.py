@@ -1,15 +1,31 @@
-"""Stable typing surface for the storage and rendering layers.
+"""Stable typing surface for the storage layer and the renderer's seams.
 
 Principles & invariants
 -----------------------
 * This module is **pure typing** — it defines :class:`typing.Protocol`
-  interfaces, two type aliases for renderer resolvers, and the
-  exception that those protocols' contracts mention. It never imports
+  interfaces, three type aliases for renderer resolvers, and the
+  exceptions that those protocols' contracts mention. It never imports
   from a higher layer (controllers, ui), and at runtime it never imports
   ``gi`` or ``sqlite3``. Concrete implementations live in sibling modules
-  (``note_repository.py``, ``attachment_store.py``,
-  ``session_state_store.py``, ``ui/note_render/textbuffer_renderer.py``)
-  and depend on this module — never the other way round.
+  (``note_repository.py``, ``attachment_store.py``) and depend on this
+  module — never the other way round.
+* **A protocol lives here only while something is typed against it.**
+  This is the typing surface higher layers *import*, not a catalogue of
+  every storage-shaped class in the tree: a Protocol nothing annotates
+  is dead weight that still has to be kept in step with an
+  implementation, and it drifts silently because no checker compares
+  the two. ``SessionStateProtocol`` and ``RendererProtocol`` were
+  removed for exactly that reason — ``application.py`` names the
+  concrete :class:`~storage.session_state_store.SessionStateStore`, and
+  the note view names the concrete renderer, so neither protocol was
+  ever a call-site contract. Add one back when a call site is annotated
+  with it, not before.
+* Consequently this module imports **no** ``gi`` at all, not even under
+  ``if TYPE_CHECKING``: the only signature that named a GTK type
+  (``RendererProtocol.render_into``) is gone. A widget-facing surface
+  that needs a GTK type belongs next to its consumer — see
+  ``ui/link_handler.py``'s ``TagTargetResolverProtocol``, which is
+  declared where it is used.
 * Every method signature uses **specific** parameter and return types —
   no ``Any``, no ``object``. The protocol *is* the contract; vague types
   here propagate vagueness to every call site.
@@ -18,17 +34,12 @@ Principles & invariants
   callers need to catch. Putting it next to the protocols means
   controllers, repositories, and tests have a single import for
   "everything you need to talk to storage".
-* The rendering protocol references :class:`Gtk.TextBuffer` for type
-  checking but never imports it at runtime. GTK is not a runtime
-  dependency of this module — that arrives later in the build (step 8).
-  This is achieved with the canonical ``if TYPE_CHECKING`` guard plus
-  ``from __future__ import annotations`` so the name is only resolved by
-  static checkers.
-* Resolver aliases (:data:`ImageBytesResolver`, :data:`ColumnWidthResolver`)
-  are defined with PEP 695 ``type`` statements. They name the construction
-  -time dependencies of the concrete renderer; the protocol itself does
-  not expose them because protocols describe call surfaces, not
-  ``__init__`` shapes.
+* Resolver aliases (:data:`ImageBytesResolver`,
+  :data:`AttachmentListResolver`, :data:`ColumnWidthResolver`) are
+  defined with PEP 695 ``type`` statements. They name the
+  construction-time dependencies of the concrete renderer, which is why
+  they are aliases rather than protocol methods: they describe
+  ``__init__`` shapes, and a protocol describes a call surface.
 """
 
 from __future__ import annotations
@@ -36,19 +47,11 @@ from __future__ import annotations
 from collections.abc import Callable
 from datetime import datetime
 from pathlib import Path
-from typing import TYPE_CHECKING, Protocol
+from typing import Protocol
 
 from enums import AttachmentExportFailureReason, AttachmentRejectionReason
 from models.attachment import Attachment
 from models.note import Note
-from models.session_state import SessionState
-
-if TYPE_CHECKING:
-    # GTK is only a runtime dependency from build step 8 onwards. Pulling
-    # it in for static type-checking only keeps this module importable on
-    # any machine — including CI runs that never spin up a display server.
-    from gi.repository import Gtk
-
 
 # ---------------------------------------------------------------------------
 # Resolver type aliases (PEP 695)
@@ -259,54 +262,4 @@ class AttachmentStoreProtocol(Protocol):
         :class:`Attachment` objects nor BLOBs, so the note-list pane can
         surface a per-note attachment badge cheaply without touching the
         metadata/bytes split that the rest of this protocol enforces.
-        """
-
-
-class SessionStateProtocol(Protocol):
-    """Read/write surface for the last-open-note and window session state.
-
-    Unlike :class:`NoteRepositoryProtocol` / :class:`AttachmentStoreProtocol`,
-    neither method raises to the caller: a missing, unreadable, or
-    malformed state file is not an error the rest of the app should ever
-    have to handle — :meth:`load` returns
-    :data:`models.session_state.DEFAULT_SESSION_STATE` instead, so the
-    caller always gets a usable value and startup can never be blocked
-    by a corrupt session file.
-    """
-
-    def load(self) -> SessionState:
-        """Return the persisted session state, or
-        :data:`models.session_state.DEFAULT_SESSION_STATE` if none exists
-        or the stored one could not be parsed."""
-
-    def save(self, state: SessionState) -> None:
-        """Persist ``state``, replacing whatever was previously saved."""
-
-
-class RendererProtocol(Protocol):
-    """The high-level surface controllers and the note view depend on.
-
-    Concrete renderers (currently
-    :mod:`ui.note_render.textbuffer_renderer`) take an
-    :data:`ImageBytesResolver` and a :data:`ColumnWidthResolver` at
-    construction so this protocol does not have to expose them — the
-    protocol describes the call surface, not ``__init__``.
-    """
-
-    def render_into(
-        self,
-        source: str,
-        buffer: Gtk.TextBuffer,
-        *,
-        note_id: str,
-    ) -> None:
-        """Parse ``source`` and populate ``buffer`` with the rendered
-        AST.
-
-        The buffer is cleared and repopulated on every call — callers
-        re-invoke after every source change, never patch the buffer in
-        place. Raises :class:`models.parse_error.ParseError`
-        for any input outside the supported AsciiDoc subset; the caller
-        is responsible for keeping the previously valid render visible
-        while the source is broken.
         """
