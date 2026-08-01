@@ -504,9 +504,18 @@ suite stays entirely `validate.yml`'s job. Because `make deb` depends on
 push rather than a surprise at release time.
 
 Run artifacts are **not a distribution channel** — they expire and require a
-GitHub login. Releases remain the published route (§7 intro); the artifact
-exists so that a build failure is caught per-commit and so a reviewer can
-install the exact package a branch produces.
+GitHub login. Releases remain the published route; the artifact exists so that a
+build failure is caught per-commit and so a reviewer can install the exact
+package a branch produces.
+
+**What a release carries.** Since `0.9.2~rc1` a GitHub Release attaches *both*
+artifacts — `folio.pyz` and `folio_<version>_all.deb` — so the `.deb` is a thing
+users download, not only a thing they can build. The user-facing install
+instructions for both live in the top-level [`README.md`](../README.md) §3,
+which also records the floor the package's `python3 (>= 3.13)` dependency
+implies: Debian 13 (*trixie*) or newer, Ubuntu 25.04 or newer; on Ubuntu 24.04
+LTS (Python 3.12) `apt` refuses the package and the zipapp is the only route.
+Keep that section in step when the artifact set changes.
 
 #### Manual orchestration (the documented fallback)
 

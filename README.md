@@ -109,9 +109,10 @@ Be clear-eyed about the limits before you commit your notes to it:
   folder of `.md` files, you cannot point another editor at a single note on
   disk. (Backing up the whole library is still trivial — it is one directory.)
 - **No export yet.** There is no built-in PDF or HTML export.
-- **Installed by hand for now.** Folio is distributed as a runnable archive
-  rather than a Flatpak on Flathub, so getting it running takes a few manual
-  steps (next section).
+- **Not in any distribution's repositories.** There is a `.deb` for
+  Debian-family systems and a runnable archive for everything else, but no
+  Flatpak on Flathub and no entry in a distro archive — so installing means
+  fetching a release yourself and updating the same way (next section).
 
 In short: choose Folio if you want a fast, native, offline GNOME app for
 structured plain-text notes you keep on one machine. Choose something else if
@@ -144,11 +145,38 @@ Other distributions ship the same libraries under their own names (look for the
 GTK 4, GtkSourceView 5, and PyGObject packages). SQLite is part of Python's
 standard library, so there is nothing extra to install for storage.
 
+Installing the `.deb` below does **not** need that `apt-get` line — the package
+declares these dependencies and `apt` pulls them in. The list matters for the
+`folio.pyz` archive and for running from source, neither of which installs
+anything on your behalf.
+
 ### Get and run Folio
 
-**Download a prebuilt archive from
-[Releases](https://github.com/rand-byte/folio/releases)** — this is the
-quickest way to get running:
+Every release on the
+[Releases page](https://github.com/rand-byte/folio/releases) carries two
+downloads: a Debian package (`folio_<version>_all.deb`) and a runnable archive
+(`folio.pyz`). Which one you want depends on your distribution.
+
+#### Debian 13 (*trixie*) or newer — the `.deb`
+
+This is the smoothest route where it applies. Download the `.deb` from the
+Releases page, then:
+
+```sh
+sudo apt install ./folio_*_all.deb
+```
+
+`apt` installs the runtime dependencies for you and Folio lands as a normal
+application: an entry in your app menu, an icon, and a `folio` command with a
+man page. Remove it with `sudo apt remove folio`. To upgrade, install the newer
+`.deb` the same way — release-candidate versions are ordered *below* the final
+release, so `0.9.2~rc1` upgrades cleanly to `0.9.2`.
+
+The package requires **Python 3.13 or newer**, which is why Debian 13 is the
+floor. Ubuntu 24.04 LTS ships Python 3.12 and cannot install it; use the
+archive below instead (Ubuntu 25.04 and later are fine).
+
+#### Any other distribution — the archive
 
 ```sh
 # 1. Download folio.pyz from the repository's Releases page, then:
@@ -160,11 +188,11 @@ Assets downloaded from GitHub Releases do not reliably preserve the POSIX
 executable bit, so `chmod +x` after downloading is needed once. The runtime
 prerequisites above (Python 3.13+, GTK 4, GtkSourceView 5, PyGObject) still
 apply — the archive bundles only Folio's own code, not its system
-dependencies.
+dependencies, and installs nothing.
 
 #### Alternative: build from source
 
-Folio is distributed as a single runnable archive (`folio.pyz`). Building it
+Both published artifacts can be built yourself from a checkout. The archive
 needs `glib-compile-resources`, which ships with the GLib development tooling
 on any GTK system.
 
@@ -183,7 +211,8 @@ make pyz
 A from-source `make pyz` build does not need the `chmod` — the executable bit
 is already set locally.
 
-On Debian 13 (*trixie*) or newer you can build a proper Debian package instead:
+On Debian 13 (*trixie*) or newer you can also build the Debian package — the
+same one attached to each release — rather than downloading it:
 
 ```sh
 make deb        # -> build/deb/folio_<version>_all.deb
