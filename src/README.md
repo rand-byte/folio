@@ -530,13 +530,20 @@ dialects diverge, so the mapping matters:
 | `pyproject.toml` (**source of truth**) | `0.9.2rc1` (PEP 440) | `0.9.2` |
 | `meson.build` (`version:`) | `0.9.2rc1` (PEP 440) | `0.9.2` |
 | `data/io.github.rand_byte.Folio.metainfo.xml` (`<release version=…>`) | `0.9.2rc1` (PEP 440) | `0.9.2` |
+| `debian/folio.1` (`.TH` source string) | `0.9.2rc1` (PEP 440) | `0.9.2` |
 | git tag | `v0.9.2-rc1` | `v0.9.2` |
 | `debian/changelog`, orig tarball | `0.9.2~rc1-1` | `0.9.2-1` |
 
 **`build-aux/check_version.py` enforces this table** (`make version-check`, and a
-prerequisite of `make deb`): it reads all four files, treats `pyproject.toml` as
+prerequisite of `make deb`): it reads all five files, treats `pyproject.toml` as
 the source of truth, and exits non-zero with one line per disagreement. It
 *reads and reports, never rewrites* — which file is wrong is a human decision.
+The site list is closed and enumerated (`VersionSource`), so a new version-
+bearing file is guarded by adding one enum member and one parser. The man page's
+`.TH` title line states the *upstream* spelling — it names the program, not the
+package — so it mirrors `pyproject.toml` verbatim; only the changelog takes the
+Debian dialect.
+
 It parses `debian/changelog`'s first line itself rather than shelling out to
 `dpkg-parsechangelog`, so it runs on a host with no Debian tooling; the Debian
 *revision* (`-1`) is packaging-only and is stripped before comparison.
@@ -545,7 +552,8 @@ The **tilde is not cosmetic**: `~` is the only character that sorts *before* the
 empty string in dpkg's comparison, so `0.9.2~rc1` < `0.9.2`, which is what makes
 the RC upgradable to the final release. Spelling it `0.9.2-rc1` instead would
 sort *after* `0.9.2` and apt would never offer the upgrade. AppStream marks the
-same release `type="development"`. The trailing `-1` is the *Debian revision*
+same release `type="development"`, which becomes `type="stable"` for the final
+release. The trailing `-1` is the *Debian revision*
 (packaging-only changes bump it: `-2`, `-3`, …), independent of upstream.
 
 Files: `meson.build`, `folio.in` (launcher template),

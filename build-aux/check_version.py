@@ -3,8 +3,9 @@
 Principles & invariants
 -----------------------
 * ``pyproject.toml`` is the **single source of truth** for the version. The
-  other three sites (:mod:`meson.build`, the AppStream metainfo, and
-  ``debian/changelog``) *mirror* it; this script reports where they do not.
+  other four sites (:mod:`meson.build`, the AppStream metainfo, the man page's
+  ``.TH`` title line, and ``debian/changelog``) *mirror* it; this script reports
+  where they do not.
 * The script **reads and reports, never rewrites**. A mismatch is a human
   decision (which site is wrong?), so the only outputs are a report and an
   exit status.
@@ -62,6 +63,7 @@ class VersionSource(StrEnum):
     PYPROJECT = "pyproject.toml"
     MESON = "meson.build"
     METAINFO = "data/io.github.rand_byte.Folio.metainfo.xml"
+    MANPAGE = "debian/folio.1"
     CHANGELOG = "debian/changelog"
 
     def path(self, root: Path) -> Path:
@@ -72,6 +74,15 @@ _MESON_VERSION = re.compile(r"^[ \t]*version:[ \t]*'(?P<version>[^']*)'", re.MUL
 """``project(...)``'s ``version:`` keyword. ``meson_version:`` cannot match: the
 line-start anchor plus the horizontal-whitespace class leaves no way to skip its
 ``meson_`` prefix."""
+
+_MANPAGE_TITLE = re.compile(
+    r"""^\.TH[ \t]+\S+[ \t]+\S+[ \t]+"[^"]*"[ \t]+"folio[ \t]+(?P<version>[^"]*)\"""",
+    re.MULTILINE,
+)
+"""The man page's ``.TH`` title line: ``.TH FOLIO 1 "<date>" "folio <version>"
+"<section>"``. The source string carries the *upstream* (PEP 440) spelling — it
+names the program, not the Debian package — so the man page mirrors
+``pyproject.toml`` verbatim, like ``meson.build`` and the metainfo."""
 
 _CHANGELOG_HEADER = re.compile(
     r"\A(?P<source>[a-z0-9][a-z0-9+.-]*) \((?P<version>[^()\s]+)\)"
@@ -146,6 +157,16 @@ def _parse_metainfo(text: str) -> str:
     return version
 
 
+def _parse_manpage(text: str) -> str:
+    versions = _MANPAGE_TITLE.findall(text)
+    if len(versions) != 1:
+        raise VersionParseError(
+            f"debian/folio.1 must state exactly one .TH source string of the "
+            f'form "folio <version>", found {len(versions)}'
+        )
+    return str(versions[0])
+
+
 def _parse_changelog(text: str) -> str:
     match = _CHANGELOG_HEADER.match(text)
     if match is None:
@@ -157,6 +178,7 @@ _PARSERS: Mapping[VersionSource, Callable[[str], str]] = {
     VersionSource.PYPROJECT: _parse_pyproject,
     VersionSource.MESON: _parse_meson,
     VersionSource.METAINFO: _parse_metainfo,
+    VersionSource.MANPAGE: _parse_manpage,
     VersionSource.CHANGELOG: _parse_changelog,
 }
 
@@ -174,7 +196,11 @@ def mismatches(versions: Mapping[VersionSource, str]) -> Iterator[str]:
     expected = versions[VersionSource.PYPROJECT]
     debian_expected = to_debian_upstream(expected)
 
-    for source in (VersionSource.MESON, VersionSource.METAINFO):
+    for source in (
+        VersionSource.MESON,
+        VersionSource.METAINFO,
+        VersionSource.MANPAGE,
+    ):
         found = versions[source]
         if found != expected:
             yield f"{source}: {found!r} does not match {expected!r} (pyproject.toml)"

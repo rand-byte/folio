@@ -43,6 +43,12 @@ _METAINFO = """\
 </component>
 """
 
+_MANPAGE = """\
+.TH FOLIO 1 "2026-08-01" "folio {version}" "User Commands"
+.SH NAME
+folio \\- AsciiDoc note-taking application
+"""
+
 _CHANGELOG = """\
 folio ({version}) unstable; urgency=medium
 
@@ -55,6 +61,7 @@ _TEMPLATES = {
     VersionSource.PYPROJECT: _PYPROJECT,
     VersionSource.MESON: _MESON,
     VersionSource.METAINFO: _METAINFO,
+    VersionSource.MANPAGE: _MANPAGE,
     VersionSource.CHANGELOG: _CHANGELOG,
 }
 
@@ -71,6 +78,7 @@ def _agreeing(upstream: str, debian: str) -> dict[VersionSource, str]:
         VersionSource.PYPROJECT: upstream,
         VersionSource.MESON: upstream,
         VersionSource.METAINFO: upstream,
+        VersionSource.MANPAGE: upstream,
         VersionSource.CHANGELOG: debian,
     }
 
@@ -128,6 +136,25 @@ class ReadVersionsTests(unittest.TestCase):
             with self.assertRaises(VersionParseError):
                 read_versions(root)
 
+    def test_manpage_without_a_title_line_raises(self) -> None:
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            _write_tree(root, _agreeing("0.9.2rc1", "0.9.2~rc1-1"))
+            VersionSource.MANPAGE.path(root).write_text(
+                ".SH NAME\nfolio \\- notes\n", encoding="utf-8"
+            )
+            with self.assertRaises(VersionParseError):
+                read_versions(root)
+
+    def test_manpage_with_two_title_lines_raises(self) -> None:
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            _write_tree(root, _agreeing("0.9.2rc1", "0.9.2~rc1-1"))
+            path = VersionSource.MANPAGE.path(root)
+            path.write_text(path.read_text(encoding="utf-8") * 2, encoding="utf-8")
+            with self.assertRaises(VersionParseError):
+                read_versions(root)
+
     def test_metainfo_without_a_release_raises(self) -> None:
         with TemporaryDirectory() as directory:
             root = Path(directory)
@@ -173,6 +200,15 @@ class MismatchTests(unittest.TestCase):
         self.assertEqual(len(reported), 2)
         self.assertTrue(any(str(VersionSource.MESON) in line for line in reported))
         self.assertTrue(any(str(VersionSource.CHANGELOG) in line for line in reported))
+
+    def test_a_stale_manpage_version_is_reported(self) -> None:
+        # The man page states the upstream (PEP 440) spelling, so it must
+        # match pyproject.toml verbatim -- no Debian tilde mapping applies.
+        versions = _agreeing("0.9.2rc1", "0.9.2~rc1-1")
+        versions[VersionSource.MANPAGE] = "0.9.1"
+        reported = list(mismatches(versions))
+        self.assertEqual(len(reported), 1)
+        self.assertIn(str(VersionSource.MANPAGE), reported[0])
 
     def test_a_hyphenated_pre_release_in_the_changelog_is_a_mismatch(self) -> None:
         # `0.9.2-rc1-1` would sort *after* 0.9.2, so apt would never offer the
