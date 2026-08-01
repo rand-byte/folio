@@ -3,43 +3,45 @@
 from __future__ import annotations
 
 import gc
-import struct
 import unittest
-import zlib
-from collections.abc import Callable
-from datetime import (
-    UTC,
-    datetime,
-    timedelta,
-)
-from pathlib import Path
-from unittest import mock
 
-from gi.repository import GLib, GObject, Gsk, Gtk
+from gi.repository import Gdk, GLib, GObject, Gsk, Gtk
 
 from config.defaults import (
     ARTICLE_INNER_HPADDING_CHARS,
     TARGET_CHARS_PER_LINE,
 )
-from enums import AttachmentExportFailureReason
-from giruntime.controllers.app_state import AppState
-from giruntime.controllers.note_list_store import NoteListStore
-from giruntime.ui import note_view as note_view_module
 from giruntime.ui.article_container import (
     ArticleContainer,
     CharWidthMeasurer,
-    LineHeightMeasurer,
     _FALLBACK_CHAR_WIDTH_PX,
     _FALLBACK_LINE_HEIGHT_PX,
 )
-from giruntime.ui.note_view import NoteView
 from giruntime.ui.test_display_guard import display_available
-from models.attachment import Attachment
-from models.note import Note
-from storage.protocols import AttachmentExportFailed
 
 
-_FIXED_NOW: datetime = datetime(2026, 4, 28, 12, 0, 0, tzinfo=UTC)
+_RGB_BYTES_PER_PIXEL: int = 3
+"""Bytes per pixel in ``Gdk.MemoryFormat.R8G8B8`` — the format
+:func:`_solid_texture` builds. Named so the stride computation reads as
+"one row of pixels" rather than as an unexplained multiplier."""
+
+_FIXTURE_RGB: tuple[int, int, int] = (80, 120, 200)
+"""The fill colour of the regression fixture's texture. Any opaque
+colour works — the extent the test asserts on depends on the paintable's
+*size*, never its pixels — so this is simply a visible blue."""
+
+_FIXTURE_IMAGE_WIDTH_PX: int = 100
+_FIXTURE_IMAGE_HEIGHT_PX: int = 900
+"""Pixel size of the fixture image. The height is chosen to exceed
+:data:`_FIXTURE_WINDOW_HEIGHT_PX` on its own, so the rendered content
+overflows the viewport whether or not the column width scales it."""
+
+_FIXTURE_WINDOW_WIDTH_PX: int = 900
+_FIXTURE_WINDOW_HEIGHT_PX: int = 600
+"""Size of the toplevel the regression test presents. The width is wide
+enough for the article column to be centred rather than horizontally
+scrolled (the horizontal axis is not what this test is about); the
+height is the page the vertical extent must exceed."""
 
 
 def _fixed_measurer(value: int) -> CharWidthMeasurer:
@@ -72,76 +74,6 @@ def _make_test_article_container(
     )
 
 
-def _stub_font_measurers_factory(
-    *,
-    char_w: int,
-    line_h: int,
-) -> Callable[[Gtk.TextView], tuple[CharWidthMeasurer, LineHeightMeasurer]]:
-    """Build a stand-in for :func:`note_view._build_font_measurers`.
-
-    The returned callable matches the production helper's signature
-    so it can be monkey-patched in place, but ignores the live
-    :class:`Gtk.TextView` and returns fixed-value measurers instead.
-    Tests use this to drive :class:`NoteView` construction with
-    deterministic font dimensions, side-stepping the real Pango
-    layout.
-    """
-
-    def build(
-        _text_view: Gtk.TextView,
-    ) -> tuple[CharWidthMeasurer, LineHeightMeasurer]:
-        return (_fixed_measurer(char_w), _fixed_measurer(line_h))
-
-    return build
-
-
-def _make_note(
-    note_id: str,
-    *,
-    source: str = "= Hello\n\nbody.\n",
-    tags: tuple[str, ...] = (),
-    title: str | None = None,
-) -> Note:
-    """Build a deterministic :class:`Note` for tests."""
-    return Note(
-        id=note_id,
-        title=title if title is not None else "Hello",
-        source=source,
-        snippet="body.",
-        tags=tags,
-        created_at=_FIXED_NOW,
-        modified_at=_FIXED_NOW + timedelta(seconds=1),
-    )
-
-
-def _solid_png(width: int, height: int) -> bytes:
-    """Encode a minimal solid-colour RGB PNG of the given pixel size.
-
-    The scrollbar regression test needs a *real, decodable* image whose
-    last line is taller than the viewport. A hand-rolled encoder keeps the
-    test self-contained (no Pillow / GdkPixbuf-save dependency) and lets it
-    ask for an arbitrarily tall image; a solid fill compresses to a few
-    bytes regardless of size. Colour type 2 is RGB, bit depth 8, no filter.
-    """
-
-    def _chunk(tag: bytes, payload: bytes) -> bytes:
-        crc = zlib.crc32(tag + payload) & 0xFFFFFFFF
-        return struct.pack(">I", len(payload)) + tag + payload + struct.pack(
-            ">I", crc
-        )
-
-    signature = b"\x89PNG\r\n\x1a\n"
-    ihdr = struct.pack(">IIBBBBB", width, height, 8, 2, 0, 0, 0)
-    scanline = b"\x00" + bytes((80, 120, 200)) * width
-    image_data = zlib.compress(scanline * height, 9)
-    return (
-        signature
-        + _chunk(b"IHDR", ihdr)
-        + _chunk(b"IDAT", image_data)
-        + _chunk(b"IEND", b"")
-    )
-
-
 def _settle_real_main_loop(timeout_ms: int = 400) -> None:
     """Run a real :class:`GLib.MainLoop`, quitting after ``timeout_ms``.
 
@@ -162,158 +94,52 @@ def _settle_real_main_loop(timeout_ms: int = 400) -> None:
     loop.run()
 
 
-class _FakeNoteRepository:
-    """Minimal :class:`NoteRepositoryProtocol` impl for view tests.
+def _solid_texture(width: int, height: int) -> Gdk.Texture:
+    """Build a solid-colour RGB texture of the given pixel size.
 
-    The methods the view tests exercise are filled in — the view's read
-    path, plus the single ``update_source`` write the §2.2 hidden-pane
-    deferral tests drive through :meth:`NoteListStore.update`. The rest
-    raise :class:`NotImplementedError` so a future test that invokes one
-    by accident fails loudly rather than silently.
+    The scrollbar regression test needs a *static-size* trailing block
+    taller than the viewport: a paintable reports a fixed intrinsic
+    height, so unlike text it produces no later height change once the
+    text view has measured it — which is precisely the shape that used to
+    leave a stale extent uncorrected. Building the texture straight from
+    memory keeps the fixture self-contained (no image encoder, no
+    attachment store) and lets it ask for an arbitrarily tall image.
     """
-
-    notes: dict[str, Note]
-    get_calls: list[str]
-
-    def __init__(self) -> None:
-        self.notes = {}
-        self.get_calls = []
-
-    # The single read path :class:`NoteView` uses.
-    def get(self, note_id: str) -> Note:
-        self.get_calls.append(note_id)
-        return self.notes[note_id]
-
-    def list_all(self) -> list[Note]:
-        return list(self.notes.values())
-
-    def insert(self, _note: Note) -> Note:
-        raise NotImplementedError
-
-    def update_source(
-        self,
-        note_id: str,
-        source: str,
-        modified_at: datetime,
-    ) -> Note:
-        """Return an edited copy of ``note_id`` carrying the new source.
-
-        Implemented (unlike the other write stubs) because the §2.2
-        hidden-pane re-render tests drive a real edit through
-        :meth:`NoteListStore.update`, which persists via this method
-        before splicing the fresh row back into the store.
-        """
-        existing = self.notes[note_id]
-        edited = Note(
-            id=existing.id,
-            title=existing.title,
-            source=source,
-            snippet=existing.snippet,
-            tags=existing.tags,
-            created_at=existing.created_at,
-            modified_at=modified_at,
-        )
-        self.notes[note_id] = edited
-        return edited
-
-    def delete(self, _note_id: str) -> None:
-        raise NotImplementedError
+    stride = width * _RGB_BYTES_PER_PIXEL
+    payload = GLib.Bytes.new(bytes(_FIXTURE_RGB) * width * height)
+    return Gdk.MemoryTexture.new(
+        width,
+        height,
+        Gdk.MemoryFormat.R8G8B8,
+        payload,
+        stride,
+    )
 
 
-class _TrackingNoteListStore(NoteListStore):
-    """A :class:`NoteListStore` that records :meth:`get_note` calls.
+def _text_view_ending_in_a_tall_image() -> Gtk.TextView:
+    """Build a scrollable child whose last block is a tall static image.
 
-    Lets the view smoke-tests assert which note the view read, and in
-    what order, now that body reads come from the store rather than the
-    repository.
+    Mirrors the production child's relevant properties — read-only,
+    word-wrapping, and a ``Gtk.Scrollable`` so the container's vertical
+    pass-through has somewhere to forward to — without pulling in the
+    renderer, the tag table or a note store. Only two things about the
+    content matter to the extent the parent scroller reads: it is taller
+    than the viewport, and its last block is static-size.
     """
-
-    get_calls: list[str]
-
-    def __init__(self, *, repository: _FakeNoteRepository) -> None:
-        super().__init__(repository=repository)
-        self.get_calls = []
-
-    def get_note(self, note_id: str) -> Note:
-        self.get_calls.append(note_id)
-        return super().get_note(note_id)
-
-
-def _build_tracking_store(repo: _FakeNoteRepository) -> _TrackingNoteListStore:
-    """Build a loaded tracking store over ``repo``'s seeded notes."""
-    store = _TrackingNoteListStore(repository=repo)
-    store.load()
-    return store
-
-
-class _FakeAttachmentStore:
-    """Minimal :class:`AttachmentStoreProtocol` impl for view tests.
-
-    The store is dict-backed: :attr:`metadata` is a per-note list of
-    :class:`Attachment` instances, :attr:`blobs` maps attachment id
-    to bytes. Tests prime both directly (no ``add_for_note`` flow
-    involved — that's the editor's concern) and assert on the
-    ``calls_*`` lists to verify the resolver called the right methods
-    in the right order.
-    """
-
-    metadata_by_note: dict[str, list[Attachment]]
-    blobs: dict[str, bytes]
-    list_calls: list[str]
-    get_bytes_calls: list[str]
-
-    def __init__(self) -> None:
-        self.metadata_by_note = {}
-        self.blobs = {}
-        self.list_calls = []
-        self.get_bytes_calls = []
-
-    # --- helpers used by tests to seed the store ---
-
-    def seed(self, note_id: str, filename: str, data: bytes) -> Attachment:
-        attachment = Attachment(
-            id=f"att-{len(self.blobs) + 1}",
-            note_id=note_id,
-            filename=filename,
-            byte_size=len(data),
-        )
-        self.metadata_by_note.setdefault(note_id, []).append(attachment)
-        self.blobs[attachment.id] = data
-        return attachment
-
-    # --- protocol surface ---
-
-    def add_for_note(self, _note_id: str, _source_path: Path) -> Attachment:
-        raise NotImplementedError
-
-    def remove(self, _attachment_id: str) -> None:
-        raise NotImplementedError
-
-    def list_for_note(self, note_id: str) -> list[Attachment]:
-        self.list_calls.append(note_id)
-        return list(self.metadata_by_note.get(note_id, ()))
-
-    def get_bytes(self, attachment_id: str) -> bytes:
-        self.get_bytes_calls.append(attachment_id)
-        return self.blobs[attachment_id]
-
-    def count_for_note(self, note_id: str) -> int:
-        return len(self.metadata_by_note.get(note_id, ()))
-
-    def export_to(self, attachment_id: str, destination: Path) -> None:
-        """Write the attachment's bytes out (the outbound mirror of add)."""
-        try:
-            data = self.get_bytes(attachment_id)
-        except KeyError as exc:
-            raise AttachmentExportFailed(
-                AttachmentExportFailureReason.UNKNOWN_ATTACHMENT,
-            ) from exc
-        try:
-            destination.write_bytes(data)
-        except OSError as exc:
-            raise AttachmentExportFailed(
-                AttachmentExportFailureReason.DESTINATION_UNWRITABLE,
-            ) from exc
+    text_view = Gtk.TextView()
+    text_view.set_editable(False)
+    text_view.set_cursor_visible(False)
+    text_view.set_wrap_mode(Gtk.WrapMode.WORD_CHAR)
+    text_view.set_hexpand(True)
+    text_view.set_vexpand(True)
+    buffer = text_view.get_buffer()
+    buffer.insert(buffer.get_end_iter(), "Title\n\nIntro paragraph.\n\n")
+    # 100x900: comfortably taller than the 600 px viewport.
+    buffer.insert_paintable(
+        buffer.get_end_iter(),
+        _solid_texture(_FIXTURE_IMAGE_WIDTH_PX, _FIXTURE_IMAGE_HEIGHT_PX),
+    )
+    return text_view
 
 
 @unittest.skipUnless(display_available(), "no GDK display")
@@ -1074,72 +900,89 @@ class ArticleContainerScrollableTests(unittest.TestCase):
 
 @unittest.skipUnless(display_available(), "no GDK display")
 class ArticleContainerScrollbarRegressionTests(unittest.TestCase):
-    """End-to-end regression for the first-launch scrollbar bug.
+    """Regression for the first-launch scrollbar bug.
 
     The original defect: on launch the rendered pane showed *no* vertical
-    scrollbar even when the selected note overflowed the viewport, if the
-    note's last line was a static-size image. The implicit ``Gtk.Viewport``
-    committed a page-sized extent during its first allocation (while the
-    text view still measured zero height) and never revised it, because a
-    trailing static image produces no later height change. Option C removes
-    the viewport, so the text view — which knows its own height — owns the
-    vertical adjustment and writes the correct ``upper``.
+    scrollbar even when the content overflowed the viewport, if its last
+    line was a static-size image. The pre-fix container was a plain
+    ``Gtk.Widget`` that re-derived the vertical extent in ``do_measure``,
+    so the parent ``Gtk.ScrolledWindow`` interposed a ``Gtk.Viewport``;
+    the viewport committed a page-sized extent during its first
+    allocation (while the text view still measured zero height) and never
+    revised it, because a trailing static image produces no later height
+    change. Option C makes the container a ``Gtk.Scrollable`` that
+    contributes nothing vertically, so no viewport is interposed and the
+    text view — which knows its own height — owns the vertical adjustment
+    and writes the correct ``upper``.
 
-    This test reproduces the exact trigger: a real :class:`NoteView` whose
-    selected note ends with a tall image, presented on a real toplevel and
-    settled through a **real main loop** (the bug only manifests after a
-    frame-clock tick, which a manually pumped context never produces). It
-    asserts the vertical adjustment overflows the page at startup — i.e.
-    the scrollbar is shown — without any switch-and-back nudge.
+    Both halves of that fix live in :mod:`giruntime.ui.article_container`
+    (the ``Gtk.Scrollable`` base, the vertical pass-through in
+    :meth:`ArticleContainer._forward_vertical_scrolling_to_child`, and the
+    zero vertical report from :meth:`ArticleContainer.do_measure`), so the
+    scenario is built from the container and a bare scrollable child
+    rather than from a :class:`~giruntime.ui.note_view.NoteView`: nothing
+    but the container can be responsible for the outcome, and the test
+    needs no note store, renderer or attachment fixtures. The one thing
+    it cannot do without is a **real main loop** — the extent is only
+    committed after a frame-clock tick, which a manually pumped
+    ``MainContext`` never produces.
+
+    Verified to fail against the pre-fix container shape and pass against
+    the current one, so it is a live guard rather than a description.
     """
 
-    def _build_image_last_view(
-        self,
-    ) -> tuple[NoteView, Gtk.Window]:
-        repository = _FakeNoteRepository()
-        note = _make_note(
-            "img-last",
-            source="= Title\n\nIntro paragraph.\n\nimage::tall.png[]",
-        )
-        repository.notes[note.id] = note
-        store = _build_tracking_store(repository)
-        attachments = _FakeAttachmentStore()
-        # 100×900: comfortably taller than the 600 px viewport whether or
-        # not the renderer scales it to the column width.
-        attachments.seed("img-last", "tall.png", _solid_png(100, 900))
-        app_state = AppState()
-        app_state.set_selected_note_id("img-last")
-        with mock.patch.object(
-            note_view_module,
-            "_build_font_measurers",
-            _stub_font_measurers_factory(char_w=10, line_h=20),
-        ):
-            view = NoteView(
-                note_store=store,
-                app_state=app_state,
-                attachments=attachments,
-            )
-        window = Gtk.Window()
-        window.set_default_size(900, 600)
-        window.set_child(view)
-        return view, window
+    def _build_scrolled_stack(self) -> tuple[Gtk.ScrolledWindow, Gtk.Window]:
+        """Assemble ``Window → ScrolledWindow → ArticleContainer → view``.
 
-    def test_image_last_note_shows_vertical_scrollbar_on_first_launch(
+        The same stack :class:`~giruntime.ui.note_view.NoteView` builds
+        around the surface, reduced to the widgets whose collaboration
+        the extent depends on. The scroller's policy is ``AUTOMATIC`` on
+        both axes, as in production, because that is what makes it read
+        the adjustment to decide whether to show a scrollbar at all.
+        """
+        container = _make_test_article_container()
+        container.set_child(_text_view_ending_in_a_tall_image())
+
+        scrolled = Gtk.ScrolledWindow.new()
+        scrolled.set_policy(
+            Gtk.PolicyType.AUTOMATIC,
+            Gtk.PolicyType.AUTOMATIC,
+        )
+        scrolled.set_child(container)
+        scrolled.set_hexpand(True)
+        scrolled.set_vexpand(True)
+
+        window = Gtk.Window()
+        window.set_default_size(
+            _FIXTURE_WINDOW_WIDTH_PX,
+            _FIXTURE_WINDOW_HEIGHT_PX,
+        )
+        window.set_child(scrolled)
+        return scrolled, window
+
+    def test_image_last_content_shows_vertical_scrollbar_on_first_launch(
         self,
     ) -> None:
-        view, window = self._build_image_last_view()
+        # Given a container holding content that ends in a tall static
+        # image, inside a scroller on a real toplevel
+        scrolled, window = self._build_scrolled_stack()
+
+        # When the window is presented and the frame clock ticks
         window.present()
         try:
             _settle_real_main_loop()
-            scrolled = _find_scrolled_window(view)
-            # Option C interposes no viewport — the container is the direct
-            # scrollable child.
+
+            # Then no viewport was interposed (the container is the
+            # direct scrollable child) ...
             self.assertNotIsInstance(scrolled.get_child(), Gtk.Viewport)
+            # ... and the forwarded vertical adjustment reports an extent
+            # larger than the page, i.e. the scrollbar is shown at
+            # startup without any switch-away-and-back nudge.
             vadjustment = scrolled.get_vadjustment()
             self.assertGreater(
                 vadjustment.get_upper(),
                 vadjustment.get_page_size(),
-                "the rendered note overflows the viewport, so the vertical "
+                "the content overflows the viewport, so the vertical "
                 "adjustment must report an extent larger than the page "
                 "(i.e. the scrollbar is shown) at startup",
             )
@@ -1148,19 +991,43 @@ class ArticleContainerScrollbarRegressionTests(unittest.TestCase):
             window.destroy()
             _settle_real_main_loop(timeout_ms=50)
 
+    def test_content_shorter_than_the_viewport_shows_no_scrollbar(
+        self,
+    ) -> None:
+        # The negative control for the test above: without it, an
+        # assertion that merely fired on every extent would look green.
+        container = _make_test_article_container()
+        text_view = Gtk.TextView()
+        text_view.set_editable(False)
+        text_view.set_wrap_mode(Gtk.WrapMode.WORD_CHAR)
+        buffer = text_view.get_buffer()
+        buffer.insert(buffer.get_end_iter(), "One short line.")
+        container.set_child(text_view)
 
-def _find_scrolled_window(view: NoteView) -> Gtk.ScrolledWindow:
-    """Walk the :class:`NoteView` stack and return its ``Gtk.ScrolledWindow``.
+        scrolled = Gtk.ScrolledWindow.new()
+        scrolled.set_policy(
+            Gtk.PolicyType.AUTOMATIC,
+            Gtk.PolicyType.AUTOMATIC,
+        )
+        scrolled.set_child(container)
+        window = Gtk.Window()
+        window.set_default_size(
+            _FIXTURE_WINDOW_WIDTH_PX,
+            _FIXTURE_WINDOW_HEIGHT_PX,
+        )
+        window.set_child(scrolled)
 
-    The structure is ``NoteView → ScrolledWindow → …``. The parse-error
-    notice is rendered into the note buffer rather than into a separate
-    banner widget, so the ``ScrolledWindow`` is the view's *first*
-    child. Walking the public child API keeps the tests agnostic to
-    :class:`NoteView`'s field names.
-    """
-    scrolled = view.get_first_child()
-    assert isinstance(scrolled, Gtk.ScrolledWindow), (
-        f"expected a ScrolledWindow in the NoteView stack, "
-        f"got {type(scrolled).__name__}"
-    )
-    return scrolled
+        window.present()
+        try:
+            _settle_real_main_loop()
+            vadjustment = scrolled.get_vadjustment()
+            self.assertEqual(
+                vadjustment.get_upper(),
+                vadjustment.get_page_size(),
+                "content that fits the viewport must report an extent "
+                "equal to the page, so no vertical scrollbar is shown",
+            )
+        finally:
+            window.set_child(None)
+            window.destroy()
+            _settle_real_main_loop(timeout_ms=50)
