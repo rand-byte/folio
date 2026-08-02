@@ -1,7 +1,7 @@
 Source: folio
 Section: editors
 Priority: optional
-Maintainer: rand-byte <57550155+rand-byte@users.noreply.github.com>
+Maintainer: rand-byte <akeyfive+randbyte@gmail.com>
 Build-Depends:
  debhelper-compat (= 13),
  dh-python,
