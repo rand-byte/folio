@@ -393,8 +393,8 @@ committed.
 ### The Debian package (`.deb`) — a second, parallel route
 
 The zipapp above is unchanged and still the dev/release path. Alongside it, an
-**upstream Meson build** produces an archive-quality `folio_<version>_all.deb`.
-The two paths share their inputs and never interfere:
+**upstream Meson build** produces a `folio_<version>_all.deb`. The two paths
+share their inputs and never interfere:
 
 | | zipapp | `.deb` |
 | --- | --- | --- |
@@ -402,6 +402,16 @@ The two paths share their inputs and never interfere:
 | GResource | `make resource` builds it in-tree | `gnome.compile_resources` builds it in the build dir |
 | "What ships" | `build_pyz._included` (no `test_*.py`, no `*.md`, no grammar sources) | **the same** `build_pyz._included` |
 | Result | `folio.pyz` (`src/` at the archive root) | `/usr/share/folio/` (`src/` as a private `sys.path` root) |
+
+**Not in the Debian archive.** An ITP was filed and declined, so `debian/` exists
+for exactly one purpose: building the `.deb` published on the Releases page.
+Archive-facing files are deliberately absent — `debian/watch`,
+`Standards-Version`, `debian/upstream/metadata`, `debian/salsa-ci.yml`,
+autopkgtests under `debian/tests/`. The package is **native**
+(`debian/source/format` is `3.0 (native)`) for the same reason: upstream and
+packaging are one repository, so there is no Debian revision. Do not re-add any
+of it — a lintian tag asking for one of those files is an archive tag and does
+not apply here.
 
 - **Private directory, not `dist-packages`.** The app installs its whole tree
   into `/usr/share/folio` and `/usr/bin/folio` runs *that directory* as
@@ -443,7 +453,7 @@ newer**. `DEB_BUILD_FLAGS` is the escape hatch:
 #### Build the package (`make deb` — the primary path)
 
 ```sh
-make deb        # -> build/deb/folio_0.9.2~rc1-1_all.deb
+make deb        # -> build/deb/folio_0.9.2~rc1_all.deb
 make deb-lint   # + lintian
 make deb-clean  # remove build/deb
 ```
@@ -468,8 +478,8 @@ build-host requirements for no packaging benefit (which is why `debian/rules`
 already disables `dh_auto_test`), and the dev GResource in the source tree has
 no relationship to the one Meson compiles. It *does* depend on `version-check`.
 
-Binary-only (`-us -uc -b`): `dpkg-source` never runs, so **`make deb` produces
-no source package and no orig tarball**.
+Binary-only (`-us -uc -b`): `dpkg-source -b` never runs, so **`make deb`
+produces no source package**.
 
 #### The same build in CI (`.github/workflows/package.yml`)
 
@@ -520,19 +530,20 @@ Keep that section in step when the artifact set changes.
 #### Manual orchestration (the documented fallback)
 
 Use the recipe below when you need what `make deb` knowingly does not do:
-build a **source** package or an orig tarball (`3.0 (quilt)` needs one named for
-the *Debian upstream* version), iterate on packaging from a dirty tree, or pass
-`-d` on a host that cannot satisfy the build-deps.
+iterate on packaging from a dirty tree, pass `-d` on a host that cannot satisfy
+the build-deps, or build a **source** package. The package is native, so a
+source build needs no orig tarball — drop the `-b` and `dpkg-source` packs the
+tree as it stands. It runs in the working tree, so it litters `debian/` and `..`
+with the staging files `make deb` exists to avoid.
 
 ```sh
-git archive --prefix=folio-0.9.2~rc1/ -o ../folio_0.9.2~rc1.orig.tar.gz HEAD
 dpkg-buildpackage -us -uc -b
 lintian -i -I ../folio_*_all.deb
 ```
 
-**Versioning — one release, three dialects.** `pyproject.toml` holds the
-upstream version and everything else mirrors it. Pre-releases are where the
-dialects diverge, so the mapping matters:
+**Versioning — one release, two dialects.** `pyproject.toml` holds the version
+and everything else mirrors it. Pre-releases are where the dialects diverge, so
+the mapping matters:
 
 | Where | 0.9.2 release candidate | Final 0.9.2 |
 | --- | --- | --- |
@@ -541,7 +552,7 @@ dialects diverge, so the mapping matters:
 | `data/io.github.rand_byte.Folio.metainfo.xml` (`<release version=…>`) | `0.9.2rc1` (PEP 440) | `0.9.2` |
 | `debian/folio.1` (`.TH` source string) | `0.9.2rc1` (PEP 440) | `0.9.2` |
 | git tag | `v0.9.2-rc1` | `v0.9.2` |
-| `debian/changelog`, orig tarball | `0.9.2~rc1-1` | `0.9.2-1` |
+| `debian/changelog` | `0.9.2~rc1` | `0.9.2` |
 
 **`build-aux/check_version.py` enforces this table** (`make version-check`, and a
 prerequisite of `make deb`): it reads all five files, treats `pyproject.toml` as
@@ -554,16 +565,27 @@ package — so it mirrors `pyproject.toml` verbatim; only the changelog takes th
 Debian dialect.
 
 It parses `debian/changelog`'s first line itself rather than shelling out to
-`dpkg-parsechangelog`, so it runs on a host with no Debian tooling; the Debian
-*revision* (`-1`) is packaging-only and is stripped before comparison.
+`dpkg-parsechangelog`, so it runs on a host with no Debian tooling. The version
+is compared verbatim: the package is native, so a `-<revision>` suffix written
+by hand is reported as a mismatch rather than stripped.
 
 The **tilde is not cosmetic**: `~` is the only character that sorts *before* the
 empty string in dpkg's comparison, so `0.9.2~rc1` < `0.9.2`, which is what makes
 the RC upgradable to the final release. Spelling it `0.9.2-rc1` instead would
 sort *after* `0.9.2` and apt would never offer the upgrade. AppStream marks the
 same release `type="development"`, which becomes `type="stable"` for the final
-release. The trailing `-1` is the *Debian revision*
-(packaging-only changes bump it: `-2`, `-3`, …), independent of upstream.
+release.
+
+**There is no Debian revision.** The package is native (§7's *Not in the Debian
+archive*), so `debian/changelog` carries the version and nothing else — the
+`-1`/`-2` suffix that would let a packaging-only rebuild supersede its
+predecessor does not exist here. A rebuilt `.deb` that must install *over* the
+previous one therefore needs an upstream bump in `pyproject.toml`, and so in all
+five sites above. With one repository holding both the app and its packaging,
+there is no packaging-only change that is not also a source change. One visible
+consequence in the built package: debhelper installs the changelog as
+`/usr/share/doc/folio/changelog.gz`, not `changelog.Debian.gz` — for a native
+package the two are the same file.
 
 Files: `meson.build`, `folio.in` (launcher template),
 `build-aux/install_python_tree.py`, `build-aux/check_version.py` (+ its

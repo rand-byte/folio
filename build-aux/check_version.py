@@ -12,13 +12,15 @@ Principles & invariants
 * The set of version sites is **closed and enumerated** — :class:`VersionSource`
   carries each site's repo-relative path, so the read loop and the mismatch
   report are enum-driven and a new site is added in exactly one place.
-* **One release, three dialects.** PEP 440 (`0.9.2rc1`) is upstream's spelling;
-  Debian's is `0.9.2~rc1`, and the changelog additionally carries a `-<revision>`
-  suffix that is packaging-only and therefore not this script's business. The
-  ``~`` is load-bearing: it is the only character sorting *before* the empty
-  string in dpkg's comparison, so ``0.9.2~rc1`` < ``0.9.2`` and an RC upgrades
-  to the final release. :func:`to_debian_upstream` is the one place that mapping
-  lives.
+* **One release, two dialects.** PEP 440 (`0.9.2rc1`) is upstream's spelling and
+  Debian's is `0.9.2~rc1`. The ``~`` is load-bearing: it is the only character
+  sorting *before* the empty string in dpkg's comparison, so ``0.9.2~rc1`` <
+  ``0.9.2`` and an RC upgrades to the final release. :func:`to_debian_upstream`
+  is the one place that mapping lives.
+* **The package is native**, so the changelog version *is* the Debian version in
+  full — folio's upstream and its packaging are one repository, and the package
+  is not in any archive. There is no ``-<revision>`` suffix to strip, and one
+  written by hand is a mismatch to report rather than something to ignore.
 * **Parsing never silently skips.** A missing, duplicated, or unparseable
   version line is a :class:`VersionParseError`, not a pass — a check that
   quietly reads nothing would report agreement it never verified.
@@ -109,17 +111,6 @@ def to_debian_upstream(version: str) -> str:
     return f"{match['release']}~{marker}{match['serial']}"
 
 
-def debian_upstream_of(debian_version: str) -> str:
-    """Strip the epoch and the ``-<revision>`` suffix from a Debian version."""
-    _, _, without_epoch = debian_version.rpartition(":")
-    upstream, separator, _ = without_epoch.rpartition("-")
-    if not separator:
-        raise VersionParseError(
-            f"Debian version carries no -<revision>: {debian_version!r}"
-        )
-    return upstream
-
-
 def _parse_pyproject(text: str) -> str:
     try:
         document = tomllib.loads(text)
@@ -205,11 +196,11 @@ def mismatches(versions: Mapping[VersionSource, str]) -> Iterator[str]:
         if found != expected:
             yield f"{source}: {found!r} does not match {expected!r} (pyproject.toml)"
 
-    found_debian = debian_upstream_of(versions[VersionSource.CHANGELOG])
+    found_debian = versions[VersionSource.CHANGELOG]
     if found_debian != debian_expected:
         yield (
-            f"{VersionSource.CHANGELOG}: upstream version {found_debian!r} "
-            f"does not match {debian_expected!r} (pyproject.toml {expected!r})"
+            f"{VersionSource.CHANGELOG}: {found_debian!r} does not match "
+            f"{debian_expected!r} (pyproject.toml {expected!r})"
         )
 
 
