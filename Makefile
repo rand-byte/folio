@@ -119,19 +119,18 @@ pyz: $(GRES)
 # and guarantees the package holds COMMITTED content only -- in particular never
 # the gitignored in-tree folio.gresource, which Meson compiles for itself.
 #
-# The version is NOT restated here: debian/changelog owns the Debian version,
-# and the upstream version is that string minus the -<revision> suffix. Both are
-# recursive (`=`, not `:=`) on purpose, so dpkg-parsechangelog runs only when a
-# deb target expands them -- `make test` on a host without dpkg-dev must not
-# shell out and fail.
+# The version is NOT restated here: debian/changelog owns it, and the package is
+# native (3.0), so that one string is the whole version -- there is no separate
+# upstream version and no -<revision> suffix to strip. Recursive (`=`, not `:=`)
+# on purpose, so dpkg-parsechangelog runs only when a deb target expands it --
+# `make test` on a host without dpkg-dev must not shell out and fail.
 DEB_VERSION   = $(shell dpkg-parsechangelog -l debian/changelog -S Version)
-DEB_UPSTREAM  = $(shell dpkg-parsechangelog -l debian/changelog -S Version | sed 's/-[^-]*$$//')
 DEB_DIR      := build/deb
-DEB_STAGE     = $(DEB_DIR)/folio-$(DEB_UPSTREAM)
+DEB_STAGE     = $(DEB_DIR)/folio-$(DEB_VERSION)
 
-# Binary-only (Architecture: all) and unsigned: dpkg-source never runs, so no
-# orig tarball is needed. Override to skip the build-dependency check on a host
-# that cannot satisfy python3 (>= 3.13):  make deb DEB_BUILD_FLAGS="-us -uc -b -d"
+# Binary-only (Architecture: all) and unsigned. Override to skip the
+# build-dependency check on a host that cannot satisfy python3 (>= 3.13):
+#   make deb DEB_BUILD_FLAGS="-us -uc -b -d"
 DEB_BUILD_FLAGS ?= -us -uc -b
 
 DEB_TOOLS := git dpkg-parsechangelog dpkg-buildpackage
@@ -143,7 +142,7 @@ deb-tools:
 	done
 
 # The four files that state the version must agree (README section 7's "one
-# release, three dialects" rule, made executable).
+# release, two dialects" rule, made executable).
 version-check:
 	python3 -B build-aux/check_version.py
 
@@ -161,7 +160,7 @@ deb: deb-tools version-check
 		exit 1; }
 	rm -rf $(DEB_DIR)
 	mkdir -p $(DEB_DIR)
-	git archive --prefix=folio-$(DEB_UPSTREAM)/ --format=tar HEAD | tar -x -C $(DEB_DIR)
+	git archive --prefix=folio-$(DEB_VERSION)/ --format=tar HEAD | tar -x -C $(DEB_DIR)
 	cd $(DEB_STAGE) && dpkg-buildpackage $(DEB_BUILD_FLAGS)
 	@ls -1 $(DEB_DIR)/*.deb
 

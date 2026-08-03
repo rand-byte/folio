@@ -1,6 +1,6 @@
-folio (0.9.2~rc1-1) unstable; urgency=medium
+folio (0.9.2~rc1) trixie; urgency=medium
 
-  * Initial Debian packaging.
+  * Initial `.deb` packaging.
   * First release candidate for 0.9.2: note attachments, header-bar search,
     keyboard shortcuts and dark-mode fixes.
 

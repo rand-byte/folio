@@ -9,7 +9,6 @@ from tempfile import TemporaryDirectory
 from check_version import (
     VersionParseError,
     VersionSource,
-    debian_upstream_of,
     main,
     mismatches,
     read_versions,
@@ -50,9 +49,9 @@ folio \\- AsciiDoc note-taking application
 """
 
 _CHANGELOG = """\
-folio ({version}) unstable; urgency=medium
+folio ({version}) trixie; urgency=medium
 
-  * Initial Debian packaging.
+  * Initial `.deb` packaging.
 
  -- rand-byte <nobody@example.com>  Sat, 11 Jul 2026 00:00:00 +0000
 """
@@ -98,28 +97,20 @@ class DebianMappingTests(unittest.TestCase):
                 with self.assertRaises(VersionParseError):
                     to_debian_upstream(version)
 
-    def test_revision_and_epoch_are_stripped(self) -> None:
-        self.assertEqual(debian_upstream_of("0.9.2~rc1-1"), "0.9.2~rc1")
-        self.assertEqual(debian_upstream_of("1:2.0-3"), "2.0")
-
-    def test_missing_revision_raises(self) -> None:
-        with self.assertRaises(VersionParseError):
-            debian_upstream_of("0.9.2~rc1")
-
 
 class ReadVersionsTests(unittest.TestCase):
     def test_every_site_is_read_in_its_own_dialect(self) -> None:
         with TemporaryDirectory() as directory:
             root = Path(directory)
-            _write_tree(root, _agreeing("0.9.2rc1", "0.9.2~rc1-1"))
+            _write_tree(root, _agreeing("0.9.2rc1", "0.9.2~rc1"))
             self.assertEqual(
-                dict(read_versions(root)), _agreeing("0.9.2rc1", "0.9.2~rc1-1")
+                dict(read_versions(root)), _agreeing("0.9.2rc1", "0.9.2~rc1")
             )
 
     def test_missing_meson_version_raises(self) -> None:
         with TemporaryDirectory() as directory:
             root = Path(directory)
-            _write_tree(root, _agreeing("0.9.2rc1", "0.9.2~rc1-1"))
+            _write_tree(root, _agreeing("0.9.2rc1", "0.9.2~rc1"))
             VersionSource.MESON.path(root).write_text(
                 "project(\n  'folio',\n)\n", encoding="utf-8"
             )
@@ -129,9 +120,9 @@ class ReadVersionsTests(unittest.TestCase):
     def test_malformed_changelog_line_raises(self) -> None:
         with TemporaryDirectory() as directory:
             root = Path(directory)
-            _write_tree(root, _agreeing("0.9.2rc1", "0.9.2~rc1-1"))
+            _write_tree(root, _agreeing("0.9.2rc1", "0.9.2~rc1"))
             VersionSource.CHANGELOG.path(root).write_text(
-                "folio 0.9.2~rc1-1 unstable\n", encoding="utf-8"
+                "folio 0.9.2~rc1 trixie\n", encoding="utf-8"
             )
             with self.assertRaises(VersionParseError):
                 read_versions(root)
@@ -139,7 +130,7 @@ class ReadVersionsTests(unittest.TestCase):
     def test_manpage_without_a_title_line_raises(self) -> None:
         with TemporaryDirectory() as directory:
             root = Path(directory)
-            _write_tree(root, _agreeing("0.9.2rc1", "0.9.2~rc1-1"))
+            _write_tree(root, _agreeing("0.9.2rc1", "0.9.2~rc1"))
             VersionSource.MANPAGE.path(root).write_text(
                 ".SH NAME\nfolio \\- notes\n", encoding="utf-8"
             )
@@ -149,7 +140,7 @@ class ReadVersionsTests(unittest.TestCase):
     def test_manpage_with_two_title_lines_raises(self) -> None:
         with TemporaryDirectory() as directory:
             root = Path(directory)
-            _write_tree(root, _agreeing("0.9.2rc1", "0.9.2~rc1-1"))
+            _write_tree(root, _agreeing("0.9.2rc1", "0.9.2~rc1"))
             path = VersionSource.MANPAGE.path(root)
             path.write_text(path.read_text(encoding="utf-8") * 2, encoding="utf-8")
             with self.assertRaises(VersionParseError):
@@ -158,7 +149,7 @@ class ReadVersionsTests(unittest.TestCase):
     def test_metainfo_without_a_release_raises(self) -> None:
         with TemporaryDirectory() as directory:
             root = Path(directory)
-            _write_tree(root, _agreeing("0.9.2rc1", "0.9.2~rc1-1"))
+            _write_tree(root, _agreeing("0.9.2rc1", "0.9.2~rc1"))
             VersionSource.METAINFO.path(root).write_text(
                 "<component><releases/></component>", encoding="utf-8"
             )
@@ -168,7 +159,7 @@ class ReadVersionsTests(unittest.TestCase):
     def test_malformed_metainfo_xml_raises(self) -> None:
         with TemporaryDirectory() as directory:
             root = Path(directory)
-            _write_tree(root, _agreeing("0.9.2rc1", "0.9.2~rc1-1"))
+            _write_tree(root, _agreeing("0.9.2rc1", "0.9.2~rc1"))
             VersionSource.METAINFO.path(root).write_text("<component>", encoding="utf-8")
             with self.assertRaises(VersionParseError):
                 read_versions(root)
@@ -176,7 +167,7 @@ class ReadVersionsTests(unittest.TestCase):
     def test_pyproject_without_a_version_raises(self) -> None:
         with TemporaryDirectory() as directory:
             root = Path(directory)
-            _write_tree(root, _agreeing("0.9.2rc1", "0.9.2~rc1-1"))
+            _write_tree(root, _agreeing("0.9.2rc1", "0.9.2~rc1"))
             VersionSource.PYPROJECT.path(root).write_text(
                 '[project]\nname = "folio"\n', encoding="utf-8"
             )
@@ -186,15 +177,17 @@ class ReadVersionsTests(unittest.TestCase):
 
 class MismatchTests(unittest.TestCase):
     def test_agreeing_sites_report_nothing(self) -> None:
-        self.assertEqual(list(mismatches(_agreeing("0.9.2rc1", "0.9.2~rc1-1"))), [])
-        self.assertEqual(list(mismatches(_agreeing("0.9.2", "0.9.2-1"))), [])
+        self.assertEqual(list(mismatches(_agreeing("0.9.2rc1", "0.9.2~rc1"))), [])
+        self.assertEqual(list(mismatches(_agreeing("0.9.2", "0.9.2"))), [])
 
-    def test_a_debian_revision_bump_is_not_a_mismatch(self) -> None:
+    def test_a_revision_suffix_in_the_changelog_is_a_mismatch(self) -> None:
+        # The package is native: there is no upstream/packaging split, so a
+        # `-<revision>` suffix is a hand-written mistake, not a dialect.
         versions = _agreeing("0.9.2rc1", "0.9.2~rc1-3")
-        self.assertEqual(list(mismatches(versions)), [])
+        self.assertEqual(len(list(mismatches(versions))), 1)
 
     def test_one_line_per_disagreeing_site(self) -> None:
-        versions = _agreeing("0.9.2rc1", "0.9.3~rc1-1")
+        versions = _agreeing("0.9.2rc1", "0.9.3~rc1")
         versions[VersionSource.MESON] = "0.9.1rc1"
         reported = list(mismatches(versions))
         self.assertEqual(len(reported), 2)
@@ -204,16 +197,16 @@ class MismatchTests(unittest.TestCase):
     def test_a_stale_manpage_version_is_reported(self) -> None:
         # The man page states the upstream (PEP 440) spelling, so it must
         # match pyproject.toml verbatim -- no Debian tilde mapping applies.
-        versions = _agreeing("0.9.2rc1", "0.9.2~rc1-1")
+        versions = _agreeing("0.9.2rc1", "0.9.2~rc1")
         versions[VersionSource.MANPAGE] = "0.9.1"
         reported = list(mismatches(versions))
         self.assertEqual(len(reported), 1)
         self.assertIn(str(VersionSource.MANPAGE), reported[0])
 
     def test_a_hyphenated_pre_release_in_the_changelog_is_a_mismatch(self) -> None:
-        # `0.9.2-rc1-1` would sort *after* 0.9.2, so apt would never offer the
+        # `0.9.2-rc1` would sort *after* 0.9.2, so apt would never offer the
         # upgrade to the final release: the tilde is the whole point.
-        versions = _agreeing("0.9.2rc1", "0.9.2-rc1-1")
+        versions = _agreeing("0.9.2rc1", "0.9.2-rc1")
         self.assertEqual(len(list(mismatches(versions))), 1)
 
 
@@ -226,13 +219,13 @@ class MainTests(unittest.TestCase):
     def test_exit_zero_when_every_site_agrees(self) -> None:
         with TemporaryDirectory() as directory:
             root = Path(directory)
-            _write_tree(root, _agreeing("0.9.2rc1", "0.9.2~rc1-1"))
+            _write_tree(root, _agreeing("0.9.2rc1", "0.9.2~rc1"))
             self.assertEqual(self._exit_code(root), 0)
 
     def test_exit_one_on_a_mismatch(self) -> None:
         with TemporaryDirectory() as directory:
             root = Path(directory)
-            versions = _agreeing("0.9.2rc1", "0.9.2~rc1-1")
+            versions = _agreeing("0.9.2rc1", "0.9.2~rc1")
             versions[VersionSource.METAINFO] = "0.9.1"
             _write_tree(root, versions)
             self.assertEqual(self._exit_code(root), 1)
@@ -240,7 +233,7 @@ class MainTests(unittest.TestCase):
     def test_exit_two_on_malformed_input(self) -> None:
         with TemporaryDirectory() as directory:
             root = Path(directory)
-            _write_tree(root, _agreeing("0.9.2rc1", "0.9.2~rc1-1"))
+            _write_tree(root, _agreeing("0.9.2rc1", "0.9.2~rc1"))
             VersionSource.PYPROJECT.path(root).write_text(
                 '[project]\nversion = "0.9.2.post1"\n', encoding="utf-8"
             )

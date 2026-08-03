@@ -9,7 +9,6 @@ Build-Depends:
  python3 (>= 3.13),
  libglib2.0-dev,
  libglib2.0-dev-bin,
-Standards-Version: 4.7.2
 Homepage: https://github.com/rand-byte/folio
 Rules-Requires-Root: no
 
