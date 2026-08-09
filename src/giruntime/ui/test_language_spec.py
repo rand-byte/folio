@@ -338,6 +338,12 @@ class GrammarPrecedenceTests(unittest.TestCase):
         self.assertLess(dispatched.index("attachment-macro"), bare_url)
         self.assertLess(dispatched.index("url-with-text"), bare_url)
 
+    def test_the_email_context_is_tried_after_the_url_contexts(self) -> None:
+        # An address inside a URL path must be coloured as part of the
+        # URL, not re-claimed as a mail link.
+        dispatched = _dispatched_ids()
+        self.assertLess(dispatched.index("bare-url"), dispatched.index("email"))
+
     def test_single_line_admonition_is_tried_before_inline_styles(self) -> None:
         # Its body is prose, and prose contexts must not claim the
         # "NOTE:" prefix before the admonition context sees the line.
@@ -686,10 +692,40 @@ class BareUrlPatternTests(unittest.TestCase):
             "https://example.com",
         )
 
-    def test_matches_a_mailto_url(self) -> None:
+    def test_does_not_match_a_bare_mailto_prefix(self) -> None:
+        # The language activates mailto: only in its macro form, so a
+        # bare prefix is prose and must not be coloured as a link.
+        self.assertIsNone(
+            _first_match("bare-url", "write to mailto:ada@example.com")
+        )
+
+    def test_keeps_an_underscore_inside_the_url(self) -> None:
         self.assertEqual(
-            _first_match("bare-url", "write to mailto:ada@example.com"),
-            "mailto:ada@example.com",
+            _first_match(
+                "bare-url", "https://en.wikipedia.org/wiki/Naive_set_theory"
+            ),
+            "https://en.wikipedia.org/wiki/Naive_set_theory",
+        )
+
+    def test_stops_before_a_full_stop_that_ends_a_sentence(self) -> None:
+        self.assertEqual(
+            _first_match("bare-url", "See https://example.com."),
+            "https://example.com",
+        )
+
+    def test_stops_at_a_closing_bracket(self) -> None:
+        self.assertEqual(
+            _first_match("bare-url", "https://example.com/a]b"),
+            "https://example.com/a",
+        )
+
+    def test_over_colours_a_paired_doubled_marker(self) -> None:
+        # Known divergence, pinned rather than endorsed: the parser
+        # ends the URL at the ``**`` because it pairs later on the
+        # line, which a single regex cannot ask about.
+        self.assertEqual(
+            _first_match("bare-url", "https://example.com/a**b**c"),
+            "https://example.com/a**b**c",
         )
 
     def test_rejects_a_scheme_outside_the_supported_set(self) -> None:
@@ -704,6 +740,34 @@ class BareUrlPatternTests(unittest.TestCase):
             _first_match("bare-url", "https://example.com[Example]"),
             "https://example.com",
         )
+
+
+class EmailPatternTests(unittest.TestCase):
+    """The ``email`` context mirrors the parser's address rule."""
+
+    def test_matches_a_bare_address(self) -> None:
+        self.assertEqual(
+            _first_match("email", "write to ada@example.com today"),
+            "ada@example.com",
+        )
+
+    def test_stops_before_a_full_stop_that_ends_a_sentence(self) -> None:
+        self.assertEqual(
+            _first_match("email", "write to ada@example.com."),
+            "ada@example.com",
+        )
+
+    def test_rejects_a_six_letter_final_label(self) -> None:
+        self.assertIsNone(_first_match("email", "ada@example.museum"))
+
+    def test_rejects_a_domain_continuing_past_a_valid_suffix(self) -> None:
+        self.assertIsNone(_first_match("email", "ada@example.co.museum"))
+
+    def test_rejects_an_address_after_a_mailto_prefix(self) -> None:
+        self.assertIsNone(_first_match("email", "mailto:ada@example.com"))
+
+    def test_rejects_a_domain_without_a_dot(self) -> None:
+        self.assertIsNone(_first_match("email", "ada@example"))
 
 
 class UrlWithTextPatternTests(unittest.TestCase):

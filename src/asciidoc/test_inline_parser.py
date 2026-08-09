@@ -606,7 +606,7 @@ class MonospaceTests(unittest.TestCase):
 
 
 class BareUrlTests(unittest.TestCase):
-    """Auto-linked ``http://``, ``https://``, ``mailto:`` URLs."""
+    """Auto-linked ``http://`` and ``https://`` URLs."""
 
     def test_simple_https_url(self) -> None:
         result = parse_inline("https://example.com", _LINE)
@@ -624,19 +624,6 @@ class BareUrlTests(unittest.TestCase):
                     "http://example.com/path",
                     LinkScheme.HTTP,
                     _t("http://example.com/path"),
-                ),
-            ),
-        )
-
-    def test_mailto_url(self) -> None:
-        result = parse_inline("mailto:user@example.com", _LINE)
-        self.assertEqual(
-            result,
-            (
-                _link(
-                    "mailto:user@example.com",
-                    LinkScheme.MAILTO,
-                    _t("mailto:user@example.com"),
                 ),
             ),
         )
@@ -771,10 +758,12 @@ class BareUrlTests(unittest.TestCase):
             ),
         )
 
-    def test_url_terminates_at_inline_marker(self) -> None:
+    def test_url_terminates_at_enclosing_close_marker(self) -> None:
         # ``*see https://x*`` should parse as Bold containing URL,
         # not as Bold whose body absorbs the closing ``*`` into the
-        # URL string.
+        # URL string. The asterisk ends the URL because it is where
+        # the enclosing span validly closes -- not because ``*`` is a
+        # URL character (at top level it is one, see UrlExtentTests).
         result = parse_inline("*see https://x*", _LINE)
         self.assertEqual(
             result,
@@ -832,6 +821,472 @@ class BareUrlSchemeAllowListTests(unittest.TestCase):
     def test_ftp_scheme_is_plain_text(self) -> None:
         result = parse_inline("ftp://x.com", _LINE)
         self.assertEqual(result, (_t("ftp://x.com"),))
+
+
+# ---------------------------------------------------------------------------
+# URL extent, trailing punctuation, and mail (phase B)
+# ---------------------------------------------------------------------------
+
+
+class UrlTrailingPunctuationTests(unittest.TestCase):
+    """Sentence punctuation is not part of a bare URL's target."""
+
+    def test_trailing_full_stop_is_not_part_of_the_target(self) -> None:
+        result = parse_inline("https://x.com.", _LINE)
+        link = result[0]
+        assert isinstance(link, Link)
+        self.assertEqual(link.url, "https://x.com")
+
+    def test_trailing_full_stop_survives_as_following_text(self) -> None:
+        result = parse_inline("https://x.com.", _LINE)
+        self.assertEqual(
+            result,
+            (
+                _link("https://x.com", LinkScheme.HTTPS, _t("https://x.com")),
+                _t("."),
+            ),
+        )
+
+    def test_a_run_of_trailing_punctuation_is_peeled_entirely(self) -> None:
+        result = parse_inline("https://x.com/a);", _LINE)
+        self.assertEqual(
+            result,
+            (
+                _link(
+                    "https://x.com/a", LinkScheme.HTTPS, _t("https://x.com/a")
+                ),
+                _t(");"),
+            ),
+        )
+
+    def test_trailing_bracket_is_peeled_regardless_of_balance(self) -> None:
+        # The reference is not balance-aware: the closing bracket of
+        # ``/(a)`` goes even though its opener is inside the URL.
+        result = parse_inline("https://x.com/(a)", _LINE)
+        self.assertEqual(
+            result,
+            (
+                _link(
+                    "https://x.com/(a",
+                    LinkScheme.HTTPS,
+                    _t("https://x.com/(a"),
+                ),
+                _t(")"),
+            ),
+        )
+
+    def test_an_apostrophe_stays_in_the_target(self) -> None:
+        result = parse_inline("https://x.com'", _LINE)
+        self.assertEqual(
+            result,
+            (
+                _link(
+                    "https://x.com'", LinkScheme.HTTPS, _t("https://x.com'")
+                ),
+            ),
+        )
+
+    def test_punctuation_inside_the_path_is_kept(self) -> None:
+        result = parse_inline("https://x.com/a,b", _LINE)
+        self.assertEqual(
+            result,
+            (
+                _link(
+                    "https://x.com/a,b",
+                    LinkScheme.HTTPS,
+                    _t("https://x.com/a,b"),
+                ),
+            ),
+        )
+
+    def test_a_labelled_url_keeps_its_trailing_punctuation(self) -> None:
+        # The bracket already marks where the URL ends, so there is
+        # nothing to peel and the full stop belongs to the target.
+        result = parse_inline("https://x.com.[l]", _LINE)
+        self.assertEqual(
+            result,
+            (_link("https://x.com.", LinkScheme.HTTPS, _t("l")),),
+        )
+
+
+class UrlExtentTests(unittest.TestCase):
+    """What a bare URL absorbs, and what ends it."""
+
+    def test_an_underscored_url_links_whole(self) -> None:
+        url = "https://en.wikipedia.org/wiki/Naive_set_theory"
+        result = parse_inline(url, _LINE)
+        self.assertEqual(result, (_link(url, LinkScheme.HTTPS, _t(url)),))
+
+    def test_an_asterisk_in_a_path_does_not_end_the_url(self) -> None:
+        result = parse_inline("https://x.com/a*b*c", _LINE)
+        self.assertEqual(
+            result,
+            (
+                _link(
+                    "https://x.com/a*b*c",
+                    LinkScheme.HTTPS,
+                    _t("https://x.com/a*b*c"),
+                ),
+            ),
+        )
+
+    def test_a_backtick_in_a_path_does_not_end_the_url(self) -> None:
+        result = parse_inline("https://x.com/a`b`c", _LINE)
+        self.assertEqual(
+            result,
+            (
+                _link(
+                    "https://x.com/a`b`c",
+                    LinkScheme.HTTPS,
+                    _t("https://x.com/a`b`c"),
+                ),
+            ),
+        )
+
+    def test_a_fragment_is_part_of_the_url(self) -> None:
+        result = parse_inline("https://x.com/a#b", _LINE)
+        self.assertEqual(
+            result,
+            (
+                _link(
+                    "https://x.com/a#b",
+                    LinkScheme.HTTPS,
+                    _t("https://x.com/a#b"),
+                ),
+            ),
+        )
+
+    def test_a_closing_bracket_ends_the_url(self) -> None:
+        result = parse_inline("https://x.com/foo]bar", _LINE)
+        self.assertEqual(
+            result,
+            (
+                _link(
+                    "https://x.com/foo",
+                    LinkScheme.HTTPS,
+                    _t("https://x.com/foo"),
+                ),
+                _t("]bar"),
+            ),
+        )
+
+
+class UrlDoubledMarkerTests(unittest.TestCase):
+    """A doubled marker ends a URL only when it pairs on the line."""
+
+    def test_a_paired_doubled_marker_ends_the_url(self) -> None:
+        result = parse_inline("https://x.com/a**b**c", _LINE)
+        self.assertEqual(
+            result,
+            (
+                _link(
+                    "https://x.com/a", LinkScheme.HTTPS, _t("https://x.com/a")
+                ),
+                _bold(_t("b")),
+                _t("c"),
+            ),
+        )
+
+    def test_an_unpaired_doubled_marker_stays_in_the_url(self) -> None:
+        # No second ``__`` on the line, so nothing can become emphasis
+        # and the underscores are ordinary URL characters.
+        result = parse_inline("https://x.com/a__b", _LINE)
+        self.assertEqual(
+            result,
+            (
+                _link(
+                    "https://x.com/a__b",
+                    LinkScheme.HTTPS,
+                    _t("https://x.com/a__b"),
+                ),
+            ),
+        )
+
+
+class UrlInsideSpanTests(unittest.TestCase):
+    """A URL ends where its enclosing span validly closes."""
+
+    def test_a_url_ends_where_the_enclosing_bold_validly_closes(self) -> None:
+        # The first asterisk after the URL is followed by a word
+        # character, so it cannot close the span and belongs to the
+        # target; the second one closes it.
+        result = parse_inline("*see https://x.com/a*b*", _LINE)
+        self.assertEqual(
+            result,
+            (
+                _bold(
+                    _t("see "),
+                    _link(
+                        "https://x.com/a*b",
+                        LinkScheme.HTTPS,
+                        _t("https://x.com/a*b"),
+                    ),
+                ),
+            ),
+        )
+
+    def test_a_url_ends_at_the_first_valid_closer_not_the_last(self) -> None:
+        # Here the first asterisk after the URL is followed by a space,
+        # so it does close -- the trailing ``*`` is left as prose.
+        result = parse_inline("*a https://x.com/b* c*", _LINE)
+        self.assertEqual(
+            result,
+            (
+                _bold(
+                    _t("a "),
+                    _link(
+                        "https://x.com/b",
+                        LinkScheme.HTTPS,
+                        _t("https://x.com/b"),
+                    ),
+                ),
+                _t(" c*"),
+            ),
+        )
+
+    def test_a_url_inside_an_underline_span_keeps_a_fragment(self) -> None:
+        # ``#`` closes the span, but only where it validly closes: the
+        # first one is followed by a word character, so it is a URL
+        # fragment delimiter.
+        result = parse_inline("[.underline]#https://x.com/a#b#", _LINE)
+        self.assertEqual(
+            result,
+            (
+                _under(
+                    _link(
+                        "https://x.com/a#b",
+                        LinkScheme.HTTPS,
+                        _t("https://x.com/a#b"),
+                    ),
+                ),
+            ),
+        )
+
+
+class DegenerateUrlTests(unittest.TestCase):
+    """A scheme with no body is text, not a link."""
+
+    def test_a_scheme_with_no_body_is_plain_text(self) -> None:
+        result = parse_inline("https://", _LINE)
+        self.assertEqual(result, (_t("https://"),))
+
+    def test_a_scheme_followed_only_by_punctuation_is_plain_text(self) -> None:
+        # The full stop is peeled, leaving nothing but the scheme.
+        result = parse_inline("https://.", _LINE)
+        self.assertEqual(result, (_t("https://."),))
+
+
+class EmailAutolinkTests(unittest.TestCase):
+    """Bare addresses autolink to a ``mailto:`` target."""
+
+    def test_a_bare_address_links_to_a_mailto_target(self) -> None:
+        result = parse_inline("ada@example.com", _LINE)
+        link = result[0]
+        assert isinstance(link, Link)
+        self.assertEqual(link.url, "mailto:ada@example.com")
+
+    def test_the_display_text_is_the_address_without_the_scheme(self) -> None:
+        result = parse_inline("ada@example.com", _LINE)
+        self.assertEqual(
+            result,
+            (
+                _link(
+                    "mailto:ada@example.com",
+                    LinkScheme.MAILTO,
+                    _t("ada@example.com"),
+                ),
+            ),
+        )
+
+    def test_a_dotted_local_part_is_part_of_the_address(self) -> None:
+        result = parse_inline("ada.l@example.com", _LINE)
+        self.assertEqual(
+            result,
+            (
+                _link(
+                    "mailto:ada.l@example.com",
+                    LinkScheme.MAILTO,
+                    _t("ada.l@example.com"),
+                ),
+            ),
+        )
+
+    def test_a_trailing_full_stop_is_not_part_of_the_address(self) -> None:
+        result = parse_inline("Write to ada@example.com.", _LINE)
+        self.assertEqual(
+            result,
+            (
+                _t("Write to "),
+                _link(
+                    "mailto:ada@example.com",
+                    LinkScheme.MAILTO,
+                    _t("ada@example.com"),
+                ),
+                _t("."),
+            ),
+        )
+
+    def test_a_bracketed_suffix_after_an_address_is_literal_text(self) -> None:
+        # Only the ``mailto:`` macro form takes a label; a bare
+        # address does not consume one.
+        result = parse_inline("ada@example.com[Mail me]", _LINE)
+        self.assertEqual(
+            result,
+            (
+                _link(
+                    "mailto:ada@example.com",
+                    LinkScheme.MAILTO,
+                    _t("ada@example.com"),
+                ),
+                _t("[Mail me]"),
+            ),
+        )
+
+    def test_a_domain_without_a_dot_is_plain_text(self) -> None:
+        result = parse_inline("ada@example", _LINE)
+        self.assertEqual(result, (_t("ada@example"),))
+
+    def test_a_six_letter_final_label_is_plain_text(self) -> None:
+        # The language caps the domain suffix at five characters and
+        # points longer ones at the macro form.
+        result = parse_inline("ada@example.museum", _LINE)
+        self.assertEqual(result, (_t("ada@example.museum"),))
+
+    def test_a_five_letter_final_label_links(self) -> None:
+        result = parse_inline("ada@example.email", _LINE)
+        self.assertEqual(
+            result,
+            (
+                _link(
+                    "mailto:ada@example.email",
+                    LinkScheme.MAILTO,
+                    _t("ada@example.email"),
+                ),
+            ),
+        )
+
+    def test_a_domain_continuing_past_a_valid_suffix_is_plain_text(
+        self,
+    ) -> None:
+        # The reference retreats to ``ada@example.co`` here and links a
+        # target the source never wrote. folio declines instead.
+        result = parse_inline("ada@example.co.museum", _LINE)
+        self.assertEqual(result, (_t("ada@example.co.museum"),))
+
+    def test_a_hyphenated_label_after_a_valid_suffix_is_plain_text(
+        self,
+    ) -> None:
+        result = parse_inline("ada@example.co-op", _LINE)
+        self.assertEqual(result, (_t("ada@example.co-op"),))
+
+    def test_an_address_after_a_colon_is_plain_text(self) -> None:
+        result = parse_inline("mailto:ada@example.com", _LINE)
+        self.assertEqual(result, (_t("mailto:ada@example.com"),))
+
+    def test_an_address_inside_a_url_path_is_not_re_recognised(self) -> None:
+        url = "https://x.com/ada@example.com"
+        result = parse_inline(url, _LINE)
+        self.assertEqual(result, (_link(url, LinkScheme.HTTPS, _t(url)),))
+
+    def test_an_ssh_remote_is_plain_text(self) -> None:
+        # ``git@github.com:org/repo.git`` is a remote, not an address.
+        result = parse_inline("git@github.com:org/repo.git", _LINE)
+        self.assertEqual(result, (_t("git@github.com:org/repo.git"),))
+
+    def test_a_colon_followed_by_a_space_still_links(self) -> None:
+        result = parse_inline("Write to ada@example.com: today", _LINE)
+        self.assertEqual(
+            result,
+            (
+                _t("Write to "),
+                _link(
+                    "mailto:ada@example.com",
+                    LinkScheme.MAILTO,
+                    _t("ada@example.com"),
+                ),
+                _t(": today"),
+            ),
+        )
+
+    def test_an_address_inside_link_display_text_is_plain_text(self) -> None:
+        # A nested bare URL raises, because the source reached for a
+        # link. An address in a label is prose that happens to be
+        # recognisable, so refusing it would call a well-formed
+        # document malformed.
+        result = parse_inline(
+            "link:https://x.com[write to ada@example.com]", _LINE
+        )
+        self.assertEqual(
+            result,
+            (
+                _link(
+                    "https://x.com",
+                    LinkScheme.HTTPS,
+                    _t("write to ada@example.com"),
+                ),
+            ),
+        )
+
+
+class MailtoMacroTests(unittest.TestCase):
+    """``mailto:`` activates only in its macro (bracketed) form."""
+
+    def test_a_bare_mailto_prefix_is_plain_text(self) -> None:
+        result = parse_inline("mailto:ada@example.com", _LINE)
+        self.assertEqual(result, (_t("mailto:ada@example.com"),))
+
+    def test_a_mailto_macro_with_a_label_links(self) -> None:
+        result = parse_inline("mailto:ada@example.com[Mail me]", _LINE)
+        self.assertEqual(
+            result,
+            (
+                _link(
+                    "mailto:ada@example.com",
+                    LinkScheme.MAILTO,
+                    _t("Mail me"),
+                ),
+            ),
+        )
+
+    def test_a_mailto_macro_with_an_empty_label_shows_the_address(
+        self,
+    ) -> None:
+        result = parse_inline("mailto:ada@example.com[]", _LINE)
+        self.assertEqual(
+            result,
+            (
+                _link(
+                    "mailto:ada@example.com",
+                    LinkScheme.MAILTO,
+                    _t("ada@example.com"),
+                ),
+            ),
+        )
+
+    def test_a_mailto_macro_label_supports_inline_formatting(self) -> None:
+        result = parse_inline("mailto:ada@example.com[Mail *me*]", _LINE)
+        link = result[0]
+        assert isinstance(link, Link)
+        self.assertEqual(link.text, (_t("Mail "), _bold(_t("me"))))
+
+    def test_an_unclosed_mailto_label_is_plain_text(self) -> None:
+        result = parse_inline("mailto:ada@example.com[oops", _LINE)
+        self.assertEqual(result, (_t("mailto:ada@example.com[oops"),))
+
+    def test_an_uppercase_mailto_prefix_is_plain_text(self) -> None:
+        result = parse_inline("MAILTO:ada@example.com[Mail]", _LINE)
+        self.assertEqual(result, (_t("MAILTO:ada@example.com[Mail]"),))
+
+    def test_the_link_macro_still_accepts_a_mailto_url(self) -> None:
+        result = parse_inline("link:mailto:ada@example.com[Mail]", _LINE)
+        self.assertEqual(
+            result,
+            (
+                _link(
+                    "mailto:ada@example.com", LinkScheme.MAILTO, _t("Mail")
+                ),
+            ),
+        )
 
 
 # ---------------------------------------------------------------------------

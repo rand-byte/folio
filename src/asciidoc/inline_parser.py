@@ -53,12 +53,32 @@ Principles & invariants
     spans whose body is **literal**; nothing inside is re-parsed. This
     is what makes it safe to wrap a snippet of source containing ``*``
     or ``_``.
-  - Bare URLs (``https://x``, ``http://x``, ``mailto:x``) — auto-linked
-    when the scheme is in :class:`LinkScheme`. The URL is recognised
-    only at a *word boundary*: the immediately preceding character in
-    the source line must be non-alphanumeric, or the URL must be at
-    the start of the input. This prevents the ``y`` in ``myhttps://x``
-    from being absorbed.
+  - Bare URLs (``https://x``, ``http://x``) — auto-linked when the
+    scheme is in :class:`LinkScheme`. The URL is recognised only at a
+    *word boundary*: the immediately preceding character in the source
+    line must be non-alphanumeric, or the URL must be at the start of
+    the input. This prevents the ``y`` in ``myhttps://x`` from being
+    absorbed. A scheme with nothing after it is not a URL —
+    ``https://`` is text.
+
+    A bare URL ends at whitespace, at ``[`` or ``]``, at a doubled
+    marker that **pairs** later on the line, or at the position where
+    the enclosing span's marker validly closes. Nothing else ends it:
+    ``*``, ``_``, single backtick and ``#`` all belong to the target,
+    which is what makes ``https://x/a_b_c`` link whole. Trailing
+    sentence punctuation (:data:`_URL_TRAILING_PUNCTUATION`) is peeled
+    off the target and re-emitted as text, so a URL ending a sentence
+    does not swallow the full stop. The peel does not apply to the
+    labelled form, where the bracket already marks the end.
+  - Bare email addresses (``a@b.com``) — auto-linked to a ``mailto:``
+    target whose display text is the address itself. The accepted shape
+    is the language's own: a dotted domain whose final label is two to
+    five ASCII letters. Addresses outside it use the macro form.
+    Recognition is suppressed after ``:`` or ``/`` (so a bare
+    ``mailto:`` prefix and an address inside a URL path stay inert) and
+    before an SSH remote's ``:`` (``git@github.com:org/repo.git``).
+    Unlike the reference, a match never retreats to a shorter address:
+    ``a@x.co.museum`` is text rather than a link to ``a@x.co``.
   - URL-with-text ``https://x[display]`` — same boundary rule; the
     display text is parsed recursively but with bare-URL and
     ``link:`` detection disabled (links cannot contain other links).
@@ -107,10 +127,9 @@ Principles & invariants
   one line do not accumulate.
 * Mid-word emphasis is expressed with the doubled marker, which is
   AsciiDoc's own mechanism; there is still no backslash escape (see
-  ``plan-inline-escaping.md``). URLs cannot
-  contain whitespace, ``[``, end-of-line, or any of the inline marker
-  characters (``*``, ``_``, ``#``, backtick); for URLs containing
-  those characters, users must encode them in the source URL.
+  ``plan-inline-escaping.md``). A URL that must contain whitespace, a
+  bracket, or a paired doubled marker is written with the
+  ``link:++…++`` passthrough, which is what that construct is for.
 * The scanner reports errors with ``column == 0``. Column tracking
   inside inline content adds complexity that the editor's gutter
   doesn't currently consume — the line number is enough to position
@@ -206,32 +225,47 @@ _DISPLAY_TEXT_CLOSE: str = "]"
 # :class:`LinkScheme` like any other ``link:`` URL.
 _PASSTHROUGH_MARKER: str = "++"
 
-# Bare URL is recognised only when the source has one of these literal
-# prefixes at a word boundary. They map onto :class:`LinkScheme` members
-# so the parser never produces a :class:`Link` with an unsupported
-# scheme.
-_BARE_URL_PREFIXES: tuple[tuple[str, LinkScheme], ...] = (
-    ("https://", LinkScheme.HTTPS),
-    ("http://", LinkScheme.HTTP),
-    ("mailto:", LinkScheme.MAILTO),
+# Characters that always end a URL scan, regardless of context:
+# whitespace and the two brackets. ``[`` opens a display text and ``]``
+# closes one, so neither can belong to the target.
+#
+# The inline markers ``*``, ``_`` and backtick are deliberately **not**
+# here. The reference keeps them inside a URL — ``https://x/a_b_c`` and
+# ``https://x/a*b*c`` link whole — because its constrained boundary
+# rules stop those markers opening a span mid-word in the first place.
+# A marker only ends a URL when it is the marker that will actually
+# close an enclosing span (handled by ``active_close``, see
+# :meth:`_Scanner._url_extent`) or when it is a doubled form that pairs
+# later on the line (:data:`_URL_STOP_SEQUENCES`).
+#
+# ``#`` is deliberately **not** in this set either, because it is a
+# valid URL fragment delimiter (``https://x#section``). The ``#``
+# character acts as a close marker only inside ``[.line-through]#…#``
+# and ``[.underline]#…#`` spans, where ``active_close`` picks it up.
+_URL_STOP_CHARACTERS: frozenset[str] = frozenset(
+    {" ", "\t", _DISPLAY_TEXT_OPEN, _DISPLAY_TEXT_CLOSE}
 )
 
-# Characters that always terminate a bare-URL scan, regardless of
-# context. Whitespace and ``[`` are the canonical AsciiDoc URL
-# terminators. The inline markers ``*``, ``_``, and backtick are
-# added so a URL that happens to butt up against an inline-style
-# marker (e.g. ``*see https://x*``) is parsed as URL + close-marker
-# rather than gobbling the marker into the URL.
-#
-# ``#`` is deliberately **not** in this set, because it is a valid
-# URL fragment delimiter (``https://x#section``). The ``#`` character
-# acts as a close marker only inside ``[.line-through]#…#`` and
-# ``[.underline]#…#`` spans; in those contexts the URL scanner picks
-# it up via the dynamic ``active_close`` parameter (see
-# :meth:`_Scanner._consume_url_link`).
-_URL_TERMINATORS: frozenset[str] = frozenset(
-    {" ", "\t", "[", _BOLD_MARKER, _ITALIC_MARKER, _MONOSPACE_MARKER}
+# Doubled markers end a URL scan, but **only when they pair** later on
+# the line. An unconstrained marker may open mid-word, so a matched
+# ``**…**`` inside a URL becomes emphasis in the reference and truncates
+# the target; a lone ``__`` with no twin is an ordinary URL character.
+# ``https://x/a**b**c`` therefore splits while ``https://x/a__b`` does
+# not.
+_URL_STOP_SEQUENCES: tuple[str, ...] = (
+    _BOLD_UNCONSTRAINED_MARKER,
+    _ITALIC_UNCONSTRAINED_MARKER,
+    _MONOSPACE_UNCONSTRAINED_MARKER,
 )
+
+# Sentence punctuation peeled off the end of a bare URL and re-emitted
+# as text, repeatedly, until the target's last character is not one of
+# them: ``https://x.com.`` links ``https://x.com`` and leaves the full
+# stop behind. The peel is **not** parenthesis-balance-aware — the
+# reference drops a trailing ``)`` from ``https://x.com/(a)`` too — and
+# it does not apply to the labelled form (``https://x.com.[l]`` targets
+# the dot), where the bracket already marks the end.
+_URL_TRAILING_PUNCTUATION: frozenset[str] = frozenset(".,;:?!)")
 
 # Pattern for a generic RFC-3986-style URL scheme. Used by the
 # ``link:`` macro to extract whatever scheme the user wrote so it
@@ -240,6 +274,47 @@ _URL_TERMINATORS: frozenset[str] = frozenset(
 _GENERIC_SCHEME_RE: re.Pattern[str] = re.compile(
     r"([A-Za-z][A-Za-z0-9+.\-]*):"
 )
+
+# A bare email address, autolinked to a ``mailto:`` target. The shape is
+# the AsciiDoc language's own: a dotted domain whose final label is two
+# to five ASCII letters, with ``.``, ``-`` and ``+`` the only permitted
+# symbols. Addresses outside that shape are written with the macro form
+# (``mailto:ada@example.museum[label]``), which is what the language
+# prescribes for them.
+#
+# The trailing lookaheads are the one deliberate narrowing. The
+# reference ends the pattern with ``\b``, which lets it retreat to an
+# *earlier* label when the real final label is too long — turning
+# ``a@x.co.museum`` into a live link to ``a@x.co`` and ``a@b.co-op``
+# into one to ``a@b.co``, neither of them an address the user typed.
+# Forbidding a domain continuation makes the match all-or-nothing: the
+# address is recognised whole or the text stays prose. Every divergence
+# that produces is folio *declining* where the reference links, which is
+# a refusal the subset property permits — the rule can only be narrower
+# than the reference's, never wider. A trailing ``.`` that ends a
+# sentence is not a continuation, so ``a@b.com.`` still links.
+_EMAIL_RE: re.Pattern[str] = re.compile(
+    r"[A-Za-z0-9_][A-Za-z0-9_.%+-]*"
+    r"@[A-Za-z0-9][A-Za-z0-9_.-]*\.[A-Za-z]{2,5}"
+    r"(?![A-Za-z0-9_])(?![.-][A-Za-z0-9])"
+)
+
+# Characters that suppress email recognition when they immediately
+# precede the address. ``:`` keeps a bare ``mailto:a@b.com`` inert (the
+# language activates the prefix only in its macro form) and ``/`` keeps
+# an address inside a URL path from being re-recognised.
+_EMAIL_BLOCKING_PREDECESSORS: frozenset[str] = frozenset(":/")
+
+# ``git@github.com:org/repo.git`` is an SSH remote, not an address. The
+# reference links it; folio declines, because a developer's notes carry
+# more remotes than exotic addresses and the result would be a live
+# wrong target. A colon followed by a space is ordinary punctuation
+# (``write to a@b.com: see below``) and still links.
+_SSH_REMOTE_SEPARATOR: str = ":"
+
+# The scheme prefix a recognised address is given as its target. The
+# display text stays the bare address, matching the reference.
+_MAILTO_PREFIX: str = "mailto:"
 
 
 def _is_word_character(char: str) -> bool:
@@ -324,6 +399,39 @@ class _ScanResult:
 
     nodes: tuple[InlineNode, ...]
     closed: bool
+
+
+@dataclass(frozen=True)
+class _BareUrlPrefix:
+    """A literal scheme prefix that may start a link in running text.
+
+    ``requires_label`` says whether the prefix activates on its own.
+    ``https://`` and ``http://`` do; ``mailto:`` does **not** — the
+    language activates it only in its macro form, so ``mailto:a@b.com``
+    is prose and ``mailto:a@b.com[Mail]`` is a link. A bare address is
+    recognised by :data:`_EMAIL_RE` instead, not through this table.
+
+    A bool rather than an enum: it is a two-valued predicate read at one
+    site, and a scheme that never activates is expressed by absence from
+    the table rather than by a third state. If a third activation mode
+    ever appears, or a second call site starts branching on this, it
+    should become a named :class:`enum.Enum` in :mod:`enums`.
+    """
+
+    prefix: str
+    scheme: LinkScheme
+    requires_label: bool
+
+
+# Bare URL is recognised only when the source has one of these literal
+# prefixes at a word boundary. They map onto :class:`LinkScheme` members
+# so the parser never produces a :class:`Link` with an unsupported
+# scheme.
+_BARE_URL_PREFIXES: tuple[_BareUrlPrefix, ...] = (
+    _BareUrlPrefix("https://", LinkScheme.HTTPS, requires_label=False),
+    _BareUrlPrefix("http://", LinkScheme.HTTP, requires_label=False),
+    _BareUrlPrefix(_MAILTO_PREFIX, LinkScheme.MAILTO, requires_label=True),
+)
 
 
 # Order matters: longer markers must be tried before shorter ones that
@@ -428,6 +536,7 @@ class _Scanner:
     pos: int
     depth: int
     closer_index: dict[str, int]
+    email_index: dict[int, str] | None
 
     def __init__(self, text: str, line: int) -> None:
         self.text = text
@@ -435,6 +544,7 @@ class _Scanner:
         self.pos = 0
         self.depth = 0
         self.closer_index = {}
+        self.email_index = None
 
     # ------------------------------------------------------------------
     # Nesting guard
@@ -551,6 +661,17 @@ class _Scanner:
             if macro_link is not None:
                 flush()
                 nodes.append(macro_link)
+                continue
+
+            # Bare email address — autolinked to a ``mailto:`` target.
+            # Attempted after the URL and macro forms so that an address
+            # inside a URL path or after a ``mailto:`` prefix is already
+            # consumed (or already suppressed) by the time the index is
+            # consulted.
+            email_link = self._try_consume_email(forbid_link=forbid_link)
+            if email_link is not None:
+                flush()
+                nodes.append(email_link)
                 continue
 
             # ``attachment:FILE[label]`` — the save-link sibling of
@@ -680,8 +801,8 @@ class _Scanner:
         """
         if not self._at_word_boundary():
             return None
-        for prefix, scheme in _BARE_URL_PREFIXES:
-            if self._matches_at_pos(prefix):
+        for entry in _BARE_URL_PREFIXES:
+            if self._matches_at_pos(entry.prefix):
                 if forbid_link:
                     raise ParseError(
                         line=self.line,
@@ -693,7 +814,7 @@ class _Scanner:
                         kind=ParseErrorKind.BAD_LINK_MACRO,
                     )
                 return self._consume_url_link(
-                    scheme=scheme,
+                    entry=entry,
                     active_close=active_close,
                 )
         return None
@@ -701,58 +822,235 @@ class _Scanner:
     def _consume_url_link(
         self,
         *,
-        scheme: LinkScheme,
+        entry: _BareUrlPrefix,
         active_close: _CloseMarker | None,
-    ) -> Link:
+    ) -> Link | None:
         """Consume the URL chars and an optional ``[display text]`` suffix.
 
         On entry ``self.pos`` points at the start of the scheme prefix
-        (e.g. the ``h`` in ``https://``). The URL extends until any
-        terminator in :data:`_URL_TERMINATORS`, the active enclosing
-        close marker (passed via ``active_close``), or end of line. If
-        the terminator is ``[`` and a matching ``]`` is found on the
-        same line, the bracketed text is parsed as the link's display
-        text (with bare-URL and ``link:`` detection disabled inside).
-        Otherwise the URL itself is the display text.
+        (e.g. the ``h`` in ``https://``). The URL extends as far as
+        :meth:`_url_extent` allows. If it stopped on ``[`` and a
+        matching ``]`` is found on the same line, the bracketed text is
+        parsed as the link's display text (with bare-URL and ``link:``
+        detection disabled inside). Otherwise trailing sentence
+        punctuation is peeled off and the URL itself is the display
+        text.
+
+        Returns :data:`None`, with the cursor restored to the prefix,
+        when the prefix does not resolve to a link after all: a
+        label-requiring scheme with no label (``mailto:a@b.com``), or a
+        scheme with nothing left after it (``https://``, ``https://.``).
+        The caller then emits the prefix as ordinary text.
         """
         url_start = self.pos
-        while self.pos < len(self.text):
-            char = self.text[self.pos]
-            if char in _URL_TERMINATORS:
-                break
-            if active_close is not None and char == active_close.marker:
-                break
-            self.pos += 1
-        url = self.text[url_start:self.pos]
-
-        # Optional ``[text]`` suffix — only consumed if the closing
-        # bracket is on the same line. If the bracket count doesn't
-        # balance, the ``[`` is treated as plain text following the
-        # URL: we do not raise here because, unlike ``link:``, the
-        # bare URL form is valid without a display-text suffix.
+        url_end = self._url_extent(url_start, active_close)
         if (
-            self.pos < len(self.text)
-            and self.text[self.pos] == _DISPLAY_TEXT_OPEN
+            url_end < len(self.text)
+            and self.text[url_end] == _DISPLAY_TEXT_OPEN
         ):
-            display = self._try_consume_link_display_text()
-            if display is not None:
-                return Link(
-                    url=url,
-                    scheme=scheme,
-                    text=display,
-                    source_line=self.line,
-                )
-
-        # No display text — the URL itself is what the renderer shows.
-        display_text: tuple[InlineNode, ...] = (
-            Text(content=url, source_line=self.line),
+            return self._consume_labelled_url(entry, url_start, url_end)
+        if entry.requires_label:
+            self.pos = url_start
+            return None
+        url_end = self._strip_trailing_punctuation(
+            url_start + len(entry.prefix), url_end
         )
+        url = self.text[url_start:url_end]
+        if len(url) <= len(entry.prefix):
+            # Nothing but the scheme survived: this is not a URL.
+            self.pos = url_start
+            return None
+        self.pos = url_end
         return Link(
             url=url,
-            scheme=scheme,
-            text=display_text,
+            scheme=entry.scheme,
+            text=(Text(content=url, source_line=self.line),),
             source_line=self.line,
         )
+
+    def _consume_labelled_url(
+        self, entry: _BareUrlPrefix, url_start: int, url_end: int
+    ) -> Link | None:
+        """Consume a ``URL[display]`` shape whose ``[`` sits at ``url_end``.
+
+        The target is taken **unpeeled** — ``https://x.com.[l]`` targets
+        the full stop, as the reference does, because the bracket has
+        already marked where the URL ends.
+
+        A label-requiring scheme needs a well-formed bracket pair to
+        activate at all, but tolerates an empty one:
+        ``mailto:a@b.com[]`` links and displays the address without its
+        scheme, which is what the reference shows.
+        """
+        url = self.text[url_start:url_end]
+        self.pos = url_end
+        if not entry.requires_label:
+            display = self._try_consume_link_display_text()
+            if display is None:
+                display = (Text(content=url, source_line=self.line),)
+            return Link(
+                url=url,
+                scheme=entry.scheme,
+                text=display,
+                source_line=self.line,
+            )
+        if _DISPLAY_TEXT_CLOSE not in self.text[self.pos + 1:]:
+            self.pos = url_start
+            return None
+        labelled = self._consume_link_display_text(required=False)
+        if not labelled:
+            labelled = (
+                Text(
+                    content=url[len(entry.prefix):],
+                    source_line=self.line,
+                ),
+            )
+        return Link(
+            url=url,
+            scheme=entry.scheme,
+            text=labelled,
+            source_line=self.line,
+        )
+
+    def _url_extent(
+        self, url_start: int, active_close: _CloseMarker | None
+    ) -> int:
+        """Index at which a URL beginning at ``url_start`` ends.
+
+        Three things end it, and only three: a character in
+        :data:`_URL_STOP_CHARACTERS`, a doubled marker that pairs later
+        on the line, or the position at which the enclosing span's
+        marker *validly closes*.
+
+        That last one is why the scan asks
+        :meth:`_next_valid_closer` rather than looking for the marker
+        character. In ``*see https://x.com/a*b*`` the first asterisk
+        after the URL is followed by a word character, so it cannot
+        close the bold span and belongs to the target; the second one
+        can, and ends it. Testing for the character alone would truncate
+        at the first.
+        """
+        enclosing_stop = (
+            -1 if active_close is None
+            else self._next_valid_closer(active_close, url_start)
+        )
+        index = url_start
+        while index < len(self.text):
+            if index == enclosing_stop:
+                break
+            if self.text[index] in _URL_STOP_CHARACTERS:
+                break
+            if self._at_paired_stop_sequence(index):
+                break
+            index += 1
+        return index
+
+    def _at_paired_stop_sequence(self, index: int) -> bool:
+        """Does a doubled marker start at ``index`` *and* pair later?
+
+        An unconstrained marker closes anywhere, so
+        :meth:`_last_valid_closer` degenerates to "last occurrence on
+        the line" and is exactly the pairing test — and it is cached per
+        line, so a marker-dense line costs one scan per marker in total.
+        """
+        for sequence in _URL_STOP_SEQUENCES:
+            if not self.text.startswith(sequence, index):
+                continue
+            close = _CloseMarker(
+                marker=sequence, form=MarkerForm.UNCONSTRAINED
+            )
+            if self._last_valid_closer(close) >= index + len(sequence):
+                return True
+        return False
+
+    def _strip_trailing_punctuation(self, floor: int, url_end: int) -> int:
+        """Peel :data:`_URL_TRAILING_PUNCTUATION` off a URL's tail.
+
+        ``floor`` is the first index the peel may not cross — the end of
+        the scheme prefix — so a URL that is nothing but punctuation
+        after its scheme collapses to the prefix and is refused by the
+        caller rather than becoming a link to ``https://``.
+        """
+        while (
+            url_end > floor
+            and self.text[url_end - 1] in _URL_TRAILING_PUNCTUATION
+        ):
+            url_end -= 1
+        return url_end
+
+    # ------------------------------------------------------------------
+    # Bare email address  (a@b.com — autolinked to a mailto: target)
+    # ------------------------------------------------------------------
+
+    def _try_consume_email(self, *, forbid_link: bool) -> Link | None:
+        """Try to consume a bare email address at the cursor.
+
+        Returns :data:`None` when the cursor is not at the start of a
+        recognised address, when the address is preceded by a character
+        that suppresses recognition, or when it is followed by an SSH
+        remote's ``:``.
+
+        Under ``forbid_link`` the index is not consulted at all and the
+        address stays text. A nested bare URL raises there because the
+        source *reached for* a link; an address inside a label is prose
+        that happens to be recognisable, and refusing it would assert
+        the document is malformed when it is not. The reference emits no
+        nested anchor there either, so text is also the conformant
+        answer.
+        """
+        if forbid_link:
+            return None
+        address = self._email_starts().get(self.pos)
+        if address is None:
+            return None
+        if (
+            self.pos > 0
+            and self.text[self.pos - 1] in _EMAIL_BLOCKING_PREDECESSORS
+        ):
+            return None
+        end = self.pos + len(address)
+        if self._is_ssh_remote_at(end):
+            return None
+        self.pos = end
+        return Link(
+            url=_MAILTO_PREFIX + address,
+            scheme=LinkScheme.MAILTO,
+            text=(Text(content=address, source_line=self.line),),
+            source_line=self.line,
+        )
+
+    def _email_starts(self) -> dict[int, str]:
+        """Every address on the line, keyed by its start index.
+
+        Built once per line and cached, in the same spirit as the closer
+        index: leftmost-first matching is what makes ``foo.a@b.com``
+        recognised from its ``f`` rather than from some later position
+        inside the local part, with no preceding-character arithmetic.
+        Consulting it only at the cursor is what makes an address inside
+        an already-consumed URL unreachable by construction.
+        """
+        if self.email_index is None:
+            self.email_index = {
+                match.start(): match.group()
+                for match in _EMAIL_RE.finditer(self.text)
+            }
+        return self.email_index
+
+    def _is_ssh_remote_at(self, end: int) -> bool:
+        """Is the address ending at ``end`` really an SSH remote?
+
+        ``git@github.com:org/repo.git`` is a remote, not an address. A
+        colon followed by a space is ordinary sentence punctuation and
+        does not suppress the link.
+        """
+        if end >= len(self.text):
+            return False
+        if self.text[end] != _SSH_REMOTE_SEPARATOR:
+            return False
+        following = end + 1
+        if following >= len(self.text):
+            return False
+        return not self.text[following].isspace()
 
     # ------------------------------------------------------------------
     # link: macro  (link:URL[text])
@@ -822,17 +1120,12 @@ class _Scanner:
         else:
             url_start = self.pos
             scheme = self._consume_link_macro_scheme(url_start)
-            # Scheme has been consumed; continue scanning the rest of
-            # the URL until the ``[`` that opens the display text —
-            # also bounded by the active enclosing close marker, when
-            # set.
-            while self.pos < len(self.text):
-                char = self.text[self.pos]
-                if char in _URL_TERMINATORS:
-                    break
-                if active_close is not None and char == active_close:
-                    break
-                self.pos += 1
+            # Scheme has been consumed; the rest of the URL runs to the
+            # ``[`` that opens the display text, under the same extent
+            # rules as a bare URL — including the enclosing close
+            # marker, so a macro inside a strikethrough span does not
+            # gobble the closing ``#``.
+            self.pos = self._url_extent(self.pos, active_close)
             url = self.text[url_start:self.pos]
         if (
             self.pos >= len(self.text)

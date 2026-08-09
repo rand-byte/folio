@@ -164,14 +164,14 @@ A link can be written four ways. Three are for everyday addresses:
 
 The fourth is a *passthrough* macro, `link:++URL++[label]`, for an address
 that is awkward to link — the `++ ... ++` around the URL keeps every
-character literal. Reach for it when the address itself contains a markup
-character (most often an underscore), which the three forms above would
-otherwise read as formatting and cut the link short.
+character literal. Reach for it when the address contains a space, a square
+bracket, or a doubled markup marker such as `**`, which the three forms
+above would otherwise read as the end of the address.
 
 A label is optional for the bare and labelled forms but *required* by both
 macro forms. Rendered, a labelled link and a passthrough link both look
 like ordinary links: https://example.com[the Folio website] and
-link:++https://en.wikipedia.org/wiki/Naive_set_theory++[naive set theory].
+link:++https://example.com/search?q=[a b]++[a search with brackets].
 
 Here are all four forms, end to end:
 
@@ -179,7 +179,7 @@ Here are all four forms, end to end:
 Bare:        https://example.com
 Labelled:    https://example.com[the Folio website]
 Macro:       link:https://example.com[the Folio website]
-Passthrough: link:++https://en.wikipedia.org/wiki/Naive_set_theory++[naive set theory]
+Passthrough: link:++https://example.com/search?q=[a b]++[a search with brackets]
 ----
 
 Only the schemes `http`, `https`, and `mailto` become links. The bare and
@@ -188,11 +188,26 @@ with one of those schemes is simply left as ordinary words rather than
 linked. The `link:` macro is stricter: a disallowed scheme is reported as
 an error instead of passed through.
 
-The passthrough earns its place on real URLs: an address such as
-`https://en.wikipedia.org/wiki/Naive_set_theory` breaks at its first
-underscore in every other form — the link stops at `...Naive` and `_set_`
-is read as italics. Wrapping it as `link:++...++[label]` makes Folio take
-the address verbatim, underscores and all.
+A URL that ends a sentence keeps its punctuation out of the link — writing
+`See https://example.com.` links the address and leaves the full stop as
+text. Markup characters *inside* an address are part of it, so
+`https://en.wikipedia.org/wiki/Naive_set_theory` links whole.
+
+=== Email addresses
+
+An email address written on its own becomes a mail link — write to
+ada@example.com and Folio links it, with no macro needed. The address must
+end in a domain suffix of two to five letters, which is what the AsciiDoc
+language recognises; for anything longer, use the `mailto:` macro with a
+label:
+
+----
+Bare address: ada@example.com
+Macro:        mailto:ada@example.museum[Write to Ada]
+----
+
+The `mailto:` prefix on its own is *not* a link — `mailto:ada@example.com`
+in running text stays as written. It needs the bracketed label, as above.
 
 Limit: links never nest inside other links, and a label is mandatory for
 either macro form.

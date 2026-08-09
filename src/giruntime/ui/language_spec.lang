@@ -12,7 +12,8 @@
   (attachment:file[label]), the four inline styles bold (*x*), italic
   (_x_), strikethrough ([.line-through]#x#), and underline
   ([.underline]#x#), inline monospace (`x`), links in three forms:
-  bare URL (https://x), URL-with-text (https://x[label]), and the
+  bare URL (https://x), bare email address, URL-with-text
+  (https://x[label]), and the
   link:URL[label] macro (incl. its link:++URL++[label] passthrough
   variant for URLs carrying '_' / '#'), tables (|=== fences, with optional
   [cols="N,N,..."] directive), admonitions in both forms — single-line
@@ -311,19 +312,42 @@
     </context>
 
     <!--
-      Bare URL: http://, https://, mailto: at a word boundary,
-      followed by URL characters until whitespace, '[', or one of
-      the inline marker characters '*', '_', '#', '`' that the
-      parser also uses as URL terminators. The (?: ... ) wrapper
-      keeps the alternatives in one group so the colouring covers
-      the whole URL run.
+      Bare URL: http:// or https:// at a word boundary, followed by
+      URL characters until whitespace or a bracket. The inline
+      markers are NOT terminators here: the parser keeps '*', '_',
+      '`' and '#' inside a target, so 'https://x/a_b_c' is one URL.
+      The final character class refuses the sentence punctuation the
+      parser peels off the target, so the colouring stops where the
+      link does.
+
+      'mailto:' is absent on purpose: the language activates it only
+      in its macro form, which url-with-text below matches. A bare
+      address is coloured by the 'email' context.
+
+      Known divergence: the parser also ends a URL at a doubled
+      marker that pairs later on the line ('https://x/a**b**c'),
+      which a single regex cannot express, because a context cannot
+      ask whether a marker has a twin further along. The grammar
+      therefore over-colours that case. Pinned by
+      BareUrlPatternTests rather than endorsed.
 
       The trailing-text variant (https://x[label]) is matched by a
       separate context below so the LABEL portion is coloured as
       link text rather than link destination.
     -->
     <context id="bare-url" style-ref="link-destination">
-      <match>(?&lt;![A-Za-z0-9])(?:https?://|mailto:)[^\s\[*_`#]+</match>
+      <match>(?&lt;![A-Za-z0-9])https?://[^\s\[\]]*[^\s\[\].,;:?!)]</match>
+    </context>
+
+    <!--
+      Bare email address, autolinked by the parser to a mailto:
+      target. Mirrors the parser's pattern, including the two-to-five
+      letter cap on the final domain label that the language
+      specifies, so an address the parser leaves as prose is not
+      coloured as a link.
+    -->
+    <context id="email" style-ref="link-destination">
+      <match>(?&lt;![A-Za-z0-9_.%+\-:/])[A-Za-z0-9_][A-Za-z0-9_.%+\-]*@[A-Za-z0-9][A-Za-z0-9_.\-]*\.[A-Za-z]{2,5}(?![A-Za-z0-9_])(?![.\-][A-Za-z0-9])</match>
     </context>
 
     <!--
@@ -334,7 +358,7 @@
       can be split.
     -->
     <context id="url-with-text" style-ref="link">
-      <start>(?&lt;![A-Za-z0-9])(?:https?://|mailto:)[^\s\[*_`#]+\[</start>
+      <start>(?&lt;![A-Za-z0-9])(?:https?://|mailto:)[^\s\[\]]*\[</start>
       <end>\]</end>
       <include>
         <context sub-pattern="0" where="start" style-ref="link-destination"/>
@@ -423,6 +447,7 @@
         <context ref="attachment-macro"/>
         <context ref="url-with-text"/>
         <context ref="bare-url"/>
+        <context ref="email"/>
         <context ref="inline-monospace-unconstrained"/>
         <context ref="inline-monospace"/>
         <context ref="inline-strikethrough"/>

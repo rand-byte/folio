@@ -380,5 +380,40 @@ class UnreadBlockSnippetTests(unittest.TestCase):
         self.assertEqual(_snippet_of(document), "|=== | Region | Cluster")
 
 
+
+class UrlAndAddressSnippetTests(unittest.TestCase):
+    """A snippet reads exactly as the source was typed.
+
+    Phase B moved the boundary between a link's display text and the
+    text around it, but never the characters themselves. These pin that
+    property at the level that matters -- the cached snippet a note-list
+    row shows -- so a future change to the URL rules cannot silently
+    re-derive every note's snippet.
+    """
+
+    def test_a_url_ending_a_sentence_keeps_its_full_stop_in_the_snippet(
+        self,
+    ) -> None:
+        summary = derive_summary("= T\n\nSee https://x.com.")
+        self.assertEqual(summary.snippet, "See https://x.com.")
+
+    def test_an_underscored_url_reads_as_typed(self) -> None:
+        summary = derive_summary(
+            "= T\n\nhttps://en.wikipedia.org/wiki/Naive_set_theory"
+        )
+        self.assertEqual(
+            summary.snippet,
+            "https://en.wikipedia.org/wiki/Naive_set_theory",
+        )
+
+    def test_a_bare_address_reads_as_typed(self) -> None:
+        summary = derive_summary("= T\n\nWrite to ada@example.com.")
+        self.assertEqual(summary.snippet, "Write to ada@example.com.")
+
+    def test_a_bare_mailto_prefix_reads_as_typed(self) -> None:
+        summary = derive_summary("= T\n\nmailto:ada@example.com")
+        self.assertEqual(summary.snippet, "mailto:ada@example.com")
+
+
 if __name__ == "__main__":
     unittest.main()
