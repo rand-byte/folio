@@ -233,21 +233,43 @@
     </context>
 
     <!--
+      Inline bold, unconstrained: **...** on a single line. The doubled
+      marker may open and close anywhere, including inside a word, so it
+      carries no boundary guards at all — that is the whole point of the
+      form. Dispatched before the constrained twin below, or **bold**
+      would highlight as an empty span followed by prose.
+    -->
+    <context id="inline-bold-unconstrained" style-ref="bold">
+      <match>\*\*[^\n]+?\*\*</match>
+    </context>
+
+    <!--
+      Inline italic, unconstrained: __..__ on a single line.
+    -->
+    <context id="inline-italic-unconstrained" style-ref="italic">
+      <match>__[^\n]+?__</match>
+    </context>
+
+    <!--
       Inline bold: *...* on a single line, with the asterisks adjacent
       to non-whitespace characters (matches the parser's rule that
-      ``* foo *`` is plain prose, not a bold span). The negative
-      lookahead before the opening '*' prevents confusion with the
-      unordered-list bullet at column 0.
+      ``* foo *`` is plain prose, not a bold span). The lookbehind
+      carries the parser's full constrained-opener rule: no word
+      character, no ';' and no ':' before the marker — and, as a
+      grammar-only concern, no '*', which keeps this context off the
+      unordered-list bullet at column 0 and off the doubled form above.
+      The trailing lookahead is the closer rule: a marker followed by a
+      word character is body text, which is why ``*bold*x`` stays prose.
     -->
     <context id="inline-bold" style-ref="bold">
-      <match>(?&lt;![\w*])\*(?=\S)[^*\n]*\S\*(?![\w])</match>
+      <match>(?&lt;![\w*;:])\*(?=\S)[^*\n]*\S\*(?![\w])</match>
     </context>
 
     <!--
       Inline italic: _..._ on a single line, same shape rules.
     -->
     <context id="inline-italic" style-ref="italic">
-      <match>(?&lt;![\w_])_(?=\S)[^_\n]*\S_(?![\w])</match>
+      <match>(?&lt;![\w_;:])_(?=\S)[^_\n]*\S_(?![\w])</match>
     </context>
 
     <!--
@@ -269,13 +291,23 @@
     </context>
 
     <!--
-      Inline monospace: a backtick pair on a single line. The body
-      is matched verbatim by the parser; in the editor we colour the
-      whole run including the backticks so the user sees the
-      delimiters.
+      Inline monospace, unconstrained: a doubled-backtick pair. Like the
+      other doubled forms it may sit inside a word, and it is dispatched
+      before the constrained twin.
+    -->
+    <context id="inline-monospace-unconstrained" style-ref="monospace" class="no-spell-check">
+      <match>``[^\n]+?``</match>
+    </context>
+
+    <!--
+      Inline monospace: a backtick pair on a single line, carrying the
+      same constrained boundary rules as bold and italic — ``a`b`c`` is
+      prose, not a code span. The body is matched verbatim by the
+      parser; in the editor we colour the whole run including the
+      backticks so the user sees the delimiters.
     -->
     <context id="inline-monospace" style-ref="monospace" class="no-spell-check">
-      <match>`[^`\n]*`</match>
+      <match>(?&lt;![\w`;:])`(?=\S)[^`\n]*\S`(?![\w])</match>
     </context>
 
     <!--
@@ -391,10 +423,13 @@
         <context ref="attachment-macro"/>
         <context ref="url-with-text"/>
         <context ref="bare-url"/>
+        <context ref="inline-monospace-unconstrained"/>
         <context ref="inline-monospace"/>
         <context ref="inline-strikethrough"/>
         <context ref="inline-underline"/>
+        <context ref="inline-bold-unconstrained"/>
         <context ref="inline-bold"/>
+        <context ref="inline-italic-unconstrained"/>
         <context ref="inline-italic"/>
       </include>
     </context>

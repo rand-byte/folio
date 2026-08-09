@@ -8,6 +8,11 @@ Principles & invariants
   member — and is closed for the type-checker (a missing arm is a ``Never``
   error), so this table and the enum cannot drift. It carries only the
   detail line; the notice chrome (icon, headline, hint) is the pane's.
+* Every message here answers for a construct the user *reached for* —
+  a macro, a fence, a directive. There is deliberately no
+  "unpaired inline marker" message: a formatting marker that resolves
+  to nothing is prose, so the parser never reports it and there is
+  nothing to explain.
 * Pure: no GTK, no storage, no widget state. Depends only on
   :mod:`enums`.
 """
@@ -76,11 +81,6 @@ def message_for(kind: ParseErrorKind, line: int) -> str:
                 f"Line {line}: the image macro is malformed. Expected "
                 "`image::filename[attrs]`."
             )
-        case ParseErrorKind.BAD_INLINE_SPAN:
-            return (
-                f"Line {line}: an inline formatting marker (`*`, `_`, or "
-                "`#`) was opened but not closed on the same line."
-            )
         case ParseErrorKind.INLINE_NESTING_TOO_DEEP:
             return (
                 f"Line {line}: inline formatting is nested more than "
@@ -134,11 +134,6 @@ def message_for(kind: ParseErrorKind, line: int) -> str:
             return (
                 f"Line {line}: the `link:` macro is malformed. Expected "
                 "`link:URL[display text]`."
-            )
-        case ParseErrorKind.UNTERMINATED_MONOSPACE:
-            return (
-                f"Line {line}: a backtick-monospace span was opened but "
-                "never closed."
             )
         case ParseErrorKind.UNTERMINATED_PASSTHROUGH:
             return (

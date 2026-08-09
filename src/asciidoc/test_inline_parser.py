@@ -8,15 +8,20 @@ Two recurring shapes:
 * **Valid input** — the parser returns a tuple of inline nodes whose
   structure we assert against an expected tuple. Source-line numbers
   are checked because the renderer uses them for error positioning.
-* **Invalid input** — the parser raises
-  :class:`ParseErrorKind.BAD_INLINE_SPAN` with the offending source
-  line. Column is always ``0`` for inline failures, which is what the
-  editor's gutter renderer expects.
+* **Invalid input** — the parser raises with the offending source line
+  and column ``0``, which is what the editor's gutter renderer expects.
+  Note what is *not* in this bucket: a formatting marker that does not
+  resolve to a span is prose, never an error, so every unpaired ``*`` or
+  ``_`` below is asserted as :class:`Text`. The failures left are all
+  refusals of a construct the user reached for — a ``link:`` or
+  ``attachment:`` macro, a passthrough, the nesting cap.
 """
 
 from __future__ import annotations
 
+import time
 import unittest
+from unittest import mock
 
 from asciidoc.ast import (
     AttachmentLink,
@@ -29,6 +34,7 @@ from asciidoc.ast import (
     Text,
     Underline,
 )
+from asciidoc import inline_parser
 from asciidoc.inline_parser import parse_inline
 from config.defaults import MAX_INLINE_DEPTH
 from enums import LinkScheme, ParseErrorKind
@@ -93,12 +99,18 @@ def _link(
 def _nested_spans(levels: int, body: str = "x") -> str:
     """Build a source line nesting ``levels`` formatting spans around ``body``.
 
-    Markers alternate between ``*`` and ``_`` because same-marker
-    self-nesting is impossible by construction — an inner ``*`` always
+    Markers alternate between ``**`` and ``__`` because same-marker
+    self-nesting is impossible by construction — an inner ``**`` always
     closes the outer one. Each marker therefore contributes exactly one
     nesting level, so ``levels`` is the depth the scanner will reach.
+
+    The *unconstrained* forms are what make arbitrary depth expressible.
+    Their constrained twins cannot stack directly: ``*_x_*`` nests, but
+    ``*_*x*_*`` does not, because the third marker is preceded by ``_``
+    and an underscore is a word character for the opener test. That is
+    the reference implementation's rule, not a folio limitation.
     """
-    markers = ["*" if index % 2 == 0 else "_" for index in range(levels)]
+    markers = ["**" if index % 2 == 0 else "__" for index in range(levels)]
     return "".join(markers) + body + "".join(reversed(markers))
 
 
@@ -176,23 +188,19 @@ class ValidInlineTests(unittest.TestCase):
                 ),
             ),
             (
-                "two adjacent bolds resolve as alternating",
+                "interior markers are body text, not closers",
                 "*a*b*c*",
-                (
-                    _bold(_t("a")),
-                    _t("b"),
-                    _bold(_t("c")),
-                ),
+                (_bold(_t("a*b*c")),),
             ),
             (
-                "empty bold span renders as Bold([])",
+                "doubled marker with nothing to close is literal",
                 "**",
-                (_bold(),),
+                (_t("**"),),
             ),
             (
-                "empty italic span renders as Italic([])",
+                "doubled italic marker with nothing to close is literal",
                 "__",
-                (_italic(),),
+                (_t("__"),),
             ),
             (
                 "empty strikethrough renders as Strikethrough([])",
@@ -214,8 +222,7 @@ class ValidInlineTests(unittest.TestCase):
                 ),
             ),
             (
-                "underscore-in-word — unmatched _ would error, "
-                "so we test fully matched",
+                "underscore in running prose",
                 "say _hi_ to me",
                 (
                     _t("say "),
@@ -255,12 +262,19 @@ class LineNumberPropagationTests(unittest.TestCase):
 
 
 # ---------------------------------------------------------------------------
-# Invalid input — every unmatched-marker variant raises
+# Markers that are prose
 # ---------------------------------------------------------------------------
 
 
-class UnmatchedSpanTests(unittest.TestCase):
-    """Each marker raises :class:`ParseErrorKind.BAD_INLINE_SPAN`."""
+class LiteralMarkerTests(unittest.TestCase):
+    """A marker that does not resolve to a span is ordinary text.
+
+    These are the inputs the old contract was written around — every one
+    of them used to raise. They are kept, inverted, because they are the
+    clearest evidence for the rule that replaced it: AsciiDoc is total,
+    so an unpaired marker is prose and reporting it would assert
+    something about the document the language says is false.
+    """
 
     def test_table(self) -> None:
         cases: tuple[tuple[str, str], ...] = (
@@ -269,30 +283,226 @@ class UnmatchedSpanTests(unittest.TestCase):
             ("bare italic opener", "_unclosed"),
             ("strikethrough opener with no close", "[.line-through]#oops"),
             ("underline opener with no close", "[.underline]#oops"),
-            (
-                "nested unclosed inner",
-                "*outer _inner*",
-            ),
-            (
-                "nested unclosed outer",
-                "*outer _inner_ ",
-            ),
-            (
-                "strikethrough with prefix only",
-                "[.line-through]#",
-            ),
+            ("strikethrough with prefix only", "[.line-through]#"),
+            ("doubled marker with no close", "**unclosed"),
+            ("unterminated monospace", "an `unterminated span"),
         )
         for desc, source in cases:
             with self.subTest(desc):
-                with self.assertRaises(ParseError) as ctx:
-                    parse_inline(source, _LINE)
+                self.assertEqual(parse_inline(source, _LINE), (_t(source),))
+
+    def test_an_unresolvable_inner_marker_leaves_the_outer_span(self) -> None:
+        # ``_inner`` never closes, so it is text *inside* the bold span
+        # the surrounding asterisks do form.
+        self.assertEqual(
+            parse_inline("*outer _inner*", _LINE),
+            (_bold(_t("outer _inner")),),
+        )
+
+    def test_an_unresolvable_outer_marker_leaves_the_inner_span(self) -> None:
+        # The mirror image: the outer ``*`` has no valid closer (the
+        # line ends in a space), the inner italic is untouched.
+        self.assertEqual(
+            parse_inline("*outer _inner_ ", _LINE),
+            (_t("*outer "), _italic(_t("inner")), _t(" ")),
+        )
+
+
+class ConstrainedOpenerTests(unittest.TestCase):
+    """Where a constrained marker may open a span.
+
+    The rule has two halves — not preceded by a word character (nor by
+    ``;`` / ``:``), and not followed by a space — and both are pinned
+    against Asciidoctor 4.0.7 output.
+    """
+
+    def test_marker_after_a_word_character_is_literal(self) -> None:
+        cases = ("a*b*c", "a_b_c", "a`b`c", "snake_case_name")
+        for source in cases:
+            with self.subTest(source):
                 self.assertEqual(
-                    ctx.exception.kind,
-                    ParseErrorKind.BAD_INLINE_SPAN,
+                    parse_inline(source, _LINE), (_t(source),)
                 )
-                self.assertEqual(ctx.exception.line, _LINE)
-                # Column 0 is the documented "whole line" sentinel.
-                self.assertEqual(ctx.exception.column, 0)
+
+    def test_marker_followed_by_a_space_is_literal(self) -> None:
+        self.assertEqual(
+            parse_inline("2 * 3 * 4", _LINE), (_t("2 * 3 * 4"),)
+        )
+
+    def test_semicolon_and_colon_block_an_opener(self) -> None:
+        # The reference guards its constrained openers with ``[^\w;:]``
+        # so emphasis cannot fire after a macro prefix or an entity.
+        for source in ("a;*bold*", "a:*bold*", "a;_it_", "a;`m`"):
+            with self.subTest(source):
+                self.assertEqual(
+                    parse_inline(source, _LINE), (_t(source),)
+                )
+
+    def test_other_punctuation_does_not_block_an_opener(self) -> None:
+        for prefix in (",", ".", ")", "-", "/", "="):
+            with self.subTest(prefix):
+                self.assertEqual(
+                    parse_inline(f"a{prefix}*bold*", _LINE),
+                    (_t(f"a{prefix}"), _bold(_t("bold"))),
+                )
+
+    def test_punctuation_around_a_span_still_formats(self) -> None:
+        for source, before, after in (
+            ("(*bold*)", "(", ")"),
+            ('"*bold*"', '"', '"'),
+            ("-*bold*-", "-", "-"),
+        ):
+            with self.subTest(source):
+                self.assertEqual(
+                    parse_inline(source, _LINE),
+                    (_t(before), _bold(_t("bold")), _t(after)),
+                )
+
+
+class ConstrainedCloserTests(unittest.TestCase):
+    """Where a constrained marker may close a span."""
+
+    def test_closer_followed_by_a_word_character_is_body_text(self) -> None:
+        # No later candidate closes either, so the whole line is prose.
+        self.assertEqual(parse_inline("*bold*x", _LINE), (_t("*bold*x"),))
+
+    def test_scan_continues_past_an_invalid_closer(self) -> None:
+        # The first two ``*`` are followed by word characters; the last
+        # one closes, so the span covers everything between.
+        self.assertEqual(
+            parse_inline("*a*b*c*", _LINE), (_bold(_t("a*b*c")),)
+        )
+
+    def test_closer_preceded_by_a_space_is_body_text(self) -> None:
+        self.assertEqual(parse_inline("*bold *", _LINE), (_t("*bold *"),))
+
+    def test_a_failed_closer_never_opens_a_nested_span(self) -> None:
+        # ``*b*`` looks like a span, but its opening ``*`` is the outer
+        # span's own marker: offering it to the opener dispatch would
+        # nest bold inside bold. The reference produces this same tree.
+        self.assertEqual(
+            parse_inline("*a *b* c*", _LINE),
+            (_bold(_t("a *b")), _t(" c*")),
+        )
+
+    def test_role_span_closer_obeys_the_same_rule(self) -> None:
+        self.assertEqual(
+            parse_inline("[.underline]#x#y", _LINE), (_t("[.underline]#x#y"),)
+        )
+
+
+class UnconstrainedMarkerTests(unittest.TestCase):
+    """The doubled forms open and close anywhere, including mid-word."""
+
+    def test_table(self) -> None:
+        cases: tuple[tuple[str, str, tuple[InlineNode, ...]], ...] = (
+            (
+                "bold inside a word",
+                "a**b**c",
+                (_t("a"), _bold(_t("b")), _t("c")),
+            ),
+            (
+                "italic inside a word",
+                "word__it__word",
+                (_t("word"), _italic(_t("it")), _t("word")),
+            ),
+            (
+                "monospace inside a word",
+                "a``m``b",
+                (_t("a"), _mono("m"), _t("b")),
+            ),
+            (
+                "doubled bold on its own",
+                "**bold**",
+                (_bold(_t("bold")),),
+            ),
+            (
+                "doubled italic on its own",
+                "__it__",
+                (_italic(_t("it")),),
+            ),
+        )
+        for desc, source, expected in cases:
+            with self.subTest(desc):
+                self.assertEqual(parse_inline(source, _LINE), expected)
+
+    def test_semicolon_does_not_block_a_doubled_opener(self) -> None:
+        # Unconstrained markers are exempt from the opener rule
+        # altogether — confirmed against the reference.
+        self.assertEqual(
+            parse_inline("a;**bold**", _LINE),
+            (_t("a;"), _bold(_t("bold"))),
+        )
+
+    def test_body_may_hold_the_single_marker(self) -> None:
+        self.assertEqual(
+            parse_inline("**a*b**", _LINE), (_bold(_t("a*b")),)
+        )
+
+
+class BacktrackingTests(unittest.TestCase):
+    """An opener with no valid closer becomes text, and only itself."""
+
+    def test_valid_spans_on_the_same_line_survive(self) -> None:
+        # The whole point of backtracking over quarantining the line:
+        # one unresolvable marker must not cost the line its formatting.
+        self.assertEqual(
+            parse_inline("_ok_ and *bold", _LINE),
+            (_italic(_t("ok")), _t(" and *bold")),
+        )
+
+    def test_a_failed_inner_span_does_not_fail_the_outer(self) -> None:
+        self.assertEqual(
+            parse_inline("*bold [.underline]#x*", _LINE),
+            (_bold(_t("bold [.underline]#x")),),
+        )
+
+    def test_a_rejected_doubled_marker_leaves_its_twin_available(self) -> None:
+        # ``**`` cannot close, so the first asterisk is text and the
+        # second opens a constrained span — as it does in the reference.
+        self.assertEqual(
+            parse_inline("**a*b*", _LINE), (_t("*"), _bold(_t("a*b")))
+        )
+
+    def test_macro_errors_still_escape_a_span_body(self) -> None:
+        # Backtracking must not swallow a refusal of a construct the
+        # user actually reached for.
+        with self.assertRaises(ParseError) as ctx:
+            parse_inline("*bold link:ftp://x.test[y]*", _LINE)
+        self.assertEqual(
+            ctx.exception.kind, ParseErrorKind.UNSUPPORTED_LINK_SCHEME
+        )
+
+
+class CloserIndexTests(unittest.TestCase):
+    """The closer index skips only attempts that were going to fail."""
+
+    def test_output_matches_an_unguarded_scan(self) -> None:
+        # The guard is a necessary condition on a span closing, so
+        # disabling it must change nothing. Patching the index to a
+        # value that can never skip is the cheapest way to say that.
+        sources = (
+            "*a*b*c*", "**a*b*", "*a *b* c*", "_ok_ and *bold",
+            "a ``m`` b", "an `unterminated span", "[.underline]#x#y",
+        )
+        for source in sources:
+            with self.subTest(source):
+                guarded = parse_inline(source, _LINE)
+                with mock.patch.object(
+                    inline_parser._Scanner,
+                    "_last_valid_closer",
+                    lambda self, close: len(self.text),
+                ):
+                    unguarded = parse_inline(source, _LINE)
+                self.assertEqual(guarded, unguarded)
+
+    def test_a_marker_dense_line_stays_linear(self) -> None:
+        # Without the index every opener rescans to end of line, which
+        # is quadratic: this input took ~10s before the guard existed.
+        source = "*a " * 2000
+        start = time.perf_counter()
+        parse_inline(source, _LINE)
+        self.assertLess(time.perf_counter() - start, 1.0)
 
 
 class MarkerPriorityTests(unittest.TestCase):
@@ -333,10 +543,11 @@ class MonospaceTests(unittest.TestCase):
             ),
         )
 
-    def test_empty_monospace_renders_as_empty(self) -> None:
-        # ``\\`\\``` opens then immediately closes; the body is empty.
-        result = parse_inline("``", _LINE)
-        self.assertEqual(result, (_mono(""),))
+    def test_a_lone_doubled_backtick_is_literal(self) -> None:
+        # Two backticks are now the *unconstrained* opener, so this is
+        # an opener with nothing to close rather than an empty span.
+        # ``a````b`` is how an empty monospace span is written.
+        self.assertEqual(parse_inline("``", _LINE), (_t("``"),))
 
     def test_monospace_body_is_not_re_parsed(self) -> None:
         # Bold and italic markers inside a monospace span are
@@ -350,28 +561,20 @@ class MonospaceTests(unittest.TestCase):
         result = parse_inline("`[.line-through]#x#`", _LINE)
         self.assertEqual(result, (_mono("[.line-through]#x#"),))
 
-    def test_unterminated_monospace_raises_dedicated_kind(self) -> None:
-        # The dedicated kind exists so the editor's gutter can show a
-        # different help message ("missing closing backtick") than the
-        # generic BAD_INLINE_SPAN one.
-        with self.assertRaises(ParseError) as ctx:
-            parse_inline("`unclosed", _LINE)
+    def test_unterminated_monospace_is_literal(self) -> None:
+        # A backtick with no valid closer is prose, exactly as the
+        # reference renders it — there is no "unterminated monospace"
+        # failure any more, so the editor's gutter has nothing to say.
         self.assertEqual(
-            ctx.exception.kind,
-            ParseErrorKind.UNTERMINATED_MONOSPACE,
+            parse_inline("`unclosed", _LINE), (_t("`unclosed"),)
         )
-        self.assertEqual(ctx.exception.line, _LINE)
-        self.assertEqual(ctx.exception.column, 0)
 
-    def test_unterminated_monospace_with_other_markers(self) -> None:
-        # An unclosed backtick AFTER a closed bold span still raises
-        # UNTERMINATED_MONOSPACE — the bold span is fine, the
-        # monospace is not.
-        with self.assertRaises(ParseError) as ctx:
-            parse_inline("*ok* `unclosed", _LINE)
+    def test_unterminated_monospace_leaves_earlier_spans_alone(self) -> None:
+        # The bold span is fine and stays formatted; only the backtick
+        # degrades to text.
         self.assertEqual(
-            ctx.exception.kind,
-            ParseErrorKind.UNTERMINATED_MONOSPACE,
+            parse_inline("*ok* `unclosed", _LINE),
+            (_bold(_t("ok")), _t(" `unclosed")),
         )
 
     def test_monospace_inside_bold(self) -> None:
@@ -500,12 +703,15 @@ class BareUrlTests(unittest.TestCase):
 
     def test_url_after_closing_bold_marker(self) -> None:
         # After ``*ok*`` the previous char is ``*`` (non-alphanumeric),
-        # so the URL is recognised at a boundary.
-        result = parse_inline("*ok*https://x", _LINE)
+        # so the URL is recognised at a boundary. The space matters:
+        # without it the bold closer would be followed by a word
+        # character and the whole run would be prose.
+        result = parse_inline("*ok* https://x", _LINE)
         self.assertEqual(
             result,
             (
                 _bold(_t("ok")),
+                _t(" "),
                 _link("https://x", LinkScheme.HTTPS, _t("https://x")),
             ),
         )
@@ -985,11 +1191,6 @@ class LinkMacroPassthroughTests(unittest.TestCase):
 
 class AttachmentMacroTests(unittest.TestCase):
     """``attachment:FILE[label]`` — the inline save link."""
-
-    # False positive: astroid infers parse_inline() -> _parse_until()'s
-    # empty-list literal as length 0 and flags ``(node,) = parse_inline(...)``.
-    # The unpacking is a deliberate "exactly one node" assertion.
-    # pylint: disable=unbalanced-tuple-unpacking
 
     def test_macro_with_label_parses(self) -> None:
         (node,) = parse_inline("attachment:report.pdf[the report]", 1)

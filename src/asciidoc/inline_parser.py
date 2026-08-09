@@ -5,22 +5,54 @@ Principles & invariants
 * Pure, deterministic, no I/O. Operates on a single string and a line
   number; produces a tuple of :data:`InlineNode` instances or raises
   :class:`ParseError`.
-* Strict: every formatting marker must be paired. An unmatched opener
-  raises :class:`ParseErrorKind.BAD_INLINE_SPAN` — the inline parser
-  never silently treats an unbalanced ``*`` or ``_`` as literal text.
-  Monospace has its own dedicated error variant
-  (:class:`ParseErrorKind.UNTERMINATED_MONOSPACE`) because the editor's
-  gutter renders a different help message for it.
-  This is a core promise of the subset: malformed inline syntax always
-  surfaces an error rather than producing a corrupted render.
-* Step 13 extends the recognised inline set to:
+* **Total over formatting markers.** A ``*``, ``_``, ``#`` or backtick
+  that does not resolve to a span is ordinary text — never an error.
+  AsciiDoc is total: anything it does not recognise as markup is prose,
+  so reporting a "malformed" line would assert a property of the
+  document the language says is false. The parser's remaining errors
+  are all *refusals of a construct the user reached for* — a ``link:``
+  or ``attachment:`` macro, a ``++…++`` passthrough, the nesting cap —
+  never a claim about prose.
+* Each marker has a :class:`enums.MarkerForm`, and that is what decides
+  where it may open and close:
 
-  - ``*bold*``, ``_italic_``,
+  - **Constrained** (``*``, ``_``, backtick, ``[.role]#…#``): the
+    opener must not be preceded by a word character (alphanumeric or
+    underscore) nor by ``;`` or ``:``, and must not be followed by a
+    space. The closer must not be preceded by a space and
+    must not be followed by a word character. Both tests read only the
+    two characters adjacent to the marker.
+  - **Unconstrained** (``**``, ``__``, double-backtick): opens and
+    closes anywhere. This is AsciiDoc's escape hatch for emphasising
+    part of a word, and the reason ``a**b**c`` works while ``a*b*c``
+    is literal.
+
+  A candidate *closer* that fails its test is body text and the scan
+  continues, which is what makes ``*a*b*c*`` one span over ``a*b*c``.
+  It is never re-offered to the opener dispatch, so same-marker
+  self-nesting remains impossible by construction.
+* **An opener with no valid closer backtracks to literal text.**
+  :meth:`_Scanner._parse_until` reports whether it found its terminator
+  rather than raising, and the opener site restores the cursor and emits
+  the marker as text. The guard is per-opener, so a failed inner span
+  cannot take an outer one down with it.
+* **The closer index is an invariant, not an optimisation.** Because
+  both boundary tests are local, the highest position at which a marker
+  *could* close is a property of the line, computable once. An opener at
+  or after that position cannot possibly close, so it is never
+  attempted. This is a necessary condition — it can only skip attempts
+  that were going to fail, and it never changes the output — and it is
+  what keeps backtracking linear instead of quadratic on a
+  marker-dense line. Do not "simplify" it away.
+* The recognised inline set is:
+
+  - ``*bold*``, ``_italic_``, ``**bold**``, ``__italic__``,
     ``[.line-through]#strikethrough#``, ``[.underline]#underline#`` —
     matched-pair spans whose body is recursively re-parsed.
-  - `````monospace````` — a matched-pair span whose body is
-    **literal**; nothing inside is re-parsed. This is what makes it
-    safe to wrap a snippet of source containing ``*`` or ``_``.
+  - `````monospace````` and ```````monospace``````` — matched-pair
+    spans whose body is **literal**; nothing inside is re-parsed. This
+    is what makes it safe to wrap a snippet of source containing ``*``
+    or ``_``.
   - Bare URLs (``https://x``, ``http://x``, ``mailto:x``) — auto-linked
     when the scheme is in :class:`LinkScheme`. The URL is recognised
     only at a *word boundary*: the immediately preceding character in
@@ -58,10 +90,12 @@ Principles & invariants
   macro may appear inside the display text of either.
 * Marker matching is **non-greedy** and **recursive** for the spans
   whose body is re-parsed (``*``, ``_``, ``[.line-through]#…#``,
-  ``[.underline]#…#``, link display text). Same-marker self-nesting
-  for ``*`` and ``_`` is impossible by construction (the inner ``*``
-  always closes the outer ``*``); different-marker nesting is allowed.
-  Monospace does not recurse — its body is consumed verbatim.
+  ``[.underline]#…#``, link display text). Same-marker self-nesting is
+  impossible by construction; different-marker nesting is allowed, and
+  needs a non-word character between the two openers because that is
+  what the constrained opener test demands (``*_x_*`` nests, ``*_*x*_*``
+  does not). Monospace does not recurse — its body is consumed
+  verbatim.
 * Nesting is **bounded** by
   :data:`config.defaults.MAX_INLINE_DEPTH`. Recursion costs one Python
   frame per level, so an unbounded depth would let one pathological
@@ -71,9 +105,9 @@ Principles & invariants
   (:class:`ParseErrorKind.INLINE_NESTING_TOO_DEEP`), as over-deep lists
   are in the block parser. Only *enclosing* spans count; siblings on
   one line do not accumulate.
-* There is no escape mechanism. Users cannot place a literal ``*``,
-  ``_``, ``#``, or backtick inside a same-marker context. This is a
-  documented limitation of the subset, not an oversight. URLs cannot
+* Mid-word emphasis is expressed with the doubled marker, which is
+  AsciiDoc's own mechanism; there is still no backslash escape (see
+  ``plan-inline-escaping.md``). URLs cannot
   contain whitespace, ``[``, end-of-line, or any of the inline marker
   characters (``*``, ``_``, ``#``, backtick); for URLs containing
   those characters, users must encode them in the source URL.
@@ -96,6 +130,7 @@ import re
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass
+from typing import assert_never
 
 from asciidoc.ast import (
     AttachmentLink,
@@ -109,7 +144,7 @@ from asciidoc.ast import (
     Underline,
 )
 from config.defaults import MAX_INLINE_DEPTH
-from enums import LinkScheme, ParseErrorKind
+from enums import LinkScheme, MarkerForm, ParseErrorKind
 from models.parse_error import ParseError
 
 
@@ -123,6 +158,25 @@ _LINE_THROUGH_OPEN: str = "[.line-through]#"
 _UNDERLINE_OPEN: str = "[.underline]#"
 _HASH_CLOSE: str = "#"
 _MONOSPACE_MARKER: str = "`"
+
+# The unconstrained (doubled) forms. AsciiDoc gives every constrained
+# marker a doubled twin that may open and close mid-word; it is the
+# language's own escape hatch, and the only way to write ``a**b**c``
+# now that ``a*b*c`` is literal. There is deliberately no ``##`` twin:
+# folio's ``#`` exists only inside ``[.role]#…#``, and bare
+# ``##highlight##`` stays literal (a documented non-member of the
+# subset).
+_BOLD_UNCONSTRAINED_MARKER: str = "**"
+_ITALIC_UNCONSTRAINED_MARKER: str = "__"
+_MONOSPACE_UNCONSTRAINED_MARKER: str = "``"
+
+# Characters that block a *constrained* opener even though they are not
+# word characters, mirroring the reference implementation's ``[^\w;:]``
+# guard: it keeps emphasis from firing after a macro prefix or an HTML
+# entity (``link:*x*``, ``&amp;*x*``). Confirmed against Asciidoctor
+# 4.0.7: ``a;*bold*`` and ``a:*bold*`` are literal while ``a,*bold*``
+# and ``a.*bold*`` format. The doubled forms are exempt.
+_OPENER_BLOCKING_PUNCTUATION: frozenset[str] = frozenset({";", ":"})
 _LINK_MACRO_PREFIX: str = "link:"
 
 # The inline attachment macro: ``attachment:FILE[label]``. A *single*
@@ -188,6 +242,19 @@ _GENERIC_SCHEME_RE: re.Pattern[str] = re.compile(
 )
 
 
+def _is_word_character(char: str) -> bool:
+    """Is ``char`` a word character for the constrained-marker rules?
+
+    Word-shaped means alphanumeric **or** underscore, matching the
+    reference implementation's regex classes. This is deliberately a
+    *different* predicate from :meth:`_Scanner._at_word_boundary`, which
+    governs URL and macro recognition and counts an underscore as a
+    boundary; the two rules come from different parts of the language
+    and are not being unified here.
+    """
+    return char.isalnum() or char == "_"
+
+
 # Factory aliasing — kept named so the dispatch table reads cleanly. Each
 # factory takes the parsed children and the source line and returns the
 # matching inline node.
@@ -219,21 +286,83 @@ class _SpanOpener:
     ``link:`` macros do not recursively re-parse their body so they
     are handled by dedicated branches in :class:`_Scanner` rather
     than by this table.
+
+    ``form`` drives both boundary tests, so adding a row is a matter of
+    naming its form rather than of writing new position arithmetic.
     """
 
     open_marker: str
     close_marker: str
     factory: _SpanFactory
+    form: MarkerForm
+
+
+@dataclass(frozen=True)
+class _CloseMarker:
+    """The terminator a recursive parse is looking for, and its form.
+
+    Bundled into one value because the two are never useful apart: the
+    marker says *what* ends the parse and the form says *where* it is
+    allowed to. ``None`` in place of a :class:`_CloseMarker` means "parse
+    to end of input", which only the top level does.
+    """
+
+    marker: str
+    form: MarkerForm
+
+
+@dataclass(frozen=True)
+class _ScanResult:
+    """What :meth:`_Scanner._parse_until` produced, and whether it closed.
+
+    ``closed`` is :data:`False` only when a terminator was supplied and
+    the input ended before it appeared. Reporting that rather than
+    raising is what lets a span opener backtrack to literal text while a
+    bracket terminator turns the same condition into the macro error its
+    caller owns — one scan, two policies, no exception in between.
+    """
+
+    nodes: tuple[InlineNode, ...]
+    closed: bool
 
 
 # Order matters: longer markers must be tried before shorter ones that
 # share a prefix. ``[.line-through]#`` and ``[.underline]#`` both start
-# with ``[`` so single-character markers come last.
+# with ``[``, and the doubled forms must be tried before their single
+# twins or ``**bold**`` would open a constrained span on the first
+# asterisk and close it immediately on the second.
 _OPEN_SPANS: tuple[_SpanOpener, ...] = (
-    _SpanOpener(_LINE_THROUGH_OPEN, _HASH_CLOSE, _make_strikethrough),
-    _SpanOpener(_UNDERLINE_OPEN, _HASH_CLOSE, _make_underline),
-    _SpanOpener(_BOLD_MARKER, _BOLD_MARKER, _make_bold),
-    _SpanOpener(_ITALIC_MARKER, _ITALIC_MARKER, _make_italic),
+    _SpanOpener(
+        _LINE_THROUGH_OPEN, _HASH_CLOSE, _make_strikethrough,
+        MarkerForm.CONSTRAINED,
+    ),
+    _SpanOpener(
+        _UNDERLINE_OPEN, _HASH_CLOSE, _make_underline,
+        MarkerForm.CONSTRAINED,
+    ),
+    _SpanOpener(
+        _BOLD_UNCONSTRAINED_MARKER, _BOLD_UNCONSTRAINED_MARKER, _make_bold,
+        MarkerForm.UNCONSTRAINED,
+    ),
+    _SpanOpener(
+        _ITALIC_UNCONSTRAINED_MARKER, _ITALIC_UNCONSTRAINED_MARKER,
+        _make_italic, MarkerForm.UNCONSTRAINED,
+    ),
+    _SpanOpener(
+        _BOLD_MARKER, _BOLD_MARKER, _make_bold, MarkerForm.CONSTRAINED,
+    ),
+    _SpanOpener(
+        _ITALIC_MARKER, _ITALIC_MARKER, _make_italic, MarkerForm.CONSTRAINED,
+    ),
+)
+
+
+# The one delimited terminator in the grammar: the ``]`` that ends a
+# display text or an attachment label. It is a bracket, not a formatting
+# marker, so it closes wherever it appears — which is exactly what
+# :data:`MarkerForm.DELIMITED` says.
+_BRACKET_CLOSE: _CloseMarker = _CloseMarker(
+    marker=_DISPLAY_TEXT_CLOSE, form=MarkerForm.DELIMITED,
 )
 
 
@@ -253,13 +382,14 @@ def parse_inline(text: str, line: int) -> tuple[InlineNode, ...]:
     ------
     ParseError
         With one of the inline-related :class:`ParseErrorKind` values:
-        :data:`BAD_INLINE_SPAN`, :data:`UNTERMINATED_MONOSPACE`,
-        :data:`UNSUPPORTED_LINK_SCHEME`, :data:`BAD_LINK_MACRO`, or
-        :data:`INLINE_NESTING_TOO_DEEP`.
+        :data:`UNSUPPORTED_LINK_SCHEME`, :data:`BAD_LINK_MACRO`,
+        :data:`BAD_ATTACHMENT_MACRO`, :data:`UNTERMINATED_PASSTHROUGH`,
+        or :data:`INLINE_NESTING_TOO_DEEP` — all of them refusals of a
+        construct the source reached for. An unpaired formatting marker
+        is **not** among them: it is returned as :class:`Text`.
     """
     scanner = _Scanner(text, line)
-    nodes = scanner.parse_top_level()
-    return tuple(nodes)
+    return scanner.parse_top_level()
 
 
 # ---------------------------------------------------------------------------
@@ -297,12 +427,14 @@ class _Scanner:
     line: int
     pos: int
     depth: int
+    closer_index: dict[str, int]
 
     def __init__(self, text: str, line: int) -> None:
         self.text = text
         self.line = line
         self.pos = 0
         self.depth = 0
+        self.closer_index = {}
 
     # ------------------------------------------------------------------
     # Nesting guard
@@ -338,9 +470,9 @@ class _Scanner:
     # Top-level entry
     # ------------------------------------------------------------------
 
-    def parse_top_level(self) -> list[InlineNode]:
+    def parse_top_level(self) -> tuple[InlineNode, ...]:
         """Parse to end of input with no closing marker."""
-        return self._parse_until(close_marker=None)
+        return self._parse_until(None, forbid_link=False).nodes
 
     # ------------------------------------------------------------------
     # Core recursive descent
@@ -348,24 +480,26 @@ class _Scanner:
 
     def _parse_until(
         self,
-        close_marker: str | None,
+        close: _CloseMarker | None,
         *,
-        forbid_link: bool = False,
-        unmatched_kind: ParseErrorKind = ParseErrorKind.BAD_INLINE_SPAN,
-        unmatched_message: str | None = None,
-    ) -> list[InlineNode]:
-        """Parse inline content until ``close_marker`` (or end of input).
+        forbid_link: bool,
+    ) -> _ScanResult:
+        """Parse inline content until ``close`` (or end of input).
 
-        On return ``self.pos`` points one past the close marker (when
-        one was supplied) or at the end of the input (when
-        ``close_marker`` is ``None``).
+        On a closed return ``self.pos`` points one past the terminator;
+        on an unclosed one it points at the end of the input and the
+        caller decides what that means — a span backtracks to literal
+        text, a bracket terminator raises its macro error. ``close`` is
+        :data:`None` only at the top level, where end of input *is* the
+        terminator and the result is always closed.
 
-        Raises :class:`ParseError` with ``unmatched_kind`` (default
-        :data:`BAD_INLINE_SPAN`) if the close marker is supplied but
-        the input ends before it is found. ``unmatched_kind`` is what
-        lets link display-text parsing report
-        :data:`BAD_LINK_MACRO` instead of the generic span-error
-        kind on a missing ``]``.
+        The terminator is tested before anything else, because it is the
+        only way out of a recursion level and must not be shadowed by a
+        more eager match. A constrained terminator that fails its
+        boundary test is body text: the scan absorbs it and keeps
+        looking, and deliberately does **not** offer it to the opener
+        dispatch, which would let a marker open a nested span inside its
+        own.
         """
         nodes: list[InlineNode] = []
         text_buffer: list[str] = []
@@ -378,27 +512,29 @@ class _Scanner:
                 text_buffer.clear()
 
         while self.pos < len(self.text):
-            # Close marker for the enclosing span takes priority over
-            # everything else: it is the only way out of a recursion
-            # level and must not be shadowed by a more eager match.
-            if close_marker is not None and self._matches_at_pos(close_marker):
-                flush()
-                self.pos += len(close_marker)
-                return nodes
+            if close is not None and self._matches_at_pos(close.marker):
+                if self._closes_at(self.pos, close):
+                    flush()
+                    self.pos += len(close.marker)
+                    return _ScanResult(nodes=tuple(nodes), closed=True)
+                text_buffer.append(close.marker)
+                self.pos += len(close.marker)
+                continue
 
             # Monospace: matched-pair span with verbatim body. Consumed
-            # before the recursive-span dispatch table because ``\```
+            # before the recursive-span dispatch table because a backtick
             # would otherwise fall through to plain text.
-            if self._matches_at_pos(_MONOSPACE_MARKER):
+            monospace = self._try_consume_monospace()
+            if monospace is not None:
                 flush()
-                nodes.append(self._consume_monospace())
+                nodes.append(monospace)
                 continue
 
             # Bare URL (recognised at a word boundary) — covers both
             # the ``https://x`` shape and the ``https://x[t]`` shape.
             url_link = self._try_consume_bare_url(
                 forbid_link=forbid_link,
-                active_close=close_marker,
+                active_close=close,
             )
             if url_link is not None:
                 flush()
@@ -410,7 +546,7 @@ class _Scanner:
             # (validated downstream).
             macro_link = self._try_consume_link_macro(
                 forbid_link=forbid_link,
-                active_close=close_marker,
+                active_close=close,
             )
             if macro_link is not None:
                 flush()
@@ -430,66 +566,93 @@ class _Scanner:
                 nodes.append(attachment_link)
                 continue
 
-            opener = self._find_opener_at_pos()
-            if opener is not None:
+            span = self._try_consume_span()
+            if span is not None:
                 flush()
-                self.pos += len(opener.open_marker)
-                with self._nested_span():
-                    children = self._parse_until(
-                        close_marker=opener.close_marker
-                    )
-                nodes.append(opener.factory(tuple(children), self.line))
+                nodes.append(span)
                 continue
 
             text_buffer.append(self.text[self.pos])
             self.pos += 1
 
-        # End of input.
-        if close_marker is not None:
-            message = unmatched_message or (
-                f"unterminated inline span: expected closing {close_marker!r}"
-            )
-            raise ParseError(
-                line=self.line,
-                column=0,
-                message=message,
-                kind=unmatched_kind,
-            )
         flush()
-        return nodes
+        return _ScanResult(nodes=tuple(nodes), closed=close is None)
+
+    def _try_consume_span(self) -> InlineNode | None:
+        """Try to consume a dispatch-table span at the cursor.
+
+        Returns :data:`None` when no opener matches, when the opener
+        fails its boundary test, or when the span was attempted and found
+        no valid closer before end of line. In every one of those cases
+        the cursor is left **on the opener**, which the caller then
+        consumes one character at a time as ordinary text. Progress is
+        therefore guaranteed even though a rejected marker is re-examined
+        one position later — and that re-examination is wanted, since
+        ``**a*b*`` must leave a literal asterisk and then open a
+        constrained span on the second one.
+
+        The attempt is guarded by :meth:`_last_valid_closer`, so a span
+        that provably cannot close is never entered — see the closer-index
+        invariant in the module docstring.
+        """
+        opener = self._find_opener_at_pos()
+        if opener is None:
+            return None
+        close = _CloseMarker(marker=opener.close_marker, form=opener.form)
+        if self._last_valid_closer(close) <= self.pos:
+            return None
+        opener_start = self.pos
+        self.pos += len(opener.open_marker)
+        with self._nested_span():
+            result = self._parse_until(close, forbid_link=False)
+        if not result.closed:
+            self.pos = opener_start
+            return None
+        return opener.factory(result.nodes, self.line)
 
     # ------------------------------------------------------------------
     # Monospace
     # ------------------------------------------------------------------
 
-    def _consume_monospace(self) -> Monospace:
-        """Consume a `````…````` span starting at the current position.
+    def _try_consume_monospace(self) -> Monospace | None:
+        """Try to consume a monospace span at the cursor.
 
-        On entry ``self.pos`` points at the opening backtick. On
-        return it points one past the closing backtick. The body is
-        consumed verbatim — no nested markers are interpreted —
-        which is the whole point of monospace inside running prose.
+        Both forms are recognised here, doubled first so that
+        ```` ``x`` ```` is one unconstrained span rather than two empty
+        constrained ones. The body is consumed verbatim — no nested
+        markers are interpreted — which is the whole point of monospace
+        inside running prose.
 
-        Raises :class:`ParseErrorKind.UNTERMINATED_MONOSPACE` if the
-        line ends before a closing backtick is found.
+        Returns :data:`None`, leaving the cursor on the opener, when the
+        backtick is not at a position where its form may open or when no
+        valid closer exists on the line. An unterminated backtick is
+        prose, not an error: ``an `unterminated span`` renders exactly as
+        typed, as it does in the reference implementation.
         """
-        # Skip the opening backtick.
-        self.pos += len(_MONOSPACE_MARKER)
-        body_start = self.pos
-        # Scan for the closing backtick on the same line.
-        while self.pos < len(self.text):
-            if self._matches_at_pos(_MONOSPACE_MARKER):
-                content = self.text[body_start:self.pos]
-                # Skip the closing backtick.
-                self.pos += len(_MONOSPACE_MARKER)
-                return Monospace(content=content, source_line=self.line)
-            self.pos += 1
-        raise ParseError(
-            line=self.line,
-            column=0,
-            message="unterminated monospace span: expected closing '`'",
-            kind=ParseErrorKind.UNTERMINATED_MONOSPACE,
-        )
+        for marker, form in (
+            (_MONOSPACE_UNCONSTRAINED_MARKER, MarkerForm.UNCONSTRAINED),
+            (_MONOSPACE_MARKER, MarkerForm.CONSTRAINED),
+        ):
+            if not self._matches_at_pos(marker):
+                continue
+            if not self._opens_at(self.pos, marker, form):
+                return None
+            close = _CloseMarker(marker=marker, form=form)
+            # The index first (O(1) after the first call on this line),
+            # so a line full of unclosable backticks costs one scan in
+            # total rather than one per backtick.
+            if self._last_valid_closer(close) <= self.pos:
+                return None
+            body_start = self.pos + len(marker)
+            body_end = self._next_valid_closer(close, body_start)
+            if body_end < 0:
+                return None
+            self.pos = body_end + len(marker)
+            return Monospace(
+                content=self.text[body_start:body_end],
+                source_line=self.line,
+            )
+        return None
 
     # ------------------------------------------------------------------
     # Bare URL  (https://x, http://x, mailto:x  — with optional [text])
@@ -499,7 +662,7 @@ class _Scanner:
         self,
         *,
         forbid_link: bool,
-        active_close: str | None,
+        active_close: _CloseMarker | None,
     ) -> Link | None:
         """Try to consume a bare-URL link starting at ``self.pos``.
 
@@ -539,7 +702,7 @@ class _Scanner:
         self,
         *,
         scheme: LinkScheme,
-        active_close: str | None,
+        active_close: _CloseMarker | None,
     ) -> Link:
         """Consume the URL chars and an optional ``[display text]`` suffix.
 
@@ -557,7 +720,7 @@ class _Scanner:
             char = self.text[self.pos]
             if char in _URL_TERMINATORS:
                 break
-            if active_close is not None and char == active_close:
+            if active_close is not None and char == active_close.marker:
                 break
             self.pos += 1
         url = self.text[url_start:self.pos]
@@ -599,7 +762,7 @@ class _Scanner:
         self,
         *,
         forbid_link: bool,
-        active_close: str | None,
+        active_close: _CloseMarker | None,
     ) -> Link | None:
         """Try to consume a ``link:URL[text]`` macro at ``self.pos``.
 
@@ -629,7 +792,9 @@ class _Scanner:
             )
         return self._consume_link_macro(active_close=active_close)
 
-    def _consume_link_macro(self, *, active_close: str | None) -> Link:
+    def _consume_link_macro(
+        self, *, active_close: _CloseMarker | None
+    ) -> Link:
         """Consume a committed ``link:URL[text]`` macro.
 
         On entry ``self.pos`` points at the ``l`` of ``link:``. On
@@ -889,16 +1054,15 @@ class _Scanner:
         # Move onto the opening bracket and parse the label body.
         self.pos = open_index + len(_DISPLAY_TEXT_OPEN)
         with self._nested_span():
-            label = tuple(
-                self._parse_until(
-                    close_marker=_DISPLAY_TEXT_CLOSE,
-                    forbid_link=True,
-                    unmatched_kind=ParseErrorKind.BAD_ATTACHMENT_MACRO,
-                    unmatched_message=(
-                        "attachment: macro is missing the closing ']'"
-                    ),
-                )
+            result = self._parse_until(_BRACKET_CLOSE, forbid_link=True)
+        if not result.closed:
+            raise ParseError(
+                line=self.line,
+                column=0,
+                message="attachment: macro is missing the closing ']'",
+                kind=ParseErrorKind.BAD_ATTACHMENT_MACRO,
             )
+        label = result.nodes
         if not label:
             label = (Text(content=target, source_line=self.line),)
         return AttachmentLink(
@@ -996,12 +1160,15 @@ class _Scanner:
         # Skip the opening bracket.
         self.pos += len(_DISPLAY_TEXT_OPEN)
         with self._nested_span():
-            children = self._parse_until(
-                close_marker=_DISPLAY_TEXT_CLOSE,
-                forbid_link=True,
-                unmatched_kind=ParseErrorKind.BAD_LINK_MACRO,
-                unmatched_message="link macro is missing the closing ']'",
+            result = self._parse_until(_BRACKET_CLOSE, forbid_link=True)
+        if not result.closed:
+            raise ParseError(
+                line=self.line,
+                column=0,
+                message="link macro is missing the closing ']'",
+                kind=ParseErrorKind.BAD_LINK_MACRO,
             )
+        children = result.nodes
         if required and not children:
             raise ParseError(
                 line=self.line,
@@ -1009,7 +1176,7 @@ class _Scanner:
                 message="link: macro has empty display text",
                 kind=ParseErrorKind.BAD_LINK_MACRO,
             )
-        return tuple(children)
+        return children
 
     # ------------------------------------------------------------------
     # Boundary detection and span lookup
@@ -1031,9 +1198,117 @@ class _Scanner:
         """``True`` iff ``self.text`` has ``marker`` at the cursor."""
         return self.text.startswith(marker, self.pos)
 
+    def _opens_at(self, index: int, marker: str, form: MarkerForm) -> bool:
+        """May a ``marker`` of ``form`` at ``index`` open a span?
+
+        Constrained: not preceded by a word character, ``;`` or ``:``,
+        and not followed by a space (nor by end of line — ``*`` at the
+        very end opens nothing). Unconstrained and delimited markers open
+        wherever they appear.
+        """
+        match form:
+            case MarkerForm.UNCONSTRAINED | MarkerForm.DELIMITED:
+                return True
+            case MarkerForm.CONSTRAINED:
+                return self._constrained_opens_at(index, marker)
+            case _ as unreachable:
+                assert_never(unreachable)
+
+    def _constrained_opens_at(self, index: int, marker: str) -> bool:
+        if index > 0:
+            preceding = self.text[index - 1]
+            if (
+                _is_word_character(preceding)
+                or preceding in _OPENER_BLOCKING_PUNCTUATION
+            ):
+                return False
+        following = index + len(marker)
+        if following >= len(self.text):
+            return False
+        return not self.text[following].isspace()
+
+    def _closes_at(self, index: int, close: _CloseMarker) -> bool:
+        """May the terminator at ``index`` close its span?
+
+        Constrained: not preceded by a space and not followed by a word
+        character. That second clause is what keeps ``*bold*x`` literal
+        and what makes ``*a*b*c*`` a single span — the earlier candidates
+        are followed by a word character and are therefore body text.
+        """
+        match close.form:
+            case MarkerForm.UNCONSTRAINED | MarkerForm.DELIMITED:
+                return True
+            case MarkerForm.CONSTRAINED:
+                return self._constrained_closes_at(index, close.marker)
+            case _ as unreachable:
+                assert_never(unreachable)
+
+    def _constrained_closes_at(self, index: int, marker: str) -> bool:
+        if index == 0 or self.text[index - 1].isspace():
+            return False
+        following = index + len(marker)
+        if following >= len(self.text):
+            return True
+        return not _is_word_character(self.text[following])
+
+    def _last_valid_closer(self, close: _CloseMarker) -> int:
+        """Highest index at which ``close`` could legally close a span.
+
+        Returns ``-1`` when the marker never closes anywhere on the line.
+        Both boundary tests read only the characters adjacent to the
+        marker, so this is a property of the *line* and is computed once
+        per marker and cached — see the closer-index invariant in the
+        module docstring. It is a necessary condition on a span closing,
+        never a sufficient one: a closer it reports may still be consumed
+        by a nested span, in which case the ordinary scan fails and the
+        opener backtracks as usual.
+        """
+        cached = self.closer_index.get(close.marker)
+        if cached is not None:
+            return cached
+        found = -1
+        index = 0
+        while index < len(self.text):
+            if (
+                self.text.startswith(close.marker, index)
+                and self._closes_at(index, close)
+            ):
+                found = index
+            index += 1
+        self.closer_index[close.marker] = found
+        return found
+
+    def _next_valid_closer(self, close: _CloseMarker, start: int) -> int:
+        """Lowest index at or after ``start`` where ``close`` may close.
+
+        Returns ``-1`` when there is none. Used by the monospace scan,
+        whose body is verbatim and therefore needs the *first* legal
+        closer rather than a recursive parse.
+        """
+        index = start
+        while index < len(self.text):
+            if (
+                self.text.startswith(close.marker, index)
+                and self._closes_at(index, close)
+            ):
+                return index
+            index += 1
+        return -1
+
     def _find_opener_at_pos(self) -> _SpanOpener | None:
-        """Return the (longest) opener that matches at the cursor, if any."""
+        """Return the (longest) opener that may open at the cursor.
+
+        A row whose marker matches but whose boundary test fails is not a
+        span opener at all, so the cursor's character is prose. The scan
+        stops at the first *matching* row either way: a constrained ``*``
+        that cannot open must not fall through to some other row that
+        happens to share its text.
+        """
         for opener in _OPEN_SPANS:
             if self._matches_at_pos(opener.open_marker):
-                return opener
+                if self._opens_at(
+                    self.pos, opener.open_marker, opener.form
+                ):
+                    return opener
+                return None
         return None

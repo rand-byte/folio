@@ -251,12 +251,24 @@ class ParagraphTests(unittest.TestCase):
         )
 
     def test_inline_error_uses_per_line_line_number(self) -> None:
-        # The unmatched ``*`` is on line 2; the parser must report
-        # line 2, not line 1.
+        # The refused ``link:`` scheme is on line 2; the parser must
+        # report line 2, not line 1. (An unpaired ``*`` would not do
+        # here: a marker that resolves to nothing is prose, so it never
+        # reaches this path.)
         with self.assertRaises(ParseError) as ctx:
-            parse("first\n*unclosed\n")
-        self.assertEqual(ctx.exception.kind, ParseErrorKind.BAD_INLINE_SPAN)
+            parse("first\nsecond link:ftp://x.test[y]\n")
+        self.assertEqual(
+            ctx.exception.kind, ParseErrorKind.UNSUPPORTED_LINK_SCHEME
+        )
         self.assertEqual(ctx.exception.line, 2)
+
+    def test_unpaired_marker_is_prose_not_an_error(self) -> None:
+        paragraph = parse("first\n*unclosed\n").blocks[0]
+        assert isinstance(paragraph, Paragraph)
+        self.assertEqual(
+            [type(node).__name__ for node in paragraph.inlines],
+            ["Text", "SoftBreak", "Text"],
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -439,10 +451,20 @@ class ListTests(unittest.TestCase):
         kinds = [type(node).__name__ for node in item.inlines]
         self.assertEqual(kinds, ["Text", "Bold"])
 
-    def test_unmatched_inline_in_list_item_raises(self) -> None:
+    def test_unmatched_inline_in_list_item_is_literal(self) -> None:
+        # The list renders; the marker is text. Before the constrained
+        # rules this cost the reader the whole list.
+        document = parse("* *unclosed\n")
+        ul = document.blocks[0]
+        assert isinstance(ul, UnorderedList)
+        self.assertEqual(_item_text(ul.items[0]), "*unclosed")
+
+    def test_macro_error_in_list_item_raises(self) -> None:
         with self.assertRaises(ParseError) as ctx:
-            parse("* *unclosed\n")
-        self.assertEqual(ctx.exception.kind, ParseErrorKind.BAD_INLINE_SPAN)
+            parse("* link:ftp://x.test[y]\n")
+        self.assertEqual(
+            ctx.exception.kind, ParseErrorKind.UNSUPPORTED_LINK_SCHEME
+        )
         self.assertEqual(ctx.exception.line, 1)
 
 
@@ -1172,13 +1194,22 @@ class TableErrorTests(unittest.TestCase):
         self.assertEqual(ctx.exception.line, 1)
 
     def test_inline_error_inside_cell_propagates(self) -> None:
-        # Unterminated bold in a cell should raise BAD_INLINE_SPAN
-        # at the cell's line — same way paragraphs propagate inline
-        # errors.
+        # A refused macro in a cell raises at the cell's line — same way
+        # paragraphs propagate inline errors. A cell has no line-scope
+        # recovery seam, so this failure costs the whole table, which is
+        # exactly why an unpaired marker must not be one (see below).
         with self.assertRaises(ParseError) as ctx:
-            parse("|===\n|*unclosed\n|===\n")
-        self.assertEqual(ctx.exception.kind, ParseErrorKind.BAD_INLINE_SPAN)
+            parse("|===\n|link:ftp://x.test[y]\n|===\n")
+        self.assertEqual(
+            ctx.exception.kind, ParseErrorKind.UNSUPPORTED_LINK_SCHEME
+        )
         self.assertEqual(ctx.exception.line, 2)
+
+    def test_unpaired_marker_in_a_cell_keeps_the_table(self) -> None:
+        document = parse("|===\n|*wide*x |b\n|===\n")
+        table = document.blocks[0]
+        assert isinstance(table, Table)
+        self.assertEqual(len(table.rows), 1)
 
 
 # ---------------------------------------------------------------------------
@@ -1363,10 +1394,17 @@ class BlockAdmonitionTests(unittest.TestCase):
                 )
 
     def test_inline_error_inside_admonition_body_propagates(self) -> None:
-        # An unterminated ``*`` inside the body raises BAD_INLINE_SPAN.
+        # A refused ``link:`` scheme inside the body still fails the
+        # admonition; an unpaired marker no longer can.
         with self.assertRaises(ParseError) as ctx:
-            parse("[NOTE]\n====\n*unclosed\n====\n")
-        self.assertEqual(ctx.exception.kind, ParseErrorKind.BAD_INLINE_SPAN)
+            parse("[NOTE]\n====\nlink:ftp://x.test[y]\n====\n")
+        self.assertEqual(
+            ctx.exception.kind, ParseErrorKind.UNSUPPORTED_LINK_SCHEME
+        )
+
+    def test_unpaired_marker_in_the_body_keeps_the_admonition(self) -> None:
+        document = parse("[NOTE]\n====\n*unclosed\n====\n")
+        self.assertIsInstance(document.blocks[0], Admonition)
 
     def test_stray_admonition_fence_raises(self) -> None:
         # A bare ``====`` with no preceding directive — there's no kind
@@ -1559,8 +1597,14 @@ class BlockquoteErrorTests(unittest.TestCase):
 
     def test_inline_error_inside_blockquote_body_propagates(self) -> None:
         with self.assertRaises(ParseError) as ctx:
-            parse("____\n*unclosed\n____\n")
-        self.assertEqual(ctx.exception.kind, ParseErrorKind.BAD_INLINE_SPAN)
+            parse("____\nlink:ftp://x.test[y]\n____\n")
+        self.assertEqual(
+            ctx.exception.kind, ParseErrorKind.UNSUPPORTED_LINK_SCHEME
+        )
+
+    def test_unpaired_marker_in_the_body_keeps_the_blockquote(self) -> None:
+        document = parse("____\n*unclosed\n____\n")
+        self.assertIsInstance(document.blocks[0], Blockquote)
 
 
 # ---------------------------------------------------------------------------
@@ -1693,7 +1737,7 @@ class DocumentCompositionTests(unittest.TestCase):
     ) -> None:
         # An inline error raised from inside a list item must surface
         # with the *list item's* line number, not the document or list
-        # start. BAD_INLINE_SPAN in a list item is covered by ListTests;
+        # start. Inline failures in a list item are covered by ListTests;
         # this adds the link-scheme variant on a non-first line.
         with self.assertRaises(ParseError) as ctx:
             parse("intro.\n\n* alpha\n* beta link:recipe://x[here]\n")
@@ -1852,10 +1896,10 @@ class MultiLineSingleAdmonitionTests(unittest.TestCase):
         self.assertIsInstance(doc.blocks[1], UnorderedList)
 
     def test_continuation_line_inline_error_points_at_correct_line(self) -> None:
-        # A bad inline span on a continuation line must be reported
+        # An inline failure on a continuation line must be reported
         # against that line, not the admonition's opener.
         with self.assertRaises(ParseError) as ctx:
-            parse("NOTE: first\nsecond *unclosed\n")
+            parse("NOTE: first\nsecond link:ftp://x.test[y]\n")
         self.assertEqual(ctx.exception.line, 2)
 
     def test_inline_markup_on_continuation_line(self) -> None:
@@ -2117,13 +2161,16 @@ class InlineNestingRegressionTests(unittest.TestCase):
 
     The depth here is far past the cap *and* past the recursion limit
     that used to be hit, so a regression re-raises ``RecursionError``
-    rather than quietly passing.
+    rather than quietly passing. The markers are the *unconstrained*
+    forms because the constrained ones cannot stack without a separating
+    non-word character — see ``_nested_spans`` in
+    ``test_inline_parser.py``.
     """
 
     _PAIRS: int = 600
 
     def test_deeply_nested_inline_raises_a_parse_error(self) -> None:
-        source = "*_" * self._PAIRS + "x" + "_*" * self._PAIRS
+        source = "**__" * self._PAIRS + "x" + "__**" * self._PAIRS
         with self.assertRaises(ParseError) as ctx:
             parse(source)
         self.assertEqual(
@@ -2134,7 +2181,7 @@ class InlineNestingRegressionTests(unittest.TestCase):
 
     def test_deeply_nested_inline_inside_a_section_body(self) -> None:
         """The cap applies wherever inline content is parsed."""
-        body = "*_" * self._PAIRS + "x" + "_*" * self._PAIRS
+        body = "**__" * self._PAIRS + "x" + "__**" * self._PAIRS
         with self.assertRaises(ParseError) as ctx:
             parse(f"= Title\n\n== Section\n\n{body}\n")
         self.assertEqual(
@@ -2299,20 +2346,23 @@ class RecoveringParseAgreementTests(unittest.TestCase):
     def test_should_flag_nothing_in_valid_source(self) -> None:
         self.assertEqual(_unread_blocks(parse_recovering(_WELL_FORMED_SAMPLE)), [])
 
-    def test_should_still_raise_in_strict_mode_on_an_unpaired_marker(
+    def test_should_still_raise_in_strict_mode_on_a_refused_macro(
         self,
     ) -> None:
         with self.assertRaises(ParseError):
-            parse("a snake_case word\n")
+            parse("a link:ftp://x.test[y] word\n")
 
 
 class RecoveringParseLineTests(unittest.TestCase):
     """A paragraph line that will not parse costs that line only."""
 
     def test_should_flag_only_the_offending_line_of_a_paragraph(self) -> None:
-        # Given a three-line paragraph whose middle line has an
-        # unpaired marker
-        source = "first line\nsecond snake_case line\nthird line\n"
+        # Given a three-line paragraph whose middle line reaches for a
+        # macro folio refuses (an unpaired marker would not do: that is
+        # prose, and prose never reaches this seam)
+        source = (
+            "first line\nsecond link:ftp://x.test[y] line\nthird line\n"
+        )
 
         # When parsed in recovering mode
         document = parse_recovering(source)
@@ -2320,31 +2370,38 @@ class RecoveringParseLineTests(unittest.TestCase):
         # Then only that line is quarantined
         unread = _unread_blocks(document)
         self.assertEqual(len(unread), 1)
-        self.assertEqual(unread[0].lines, ("second snake_case line",))
+        self.assertEqual(
+            unread[0].lines, ("second link:ftp://x.test[y] line",)
+        )
 
     def test_should_keep_the_lines_around_a_flagged_line_as_paragraphs(
         self,
     ) -> None:
         document = parse_recovering(
-            "first line\nsecond snake_case line\nthird line\n"
+            "first line\nsecond link:ftp://x.test[y] line\nthird line\n"
         )
         kinds = [type(block).__name__ for block in document.blocks]
         self.assertEqual(kinds, ["Paragraph", "UnreadBlock", "Paragraph"])
 
     def test_should_scope_a_paragraph_line_failure_to_line(self) -> None:
-        document = parse_recovering("a snake_case word\n")
+        document = parse_recovering("a link:ftp://x.test[y] word\n")
         self.assertEqual(_unread_blocks(document)[0].scope, UnreadScope.LINE)
 
     def test_should_report_the_offending_line_number(self) -> None:
-        document = parse_recovering("ok\n\nfine\nsnake_case\n")
+        document = parse_recovering(
+            "ok\n\nfine\nlink:ftp://x.test[y]\n"
+        )
         self.assertEqual(_unread_blocks(document)[0].source_line, 4)
 
     def test_should_preserve_the_offending_source_text_verbatim(self) -> None:
         # Leading whitespace survives: the node slices the raw source
         # lines, not the lexer's right-stripped token text.
-        document = parse_recovering("ok line\n   indented snake_case\n")
+        document = parse_recovering(
+            "ok line\n   indented link:ftp://x.test[y]\n"
+        )
         self.assertEqual(
-            _unread_blocks(document)[0].lines, ("   indented snake_case",),
+            _unread_blocks(document)[0].lines,
+            ("   indented link:ftp://x.test[y]",),
         )
 
 
@@ -2402,7 +2459,9 @@ class RecoveringParseBlockTests(unittest.TestCase):
     def test_should_flag_the_whole_table_when_a_cell_cannot_be_read(
         self,
     ) -> None:
-        document = parse_recovering("|===\n| a snake_case | b\n|===\n")
+        document = parse_recovering(
+            "|===\n| a link:ftp://x.test[y] | b\n|===\n"
+        )
         unread = _unread_blocks(document)
         self.assertEqual(len(unread), 1)
         self.assertEqual(unread[0].scope, UnreadScope.BLOCK)
@@ -2431,7 +2490,10 @@ class RecoveringParseTotalityTests(unittest.TestCase):
     def test_should_terminate_when_no_line_can_be_read(self) -> None:
         # Every recovery step consumes at least one token, so a source
         # that is entirely unreadable finishes rather than spinning.
-        document = parse_recovering("a_1\nb_2\nc_3\n")
+        document = parse_recovering(
+            "link:ftp://a.test[1]\n\nlink:ftp://b.test[2]\n"
+            "\nlink:ftp://c.test[3]\n"
+        )
         self.assertEqual(len(_unread_blocks(document)), 3)
 
     def test_should_return_a_document_for_empty_source(self) -> None:
@@ -2553,7 +2615,7 @@ class RecoveringParseTitleLineTests(unittest.TestCase):
 
     def test_should_still_raise_on_a_bad_title_in_strict_mode(self) -> None:
         with self.assertRaises(ParseError):
-            parse("= My *title\n\nBody.\n")
+            parse("= My link:ftp://x.test[y] title\n\nBody.\n")
 
 
 if __name__ == "__main__":

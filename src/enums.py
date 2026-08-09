@@ -184,12 +184,17 @@ class ParseErrorKind(StrEnum):
     Each kind maps to exactly one syntactic failure mode in the AsciiDoc
     subset described in the implementation plan. The UI may render a
     different help message per kind without re-parsing the message string.
+
+    A member exists only while a parser site raises it: when the last
+    raising site goes, so does the member. That is why there is no
+    "unpaired inline marker" kind — an inline formatting marker that
+    does not resolve to a span is ordinary text, not a failure (see
+    :class:`MarkerForm` and ``asciidoc.inline_parser``).
     """
 
     UNTERMINATED_CODE_BLOCK = auto()
     UNKNOWN_BLOCK = auto()
     BAD_IMAGE_MACRO = auto()
-    BAD_INLINE_SPAN = auto()
     INLINE_NESTING_TOO_DEEP = auto()
     EMPTY_HEADING = auto()
     UNTERMINATED_TABLE = auto()
@@ -202,7 +207,6 @@ class ParseErrorKind(StrEnum):
     BAD_BLOCKQUOTE_DIRECTIVE = auto()
     UNSUPPORTED_LINK_SCHEME = auto()
     BAD_LINK_MACRO = auto()
-    UNTERMINATED_MONOSPACE = auto()
     UNTERMINATED_PASSTHROUGH = auto()
     BAD_ATTRIBUTE_ENTRY = auto()
     BLOCK_INSIDE_INLINE_ONLY_CONTAINER = auto()
@@ -214,6 +218,38 @@ class ParseErrorKind(StrEnum):
     BAD_ATTACHMENT_MACRO = auto()
     BAD_ATTACHMENT_TABLE_MACRO = auto()
     UNKNOWN_ATTACHMENT_TABLE_COLUMN = auto()
+
+
+class MarkerForm(Enum):
+    """How a span delimiter decides where it may open and close.
+
+    AsciiDoc gives every inline formatting marker one of two *forms*,
+    and ``asciidoc.inline_parser`` keys both of its boundary tests off
+    this enum rather than off the marker character.
+
+    :data:`CONSTRAINED` — the default form (``*``, ``_``, backtick, and
+    the ``[.role]#…#`` spans). The opener must not be preceded by a word
+    character, ``;`` or ``:``, and must not be followed by a space; the
+    closer must not be preceded by a space and must not be followed by a
+    word character. A marker failing either test is literal text, which
+    is what keeps ``snake_case`` and ``2 * 3 * 4`` ordinary prose.
+
+    :data:`UNCONSTRAINED` — the doubled form (``**``, ``__``,
+    double-backtick). It opens and closes anywhere, and is therefore the
+    only way to emphasise part of a word (``a**b**c``).
+
+    :data:`DELIMITED` — a bracket terminator (``]``) that closes wherever
+    it appears. It is not a formatting marker and takes no boundary test.
+    It is a member rather than an absent value so that no call site has
+    to spell "this terminator has no boundary rule" as ``None``.
+
+    Plain :class:`enum.Enum` with :func:`auto` values: a parse-time
+    classification, never persisted, so no migration is implied.
+    """
+
+    CONSTRAINED = auto()
+    UNCONSTRAINED = auto()
+    DELIMITED = auto()
 
 
 class HeadingTrailing(StrEnum):
@@ -366,7 +402,7 @@ class UnreadScope(Enum):
     The rendered view marks a structural failure and stays silent on an
     inline one, and this is the discriminator it reads. It records the
     *seam*, not the :class:`ParseErrorKind`, because the kind cannot make
-    the distinction: :data:`ParseErrorKind.BAD_INLINE_SPAN` arises both
+    the distinction: :data:`ParseErrorKind.BAD_LINK_MACRO` arises both
     from a paragraph line's inline parse and from a table cell that takes
     a whole table down with it.
 

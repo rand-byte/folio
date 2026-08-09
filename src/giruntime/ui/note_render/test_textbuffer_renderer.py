@@ -1031,14 +1031,16 @@ class UnreadBlockRenderTests(unittest.TestCase):
     def test_should_render_an_inline_failure_as_plain_prose(self) -> None:
         # The UnreadScope.LINE half: no rule, no reason, no tag. This is
         # what would break first if the renderer regressed to marking
-        # everything.
+        # everything. The line reaches for a ``link:`` scheme folio
+        # refuses — an unpaired marker no longer reaches this seam at
+        # all, because the parser reads it as the prose it is.
         renderer, buffer, _ = _build_renderer()
         unread = renderer.render_into(
-            "= D\n\na snake_case word\n", buffer, note_id="n1",
+            "= D\n\na link:ftp://x.test[y] word\n", buffer, note_id="n1",
         )
         self.assertEqual(unread[0].scope, UnreadScope.LINE)
         rendered = _full_text(buffer)
-        self.assertIn("a snake_case word", rendered)
+        self.assertIn("a link:ftp://x.test[y] word", rendered)
         self.assertEqual(
             _ranges_with_tag(buffer, TagName.UNREAD_SOURCE.value), [],
         )
@@ -1046,11 +1048,21 @@ class UnreadBlockRenderTests(unittest.TestCase):
     def test_should_not_explain_an_inline_failure(self) -> None:
         renderer, buffer, _ = _build_renderer()
         renderer.render_into(
+            "= D\n\na link:ftp://x.test[y] word\n", buffer, note_id="n1",
+        )
+        # The reason line belongs to the BLOCK half of the seam; a
+        # line-scoped failure renders bare.
+        self.assertNotIn("Line 3", _full_text(buffer))
+
+    def test_should_render_an_unpaired_marker_without_any_seam(self) -> None:
+        # The stronger property Phase A buys: this line never becomes an
+        # UnreadBlock in the first place, because it never fails.
+        renderer, buffer, _ = _build_renderer()
+        unread = renderer.render_into(
             "= D\n\na snake_case word\n", buffer, note_id="n1",
         )
-        # The message table's wording for an unpaired marker must not
-        # appear: the reference calls this prose, and so do we.
-        self.assertNotIn("was opened but not closed", _full_text(buffer))
+        self.assertEqual(unread, ())
+        self.assertIn("a snake_case word", _full_text(buffer))
 
 
 @unittest.skipUnless(display_available(), "no GDK display")

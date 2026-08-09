@@ -117,10 +117,27 @@ This *sentence* uses _italic_, [.line-through]#strikethrough#,
 [.underline]#underline#, and `monospace` all in one place.
 ----
 
+=== Where a marker takes effect
+
+A marker only opens a span at the edge of a word, and only closes one
+when it is not left dangling. In practice: `*bold*` works, `a*b*c` does
+not — the asterisks there are just asterisks. This is what lets you
+write `snake_case` names, `2 * 3 * 4`, and a colon-prefixed note in
+ordinary prose without any of it turning into emphasis.
+
+To emphasise part of a word, double the marker. A doubled marker is
+free of the edge rule and may open and close anywhere:
+
+* a**bold**part — type `a**bold**part`
+* word__it__word — type `word__it__word`
+* a``mono``part — wrap the span in doubled backticks
+
 Limit: a marker does not nest inside the same marker (no bold inside
-bold), though different markers may nest, such as bold inside italic. A
-line with an unpaired marker is left as the plain text you typed; the
-rest of the note is unaffected.
+bold), though different markers may nest, such as bold inside italic —
+with a space or punctuation between the two openers, since a marker
+pressed against a word character does not open. A marker that never
+finds its partner is simply the text you typed, and the rest of the
+line still renders normally.
 
 === Hard line breaks
 

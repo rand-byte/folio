@@ -355,7 +355,7 @@ class UnreadBlockSnippetTests(unittest.TestCase):
         document = self._document(
             UnreadBlock(
                 lines=("foo_bar",),
-                kind=ParseErrorKind.BAD_INLINE_SPAN,
+                kind=ParseErrorKind.UNSUPPORTED_LINK_SCHEME,
                 scope=UnreadScope.LINE,
                 source_line=1,
             )

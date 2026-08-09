@@ -347,6 +347,23 @@ class GrammarPrecedenceTests(unittest.TestCase):
             dispatched.index("inline-bold"),
         )
 
+    def test_doubled_forms_are_tried_before_their_constrained_twins(
+        self,
+    ) -> None:
+        # "**bold**" must highlight as one span. Tried the other way
+        # round, the constrained context would claim an empty span at
+        # the first pair of asterisks and leave the word bare.
+        dispatched = _dispatched_ids()
+        for doubled, single in (
+            ("inline-bold-unconstrained", "inline-bold"),
+            ("inline-italic-unconstrained", "inline-italic"),
+            ("inline-monospace-unconstrained", "inline-monospace"),
+        ):
+            with self.subTest(doubled):
+                self.assertLess(
+                    dispatched.index(doubled), dispatched.index(single)
+                )
+
     def test_code_block_is_tried_first_of_all(self) -> None:
         # Inside the fence nothing is interpreted, matching the
         # parser's verbatim treatment — only reachable if the region
@@ -578,6 +595,16 @@ class InlineEmphasisPatternTests(unittest.TestCase):
     def test_bold_rejects_asterisks_inside_a_word(self) -> None:
         self.assertIsNone(_first_match("inline-bold", "file*name*here"))
 
+    def test_bold_rejects_a_closer_followed_by_a_word_character(self) -> None:
+        # The parser reads "*bold*x" as prose; the editor must not
+        # colour what the reader will not see emphasised.
+        self.assertIsNone(_first_match("inline-bold", "a *bold*x word"))
+
+    def test_bold_rejects_an_opener_after_a_colon_or_semicolon(self) -> None:
+        for source in ("see:*bold*", "see;*bold*"):
+            with self.subTest(source):
+                self.assertIsNone(_first_match("inline-bold", source))
+
     def test_italic_matches_a_span_including_its_delimiters(self) -> None:
         self.assertEqual(_first_match("inline-italic", "a _quiet_ word"), "_quiet_")
 
@@ -588,6 +615,22 @@ class InlineEmphasisPatternTests(unittest.TestCase):
 
     def test_italic_rejects_delimiters_padded_with_spaces(self) -> None:
         self.assertIsNone(_first_match("inline-italic", "_ not italic _"))
+
+    def test_doubled_bold_matches_inside_a_word(self) -> None:
+        self.assertEqual(
+            _first_match("inline-bold-unconstrained", "a**b**c"), "**b**"
+        )
+
+    def test_doubled_italic_matches_inside_a_word(self) -> None:
+        self.assertEqual(
+            _first_match("inline-italic-unconstrained", "word__it__word"),
+            "__it__",
+        )
+
+    def test_doubled_forms_reject_an_unclosed_opener(self) -> None:
+        self.assertIsNone(
+            _first_match("inline-bold-unconstrained", "a **unclosed run")
+        )
 
     def test_strikethrough_matches_the_role_prefixed_span(self) -> None:
         self.assertEqual(
@@ -615,6 +658,15 @@ class InlineMonospacePatternTests(unittest.TestCase):
 
     def test_rejects_an_unclosed_backtick(self) -> None:
         self.assertIsNone(_first_match("inline-monospace", "an unclosed ` backtick"))
+
+    def test_rejects_backticks_inside_a_word(self) -> None:
+        # Constrained, like bold and italic: "a`b`c" is prose.
+        self.assertIsNone(_first_match("inline-monospace", "a`b`c"))
+
+    def test_doubled_backticks_match_inside_a_word(self) -> None:
+        self.assertEqual(
+            _first_match("inline-monospace-unconstrained", "a``m``b"), "``m``"
+        )
 
     def test_does_not_span_a_line_break(self) -> None:
         # The parser treats inline constructs as line-local; a backtick

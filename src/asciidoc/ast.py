@@ -169,9 +169,9 @@ class Monospace:
     safe to wrap a snippet of source code that itself contains AsciiDoc
     delimiters in backticks.
 
-    The inline parser is responsible for raising
-    :class:`ParseErrorKind.UNTERMINATED_MONOSPACE` when an opener has
-    no matching close on the same line.
+    An opener with no matching close on the same line is not a failure:
+    the inline parser hands the backtick back as literal text, the same
+    way the reference implementation renders it.
     """
 
     content: str

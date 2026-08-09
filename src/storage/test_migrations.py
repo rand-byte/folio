@@ -379,6 +379,125 @@ class V4MimeTypeColumnDropTests(unittest.TestCase):
 
 
 # ---------------------------------------------------------------------------
+# v5 re-derives cached columns after the inline marker rules changed
+# ---------------------------------------------------------------------------
+
+
+class V5CacheRederiveTests(unittest.TestCase):
+    """A v4-shaped database upgraded to v5 has its caches recomputed.
+
+    The stale-cache scenario is real, not hypothetical: before the
+    constrained-marker rules a title line like ``= a*b*c`` derived a
+    title with the asterisks consumed as emphasis, and a note whose body
+    held ``snake_case`` failed to parse at all and fell back to a
+    degraded snippet. Both derive differently now, and the cached
+    columns are what the note list and the search index read.
+    """
+
+    def setUp(self) -> None:
+        self.db = Database.in_memory()
+        self.addCleanup(self.db.close)
+        # Run everything up to v4 to produce a v4-state database.
+        self.db.connection.execute(
+            "CREATE TABLE IF NOT EXISTS schema_version "
+            "(version INTEGER NOT NULL PRIMARY KEY)"
+        )
+        for migration in (m for m in ALL_MIGRATIONS if m.version <= 4):
+            with self.db.transaction() as connection:
+                migration.apply(connection, _FIXED_NOW)
+                connection.execute(
+                    "INSERT INTO schema_version (version) VALUES (?)",
+                    (migration.version,),
+                )
+
+    def _insert_note_with_stale_cache(
+        self,
+        *,
+        note_id: str,
+        source: str,
+        stale_title: str,
+        stale_snippet: str,
+    ) -> None:
+        timestamp = _FIXED_NOW.isoformat()
+        self.db.connection.execute(
+            "INSERT INTO notes "
+            "(id, title, source, snippet, created_at, modified_at) "
+            "VALUES (?, ?, ?, ?, ?, ?)",
+            (note_id, stale_title, source, stale_snippet,
+             timestamp, timestamp),
+        )
+
+    def test_v5_recomputes_a_stale_title_and_snippet(self) -> None:
+        # The cache the old rules would have produced: markers eaten as
+        # emphasis in the title, the body's underscores likewise.
+        source = "= Report a*b*c\n\nSee snake_case for details.\n"
+        self._insert_note_with_stale_cache(
+            note_id="n-stale",
+            source=source,
+            stale_title="Report abc",
+            stale_snippet="See snake for details.",
+        )
+
+        apply_pending(self.db, now=_FIXED_NOW)
+
+        row = self.db.connection.execute(
+            "SELECT title, snippet FROM notes WHERE id = 'n-stale'"
+        ).fetchone()
+        expected = derive_summary(source)
+        self.assertEqual(row["title"], expected.title)
+        self.assertEqual(row["snippet"], expected.snippet)
+        self.assertIn("a*b*c", row["title"])
+
+    def test_v5_rebuilds_tags_without_duplicating_them(self) -> None:
+        source = "= Tagged\n:tags: alpha, beta\n\nbody\n"
+        self._insert_note_with_stale_cache(
+            note_id="n-tagged",
+            source=source,
+            stale_title="Tagged",
+            stale_snippet="body",
+        )
+        # v3 already populated note_tags for this row; v5 must replace
+        # those rows rather than insert alongside them.
+        for tag in ("alpha", "beta"):
+            self.db.connection.execute(
+                "INSERT INTO note_tags (note_id, tag) VALUES (?, ?)",
+                ("n-tagged", tag),
+            )
+
+        apply_pending(self.db, now=_FIXED_NOW)
+
+        tags = [
+            row[0] for row in self.db.connection.execute(
+                "SELECT tag FROM note_tags WHERE note_id = 'n-tagged' "
+                "ORDER BY tag"
+            )
+        ]
+        self.assertEqual(tags, ["alpha", "beta"])
+
+    def test_v5_leaves_timestamps_alone(self) -> None:
+        # Re-deriving a cache is not a user edit: the note list orders
+        # on modified_at, so touching it would silently reshuffle the
+        # user's notes on first launch after the upgrade.
+        self._insert_note_with_stale_cache(
+            note_id="n-time",
+            source="= Untouched\n\nsnake_case body\n",
+            stale_title="Untouched",
+            stale_snippet="stale",
+        )
+        before = self.db.connection.execute(
+            "SELECT created_at, modified_at FROM notes WHERE id = 'n-time'"
+        ).fetchone()
+
+        apply_pending(self.db, now=_FIXED_NOW)
+
+        after = self.db.connection.execute(
+            "SELECT created_at, modified_at FROM notes WHERE id = 'n-time'"
+        ).fetchone()
+        self.assertEqual(after["created_at"], before["created_at"])
+        self.assertEqual(after["modified_at"], before["modified_at"])
+
+
+# ---------------------------------------------------------------------------
 # Migration registry shape
 # ---------------------------------------------------------------------------
 

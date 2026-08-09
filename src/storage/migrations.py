@@ -30,7 +30,8 @@ Principles & invariants
   stays gi-free because that loader uses only :func:`importlib.resources`.
 * This module derives cached note columns through
   :func:`asciidoc.summary.derive_summary` (the v1 seed, the v2
-  backfill, and the v3 tag backfill). ``storage`` is allowed to import
+  backfill, the v3 tag backfill, and the v5 re-derive). ``storage`` is
+  allowed to import
   the pure ``asciidoc`` core; the edge is acyclic because ``asciidoc``
   imports nothing from ``storage``.
 * The migration runner does not import from
@@ -312,6 +313,51 @@ def _apply_v4(connection: sqlite3.Connection, now: datetime) -> None:
 
 
 # ---------------------------------------------------------------------------
+# v5 migration body — re-derive cached columns after the marker rules changed
+# ---------------------------------------------------------------------------
+
+
+def _apply_v5(connection: sqlite3.Connection, now: datetime) -> None:
+    """Re-derive ``title``, ``snippet`` and ``note_tags`` for every note.
+
+    The cached columns are a *function of the source under the parser's
+    rules*, and those rules changed: inline markers became constrained,
+    so text that used to be emphasised mid-word is now literal, doubled
+    markers gained meaning, and lines that used to fail to parse now
+    read as the prose they always were. Any note containing such a line
+    has a stale cache — the note-list row would keep showing a title or
+    snippet the note no longer renders, and searching would keep
+    matching on it.
+
+    Structurally this is v2's backfill and v3's tag rebuild run together
+    against the whole table rather than a subset, because the change is
+    not scoped to notes with a particular shape. :func:`derive_summary`
+    never raises, so a note that still cannot be parsed strictly falls
+    back to its permissive extraction exactly as it does on save.
+
+    ``now`` is unused: re-deriving a cache is not a user edit and must
+    not disturb ``updated_at`` — the note-list ordering and the sync
+    story both read that column.
+    """
+    _ = now
+    rows = connection.execute("SELECT id, source FROM notes").fetchall()
+    for row in rows:
+        summary = derive_summary(row["source"])
+        connection.execute(
+            "UPDATE notes SET title = ?, snippet = ? WHERE id = ?",
+            (summary.title, summary.snippet, row["id"]),
+        )
+        connection.execute(
+            "DELETE FROM note_tags WHERE note_id = ?", (row["id"],)
+        )
+        for tag in summary.tags:
+            connection.execute(
+                "INSERT INTO note_tags (note_id, tag) VALUES (?, ?)",
+                (row["id"], tag),
+            )
+
+
+# ---------------------------------------------------------------------------
 # Migration registry — append-only
 # ---------------------------------------------------------------------------
 
@@ -320,6 +366,7 @@ ALL_MIGRATIONS: tuple[Migration, ...] = (
     Migration(version=2, apply=_apply_v2),
     Migration(version=3, apply=_apply_v3),
     Migration(version=4, apply=_apply_v4),
+    Migration(version=5, apply=_apply_v5),
 )
 
 
