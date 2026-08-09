@@ -182,26 +182,24 @@ Principles & invariants
 * The widget tree is constructed once at ``__init__``. :meth:`refresh`
   re-runs the parser and renderer against the currently selected note,
   but never reshapes the widget tree.
-* **Parse-error handling.** When the parser raises, :meth:`refresh`
-  clears the buffer and renders an in-surface *error notice* into it —
-  a centred warning glyph, a headline, a user-facing message keyed by
-  :class:`ParseErrorKind`, and a faint recovery hint — via
-  :meth:`_insert_error_notice`. Selecting a note that doesn't parse
-  therefore shows that notice in the reading column, *not* the previous
-  note's stale render. The notice lives in the buffer (styled by the
-  :data:`ui.note_render.tag_table.TagName.ERROR_NOTICE_*` tags), so
-  there is no always-present banner widget reserving space above the
-  pane when there is nothing to show: an error consumes the rendering
-  surface only while it is being shown. :attr:`_error_message` mirrors
-  the message currently on screen (``None`` when none), keeping the
-  surface and that flag in lockstep — no "stale buffer + cleared flag"
-  or "notice in buffer + ``None`` flag" state is produced here.
-* The user-facing message table (:func:`_message_for`) lives in this
-  module rather than as a method on :class:`ParseError` because the
-  parser is pure and reusable; embedding UI copy in it would couple
-  the parser to this UI's tone. The mapping is *exhaustive* over
-  :class:`ParseErrorKind` so adding a new error kind forces an
-  update here — caught by a unit test that iterates the enum.
+* **Unreadable source is shown, not hidden.** :meth:`refresh` never
+  has to handle a parse failure: the renderer parses with
+  :func:`asciidoc.parser.parse_recovering`, so a note that will not
+  parse still renders, with the source folio could not read carried
+  verbatim into the buffer in the position it occupied. A stray
+  character on line 300 costs that construct, not the whole note.
+  :meth:`render_into` returns the :class:`asciidoc.ast.UnreadBlock`\\ s it
+  emitted, and this pane keeps the count of the *marked* ones (see
+  :attr:`unread_block_count`) — the inline ones render as ordinary prose
+  and carry no mark, so counting them would report a problem the reader
+  has no evidence of.
+* The user-facing message table (:func:`message_for`) lives in the UI
+  layer rather than on :class:`ParseError` because the parser is pure and
+  reusable; embedding UI copy in it would couple the parser to this UI's
+  tone. It is now read by the *renderer*, which is what places a reason
+  beside the source it explains. The mapping stays exhaustive over
+  :class:`ParseErrorKind`, so adding a new error kind still forces an
+  update there — caught by a unit test that iterates the enum.
 * **Metadata line.** Directly under the rendered title the view
   inserts a dim-grey metadata line — ``Created <date>  ·  Modified
   <date>  ·  #tag …`` — as **plain text in the buffer**, carrying the
@@ -240,6 +238,7 @@ from config.defaults import (
     ARTICLE_INNER_HPADDING_CHARS,
     ARTICLE_TOP_MARGIN_LINES,
 )
+from enums import UnreadScope
 from giruntime.controllers.app_state import AppState
 from giruntime.controllers.note_controller import NoteController
 from giruntime.controllers.note_list_store import NoteListStore
@@ -248,7 +247,6 @@ from giruntime.ui._file_picker import (
     FileSaveDialogOpener,
     default_file_save_dialog_opener,
 )
-from giruntime.ui._parse_error_messages import _message_for
 from giruntime.ui.article_container import (
     ArticleContainer,
     CharWidthMeasurer,
@@ -271,7 +269,6 @@ from giruntime.ui.note_render.textbuffer_renderer import (
 )
 from models.attachment import Attachment
 from models.note import Note
-from models.parse_error import ParseError
 from storage.protocols import AttachmentStoreProtocol
 
 
@@ -287,30 +284,6 @@ stack's shown child *and* its window is on screen, which is exactly the
 "nobody is looking" test the deferral needs. Tests pass a synchronous
 fake reporting visible / hidden deterministically, since a directly
 constructed widget is never mapped.
-"""
-
-
-_ERROR_NOTICE_ICON_GLYPH: str = "\u26a0\ufe0e"
-"""The warning glyph shown at the top of the in-surface parse-error
-notice. ``U+26A0`` (warning sign) followed by ``U+FE0E`` (the text
-variation selector) so it renders as a monochrome text glyph rather than
-a colour emoji — the latter would ignore the amber foreground the
-:data:`TagName.ERROR_NOTICE_ICON` tag sets. Scale and colour live in the
-tag table; only the character itself lives here, beside the other notice
-copy.
-"""
-
-
-_ERROR_NOTICE_HEADLINE: str = "This note can\u2019t be displayed"
-"""Headline line of the parse-error notice. User-facing copy, so it
-lives in this module next to :func:`_message_for` rather than in the
-tag table (which owns only the *look*).
-"""
-
-
-_ERROR_NOTICE_HINT: str = "Switch to Source to fix it"
-"""Faint recovery hint under the parse-error message — points the user
-at the editor, where the offending line can be corrected.
 """
 
 
@@ -576,7 +549,7 @@ class NoteView(Gtk.Box):
     _link_handler: LinkHandler
     _current_note_id: str | None
     _current_note: Note | None
-    _error_message: str | None
+    _unread_block_count: int
     _outer_column_width_px: int
     # "Is the pane on screen?" — injected so the store-driven re-render
     # can be skipped while the pane is the hidden stack child, and so the
@@ -637,11 +610,10 @@ class NoteView(Gtk.Box):
         # so the post-title metadata hook can read its timestamps and
         # tags during a render without a second repository round-trip.
         self._current_note = None
-        # The parse-error message currently shown in the surface (or
-        # ``None`` when the buffer holds a real render / is empty). It
-        # is the in-buffer notice's only piece of state — see
-        # :meth:`refresh` and :meth:`_insert_error_notice`.
-        self._error_message = None
+        # How many *marked* unread blocks the rendered buffer is
+        # showing. Kept in step with the surface by :meth:`refresh`,
+        # which is the only writer — see :attr:`unread_block_count`.
+        self._unread_block_count = 0
 
         # The shared fixed-width article surface: the painted text view
         # (sheet + washes), its buffer + tag table, and the
@@ -801,18 +773,12 @@ class NoteView(Gtk.Box):
         self._render_pending = False
         note_id = self._app_state.selected_note_id
         if note_id is None:
-            self._current_note_id = None
-            self._current_note = None
-            self._buffer.set_text("")
-            self._error_message = None
+            self._clear_surface()
             return
         try:
             note = self._note_store.get_note(note_id)
         except KeyError:
-            self._current_note_id = None
-            self._current_note = None
-            self._buffer.set_text("")
-            self._error_message = None
+            self._clear_surface()
             return
         # Update the resolver's view of "current note" BEFORE invoking
         # the renderer, so any image macro encountered during the
@@ -822,64 +788,31 @@ class NoteView(Gtk.Box):
         # note's timestamps and tags during the render.
         self._current_note_id = note.id
         self._current_note = note
-        try:
-            self._renderer.render_into(
-                note.source,
-                self._buffer,
-                note_id=note.id,
-                post_title_hook=self._insert_metadata_after_title,
-            )
-        except ParseError as exc:
-            # The render raised, so the buffer may hold a partial render
-            # (or the previously selected note's content if the renderer
-            # rebuilds in place). Clear it and render the in-surface
-            # error notice instead — without this the user would see the
-            # wrong content for a note that doesn't parse. The metadata
-            # hook never fired (the renderer raised before reaching it).
-            self._insert_error_notice(_message_for(exc.kind, exc.line))
-            return
-        # Render succeeded — drop any error-notice state.
-        self._error_message = None
+        unread = self._renderer.render_into(
+            note.source,
+            self._buffer,
+            note_id=note.id,
+            post_title_hook=self._insert_metadata_after_title,
+        )
+        # Only a structurally-unread block is marked in the surface, so
+        # only those are counted: the number this reports and the number
+        # of marks on screen are the same number.
+        self._unread_block_count = sum(
+            1 for block in unread if block.scope is UnreadScope.BLOCK
+        )
 
-    def _insert_error_notice(self, message: str) -> None:
-        """Render the in-surface parse-error notice into the buffer.
+    def _clear_surface(self) -> None:
+        """Empty the buffer and the per-note state that describes it.
 
-        Clears the buffer first (so no partial or stale render remains),
-        then inserts the four centred lines — warning glyph, headline,
-        the kind-specific ``message``, and the recovery hint — each
-        carrying its :data:`ui.note_render.tag_table.TagName.ERROR_NOTICE_*`
-        tag. Records ``message`` on :attr:`_error_message` so
-        :attr:`error_notice_text` can report it and :meth:`refresh`
-        keeps the surface and that flag in lockstep.
-
-        Each line is its own paragraph (the trailing ``\\n`` closes it),
-        which is what lets the per-line tag carry the paragraph-level
-        centre justification; the last line is unterminated so the
-        notice adds no trailing blank line.
+        The one path for "there is nothing to show": no selection, or a
+        selection pointing at a note the store no longer has. Keeping it
+        in one place is what stops the buffer and
+        :attr:`_unread_block_count` drifting apart.
         """
-        buffer = self._buffer
-        buffer.set_text("")
-        buffer.insert_with_tags_by_name(
-            buffer.get_end_iter(),
-            f"{_ERROR_NOTICE_ICON_GLYPH}\n",
-            TagName.ERROR_NOTICE_ICON.value,
-        )
-        buffer.insert_with_tags_by_name(
-            buffer.get_end_iter(),
-            f"{_ERROR_NOTICE_HEADLINE}\n",
-            TagName.ERROR_NOTICE_TITLE.value,
-        )
-        buffer.insert_with_tags_by_name(
-            buffer.get_end_iter(),
-            f"{message}\n",
-            TagName.ERROR_NOTICE_DETAIL.value,
-        )
-        buffer.insert_with_tags_by_name(
-            buffer.get_end_iter(),
-            _ERROR_NOTICE_HINT,
-            TagName.ERROR_NOTICE_HINT.value,
-        )
-        self._error_message = message
+        self._current_note_id = None
+        self._current_note = None
+        self._buffer.set_text("")
+        self._unread_block_count = 0
 
     def _insert_metadata_after_title(self, buffer: Gtk.TextBuffer) -> None:
         """Insert the dim-grey metadata line as the renderer's post-title hook.
@@ -1114,23 +1047,16 @@ class NoteView(Gtk.Box):
         return self._resolve_image_bytes
 
     @property
-    def error_notice_visible(self) -> bool:
-        """``True`` iff the in-surface parse-error notice is showing.
+    def unread_block_count(self) -> int:
+        """How many unread-source marks the rendered surface is showing.
 
-        Public read-only so tests can assert the success / failure
-        bookkeeping without inspecting the buffer's tagged contents.
+        ``0`` for a note that parses cleanly, for a note whose only
+        failures were inline (those render as ordinary prose and carry no
+        mark), and when nothing is selected. Counts
+        :data:`enums.UnreadScope.BLOCK` nodes only, so it never reports a
+        problem the reader has no evidence of.
         """
-        return self._error_message is not None
-
-    @property
-    def error_notice_text(self) -> str:
-        """The kind-specific message of the parse-error notice.
-
-        Empty when no parse error is being shown (the buffer holds a
-        real render or is empty). This is the per-error *message* line
-        only — not the static headline or hint.
-        """
-        return self._error_message or ""
+        return self._unread_block_count
 
 
 _MEASUREMENT_GLYPH: str = "M"

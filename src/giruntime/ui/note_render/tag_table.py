@@ -37,9 +37,9 @@ Principles & invariants
   and every list at a depth shares one text column regardless of marker
   width; see :func:`_make_list_item_tag`), the **block-level
   paragraph styling** for admonitions, blockquotes, and code blocks, the
-  under-title metadata line, and the four centred lines of the in-surface
-  parse-error notice
-  (:data:`TagName.ERROR_NOTICE_ICON` … :data:`TagName.ERROR_NOTICE_HINT`).
+  under-title metadata line, and the two lines of the in-place
+  unread-source mark
+  (:data:`TagName.UNREAD_SOURCE` / :data:`TagName.UNREAD_REASON`).
   Block-level tags carry
   only the *text position* (``accumulative-margin = True`` plus
   ``left-margin`` / ``right-margin`` = one M-width). That M-width is
@@ -124,7 +124,7 @@ from config.defaults import (
     LIST_MARKER_GAP_CHARS,
     TABLE_CELL_HPADDING_PX,
 )
-from enums import AdmonitionKind, ErrorNoticeLine, WashShape
+from enums import AdmonitionKind, UnreadMarkPart, WashShape
 from giruntime.ui.note_render.palette import Palette, Rgba
 
 
@@ -216,17 +216,17 @@ class TagName(StrEnum):
     :func:`build_wash_specs`). It is a :class:`Gtk.TextTag` name only —
     it is never persisted to disk, so it needs no migration.
 
-    :data:`ERROR_NOTICE_ICON` … :data:`ERROR_NOTICE_HINT` are the four
-    centred lines of the in-surface parse-error notice the rendered view
-    shows when a note's source fails to parse. The view clears the
-    buffer and inserts a large amber warning glyph
-    (:data:`ERROR_NOTICE_ICON`), a headline (:data:`ERROR_NOTICE_TITLE`),
-    the kind-specific message (:data:`ERROR_NOTICE_DETAIL`), and a faint
-    recovery hint (:data:`ERROR_NOTICE_HINT`). All four set
-    ``justification = CENTER`` and take an explicit palette foreground so
-    they read on the opaque sheet whichever colour scheme it is in —
-    like :data:`METADATA`, they are buffer-tag names only and carry
-    **no** wash (they are absent from :func:`build_wash_specs`).
+    :data:`UNREAD_SOURCE` and :data:`UNREAD_REASON` are the two lines of
+    an in-place *unread-source mark*: the source a
+    :class:`asciidoc.ast.UnreadBlock` carries, shown verbatim in
+    monospace behind a ``WashShape.LEFT_BAR`` amber rule, with the
+    kind-specific reason dimmed beneath it. Only a *structural* failure
+    is marked — an :data:`enums.UnreadScope.LINE` node renders as an
+    ordinary paragraph, wearing neither tag, because unreadable inline
+    markup is prose and the reference renders it silently. Both take an
+    explicit palette foreground so they read on the opaque sheet
+    whichever colour scheme it is in; :data:`UNREAD_REASON` carries no
+    wash and so is absent from :func:`build_wash_specs`.
     """
 
     BOLD = "bold"
@@ -288,10 +288,8 @@ class TagName(StrEnum):
     # a note's source fails to parse (the buffer is cleared first, so the
     # notice is the only content). Four centred lines: a large warning
     # glyph, a headline, the kind-specific message, and a recovery hint.
-    ERROR_NOTICE_ICON = "error_notice_icon"
-    ERROR_NOTICE_TITLE = "error_notice_title"
-    ERROR_NOTICE_DETAIL = "error_notice_detail"
-    ERROR_NOTICE_HINT = "error_notice_hint"
+    UNREAD_SOURCE = "unread_source"
+    UNREAD_REASON = "unread_reason"
 
 
 @dataclass(frozen=True)
@@ -594,39 +592,28 @@ _METADATA_RULE_INSET_PX: int = 0
 # notice sits on the sheet, whose colour the application chooses, so an
 # inherited theme foreground could land invisibly on it (which is
 # precisely what used to happen to body text under a dark theme).
-_ERROR_NOTICE_TAG_NAMES: dict[ErrorNoticeLine, TagName] = {
-    ErrorNoticeLine.ICON: TagName.ERROR_NOTICE_ICON,
-    ErrorNoticeLine.TITLE: TagName.ERROR_NOTICE_TITLE,
-    ErrorNoticeLine.DETAIL: TagName.ERROR_NOTICE_DETAIL,
-    ErrorNoticeLine.HINT: TagName.ERROR_NOTICE_HINT,
+_UNREAD_TAG_NAMES: dict[UnreadMarkPart, TagName] = {
+    UnreadMarkPart.SOURCE: TagName.UNREAD_SOURCE,
+    UnreadMarkPart.REASON: TagName.UNREAD_REASON,
 }
 
 
-@dataclass(frozen=True)
-class _ErrorNoticeMetrics:
-    """Non-colour styling for one line of the parse-error notice.
-
-    Paired with the line's palette foreground by :func:`build_tag_table`,
-    so the four lines are built in one loop over
-    :class:`ErrorNoticeLine` rather than four near-identical calls.
-    ``weight`` is :data:`None` for every line but the headline.
-    """
-
-    scale: float
-    pixels_above_px: int
-    weight: Pango.Weight | None = None
-
-
-_ERROR_NOTICE_METRICS: dict[ErrorNoticeLine, _ErrorNoticeMetrics] = {
-    ErrorNoticeLine.ICON: _ErrorNoticeMetrics(scale=3.0, pixels_above_px=24),
-    ErrorNoticeLine.TITLE: _ErrorNoticeMetrics(
-        scale=1.2, pixels_above_px=8, weight=Pango.Weight.SEMIBOLD,
-    ),
-    ErrorNoticeLine.DETAIL: _ErrorNoticeMetrics(
-        scale=1.0, pixels_above_px=6,
-    ),
-    ErrorNoticeLine.HINT: _ErrorNoticeMetrics(scale=0.9, pixels_above_px=12),
-}
+# Paragraph metrics for the in-place unread-source mark. The box insets
+# are ``0`` so the amber rule aligns with the prose column exactly as the
+# blockquote's does; the source text sits one M-width inside the box edge,
+# clearing the rule. ``_UNREAD_BAR_WIDTH_PX`` matches the blockquote bar,
+# so the two left-ruled blocks read as one family.
+_UNREAD_HMARGIN_PX: int = 0
+_UNREAD_BAR_WIDTH_PX: int = 3
+_UNREAD_SOURCE_VPADDING_PX: int = 4
+_UNREAD_REASON_SCALE: float = 0.9
+# The reason must read as annotation *about* the source above it, not as
+# one more line of it. At the source's line spacing a 2px gap put it
+# closer to the last source line than those lines are to each other,
+# which grouped it with the quarantined text; 5px separates the two
+# without detaching the reason from what it explains.
+_UNREAD_REASON_PIXELS_ABOVE_PX: int = 5
+_UNREAD_REASON_PIXELS_BELOW_PX: int = 6
 
 
 def build_tag_table(
@@ -728,12 +715,12 @@ def build_tag_table(
     table.add(_make_table_row_tag(TagName.TABLE_ROW, is_header=False))
     table.add(_make_table_row_tag(TagName.TABLE_HEADER, is_header=True))
     table.add(_make_metadata_tag(TagName.METADATA))
-    for line, metrics in _ERROR_NOTICE_METRICS.items():
-        table.add(
-            _make_error_notice_tag(
-                _ERROR_NOTICE_TAG_NAMES[line], metrics=metrics,
-            )
+    table.add(
+        _make_unread_source_tag(
+            TagName.UNREAD_SOURCE, char_width_px=char_width_px,
         )
+    )
+    table.add(_make_unread_reason_tag(TagName.UNREAD_REASON))
     apply_palette(table, palette)
     return table
 
@@ -773,11 +760,11 @@ def apply_palette(table: Gtk.TextTagTable, palette: Palette) -> None:
             _ADMONITION_KIND_TAG_NAMES[kind],
             palette.admonition_kind_foregrounds[kind],
         )
-    for line in ErrorNoticeLine:
+    for part in UnreadMarkPart:
         _set_foreground(
             table,
-            _ERROR_NOTICE_TAG_NAMES[line],
-            palette.error_notice_foregrounds[line],
+            _UNREAD_TAG_NAMES[part],
+            palette.unread_foregrounds[part],
         )
 
 
@@ -826,6 +813,16 @@ def build_wash_specs(palette: Palette) -> dict[TagName, WashSpec]:
         box_right_inset_px=_BLOCKQUOTE_RIGHT_MARGIN_PX,
         shape=WashShape.LEFT_BAR,
         bar_width_px=_BLOCKQUOTE_BAR_WIDTH_PX,
+    )
+    # The unread-source mark: an amber left rule, no fill -- the same
+    # painter shape the blockquote uses, so a left-ruled block reads as
+    # one visual family whatever put it there.
+    specs[TagName.UNREAD_SOURCE] = WashSpec(
+        tint=palette.unread_bar_tint,
+        box_left_inset_px=_UNREAD_HMARGIN_PX,
+        box_right_inset_px=_UNREAD_HMARGIN_PX,
+        shape=WashShape.LEFT_BAR,
+        bar_width_px=_UNREAD_BAR_WIDTH_PX,
     )
     specs[TagName.CODE_BLOCK] = WashSpec(
         tint=palette.code_block_tint,
@@ -1209,28 +1206,48 @@ def _make_metadata_tag(name: TagName) -> Gtk.TextTag:
     return tag
 
 
-def _make_error_notice_tag(
-    name: TagName, *, metrics: _ErrorNoticeMetrics,
+def _make_unread_source_tag(
+    name: TagName, *, char_width_px: int,
 ) -> Gtk.TextTag:
-    """Build one centred line of the in-surface parse-error notice.
+    """Build the paragraph tag for verbatim unread source lines.
 
-    Each notice line is its own paragraph, so the tag carries both the
-    *paragraph* properties (``justification = CENTER``, plus
-    ``pixels-above-lines`` for the gap above the line) and the
-    *character* metrics (``scale``, and an optional ``weight`` for the
-    headline). The foreground is applied separately by
-    :func:`apply_palette` — always explicitly, never inherited, because
-    the notice sits on the sheet, whose colour the application chooses
-    rather than the theme.
+    Carries the same left-marked geometry as the blockquote body — box
+    inset ``0`` so the amber rule aligns with the prose column, text one
+    M-width inside it so the glyphs clear the rule — plus a monospace
+    family, because the content is raw source and saying so with the font
+    avoids needing a label.
 
-    Unlike the block-level tags these set no margins (the notice sits in
-    the body column) and paint no wash, so they never appear in
-    :func:`build_wash_specs`.
+    The rule itself is painted by ``ArticleTextView`` from the
+    :class:`WashSpec` :func:`build_wash_specs` returns for this tag; like
+    every other block-level tag here, this one carries text position only.
     """
     tag = Gtk.TextTag.new(name.value)
-    tag.set_property("justification", Gtk.Justification.CENTER)
-    tag.set_property("scale", metrics.scale)
-    tag.set_property("pixels-above-lines", metrics.pixels_above_px)
-    if metrics.weight is not None:
-        tag.set_property("weight", metrics.weight)
+    tag.set_property("accumulative-margin", True)
+    tag.set_property("left-margin", _UNREAD_HMARGIN_PX + char_width_px)
+    tag.set_property("right-margin", _UNREAD_HMARGIN_PX + char_width_px)
+    tag.set_property("pixels-above-lines", _UNREAD_SOURCE_VPADDING_PX)
+    tag.set_property("family", _MONOSPACE_FAMILY)
+    return tag
+
+
+def _make_unread_reason_tag(name: TagName) -> Gtk.TextTag:
+    """Build the paragraph tag for the reason line under unread source.
+
+    Dimmed and slightly reduced, with a gap below that separates the mark
+    from whatever block follows it. It paints no wash: the amber rule
+    stops at the source lines, so the reason reads as annotation rather
+    than as part of the quarantined content.
+
+    Its foreground is the palette's amber — the same colour as the rule
+    wherever contrast allows. On the light sheet the rule's own amber
+    fails the contrast floor as text, so the light palette supplies a
+    darker stop of the same hue; that split lives in
+    :mod:`giruntime.ui.note_render.palette`, not here.
+    """
+    tag = Gtk.TextTag.new(name.value)
+    tag.set_property("accumulative-margin", True)
+    tag.set_property("left-margin", _UNREAD_HMARGIN_PX)
+    tag.set_property("scale", _UNREAD_REASON_SCALE)
+    tag.set_property("pixels-above-lines", _UNREAD_REASON_PIXELS_ABOVE_PX)
+    tag.set_property("pixels-below-lines", _UNREAD_REASON_PIXELS_BELOW_PX)
     return tag

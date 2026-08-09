@@ -36,6 +36,17 @@ _HELP_SOURCE: str = load_text(SystemDocument.HELP)
 # ---------------------------------------------------------------------------
 
 
+_RECOVERY_ONLY_BLOCKS: frozenset[str] = frozenset({A.UnreadBlock.__name__})
+"""Block kinds only :func:`asciidoc.parser.parse_recovering` can produce.
+
+``help.adoc`` must parse cleanly, so it cannot exercise these — an
+:class:`asciidoc.ast.UnreadBlock` exists precisely for source that strict
+parsing rejects. The coverage assertions below subtract them rather than
+demanding the help document a failure mode. Named by class rather than by
+string so a rename cannot silently widen the exclusion.
+"""
+
+
 def _union_member_names(alias: object) -> set[str]:
     """Return the class names in a PEP 695 ``type X = A | B`` union alias.
 
@@ -105,7 +116,7 @@ class HelpContentTests(unittest.TestCase):
         block_seen: set[str] = set()
         inline_seen: set[str] = set()
         _walk_blocks(document.blocks, block_seen, inline_seen)
-        expected = _union_member_names(BlockNode)
+        expected = _union_member_names(BlockNode) - _RECOVERY_ONLY_BLOCKS
         missing = expected - block_seen
         self.assertEqual(
             missing,

@@ -114,9 +114,9 @@ Principles & invariants
   stable insertion point. The renderer creates **no** child anchor on
   this path — the previous render's contents are destroyed by
   ``buffer.set_text("")``, and the caller inserts plain (tagged) text
-  rather than anchoring a widget. The hook is **not** invoked when
-  :meth:`render_into` raises a :class:`ParseError` — the buffer is
-  unchanged by the raise.
+  rather than anchoring a widget. The hook always fires, on every
+  render: parsing recovers rather than raising, so there is always a
+  document to place it in.
 """
 
 # The module's size reflects the breadth of block kinds the renderer
@@ -162,9 +162,11 @@ from asciidoc.ast import (
     Text,
     Underline,
     UnorderedList,
+    UnreadBlock,
 )
-from asciidoc.parser import parse
+from asciidoc.parser import parse_recovering
 from giruntime.ui.note_render.attachment_table import expand_attachment_tables
+from giruntime.ui._parse_error_messages import message_for
 from giruntime.ui.note_render.tag_table import (
     TagName,
     admonition_body_tag_name,
@@ -174,7 +176,11 @@ from giruntime.ui.note_render.tag_table import (
     list_item_tag_name,
 )
 from config.defaults import TABLE_CELL_HPADDING_PX
-from enums import HeadingTrailing, ListNumberStyle
+from enums import (
+    HeadingTrailing,
+    ListNumberStyle,
+    UnreadScope,
+)
 from models.attachment import Attachment
 
 
@@ -387,12 +393,20 @@ class _CellRun:
     tags: tuple[Gtk.TextTag, ...]
 
 
-class TextBufferRenderer:
+class TextBufferRenderer:  # pylint: disable=too-many-instance-attributes
     """Render an AsciiDoc source string into a :class:`Gtk.TextBuffer`.
 
     Construction-time dependencies (the two resolvers and the tag
     table) are injected. Tests swap in fakes; production wires them up
     in the ``ui/note_view`` module.
+
+    The attribute count is one over pylint's ceiling: five injected
+    dependencies plus three per-render registries (the anonymous
+    activation tags, the anonymous table tab tags, and the unread blocks
+    emitted). All three registries are reset at the top of
+    :meth:`render_into` and read at its end, so they belong to the same
+    "state of the render in progress" grouping; splitting them into a
+    helper object would add a name without changing what is tracked.
     """
 
     _image_bytes_for: ImageBytesResolver
@@ -402,6 +416,7 @@ class TextBufferRenderer:
     _tag_table: Gtk.TextTagTable
     _activation_tags: dict[Gtk.TextTag, ActivationTarget]
     _table_tab_tags: list[Gtk.TextTag]
+    _unread_blocks: list[UnreadBlock]
 
     def __init__(  # pylint: disable=too-many-arguments
         self,
@@ -427,6 +442,11 @@ class TextBufferRenderer:
         # same way the link tags are, so the tag table cannot
         # accumulate stale tab tags across edits.
         self._table_tab_tags = []
+        # The :class:`UnreadBlock`\\ s emitted by the render in progress,
+        # collected during the emit walk (rather than by a second pass
+        # over the document) and returned by :meth:`render_into`. Reset
+        # per render, like the two tag registries above.
+        self._unread_blocks = []
 
     # ------------------------------------------------------------------
     # Public API
@@ -439,8 +459,16 @@ class TextBufferRenderer:
         *,
         note_id: str,  # pylint: disable=unused-argument
         post_title_hook: PostTitleHook | None = None,
-    ) -> None:
+    ) -> tuple[UnreadBlock, ...]:
         """Parse ``source`` and rebuild ``buffer`` to reflect the AST.
+
+        Parsing goes through :func:`asciidoc.parser.parse_recovering`, so
+        this **never raises** :class:`models.parse_error.ParseError`: a
+        note that will not parse still renders, with the source folio
+        could not read carried verbatim into the buffer and marked in
+        place. Returns the :class:`UnreadBlock`\\ s emitted, in document
+        order — empty for a clean note — so a caller can report how many
+        marks the reader is looking at without walking the buffer.
 
         ``note_id`` is part of the protocol surface so future caching
         and diagnostics can key on it; the current step does not yet
@@ -454,11 +482,10 @@ class TextBufferRenderer:
         title, with the body block then dropping a blank line below the
         inserted text — see the :data:`PostTitleHook` docstring and the
         module docstring for the contract. No child anchor is created on
-        this path. The hook is only fired on a successful parse; if
-        :func:`parse` raises a :class:`ParseError`, the buffer is left
-        untouched and the hook is never invoked.
+        this path. The hook always fires: recovery means there is always
+        a document to render.
         """
-        document = parse(source)  # may raise ParseError
+        document = parse_recovering(source)
         # Expand every ``attachments::[]`` macro into an ordinary table
         # *before* the emit walk, so the generated table reaches the
         # reader through the same ``_emit_table`` path a hand-written one
@@ -475,6 +502,7 @@ class TextBufferRenderer:
             )
         self._clear_activation_tags()
         self._clear_table_tab_tags()
+        self._unread_blocks = []
         if document.title is not None:
             # Emit the title with only a SINGLE newline so the metadata
             # line, inserted on the next line below, hugs the title. The
@@ -508,6 +536,7 @@ class TextBufferRenderer:
         for block in document.blocks:
             self._emit_block(buffer, block)
         self._strip_trailing_blank(buffer)
+        return tuple(self._unread_blocks)
 
     def target_for_tags(
         self,
@@ -627,6 +656,8 @@ class TextBufferRenderer:
             self._emit_admonition(buffer, block)
         elif isinstance(block, Blockquote):
             self._emit_blockquote(buffer, block)
+        elif isinstance(block, UnreadBlock):
+            self._emit_unread_block(buffer, block)
         elif isinstance(block, AttachmentTable):
             # Unreachable in a well-formed render: ``render_into``
             # expands every ``attachments::[]`` macro into an ordinary
@@ -714,6 +745,52 @@ class TextBufferRenderer:
     ) -> None:
         for inline in paragraph.inlines:
             self._emit_inline(buffer, inline, [])
+        buffer.insert(buffer.get_end_iter(), _BLOCK_SEPARATOR)
+
+    def _emit_unread_block(
+        self,
+        buffer: Gtk.TextBuffer,
+        unread: UnreadBlock,
+    ) -> None:
+        """Emit source the parser could not read, marking it if structural.
+
+        Two shapes, chosen by :attr:`UnreadBlock.scope`:
+
+        * :data:`UnreadScope.LINE` — a paragraph line whose inline parse
+          failed. Emitted as **plain text, unmarked**: unreadable inline
+          markup is prose, and the reference implementation renders
+          exactly this case silently. Marking it would assert a fault the
+          language does not recognise.
+        * :data:`UnreadScope.BLOCK` — a block-level construct failed.
+          Emitted as its verbatim source lines under an amber left rule
+          (:data:`TagName.UNREAD_SOURCE`), with the kind-specific reason
+          dimmed beneath (:data:`TagName.UNREAD_REASON`). Without the
+          mark the reader would meet a bare ``|===`` in the prose with no
+          account of itself and conclude folio's tables are broken.
+
+        Either way **every line is emitted**, which is what makes the
+        recovery path lossless end to end: the parser drops no line into
+        the node, and the renderer drops none out of it.
+
+        The block is also recorded on :attr:`_unread_blocks` so
+        :meth:`render_into` can return the marks it produced.
+        """
+        self._unread_blocks.append(unread)
+        body = "\n".join(unread.lines)
+        if unread.scope is UnreadScope.LINE:
+            buffer.insert(buffer.get_end_iter(), body)
+            buffer.insert(buffer.get_end_iter(), _BLOCK_SEPARATOR)
+            return
+        buffer.insert_with_tags_by_name(
+            buffer.get_end_iter(),
+            f"{body}\n",
+            TagName.UNREAD_SOURCE.value,
+        )
+        buffer.insert_with_tags_by_name(
+            buffer.get_end_iter(),
+            message_for(unread.kind, unread.source_line),
+            TagName.UNREAD_REASON.value,
+        )
         buffer.insert(buffer.get_end_iter(), _BLOCK_SEPARATOR)
 
     def _emit_unordered_list(

@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import unittest
 
-from enums import AdmonitionKind, ColorScheme, ErrorNoticeLine
+from enums import AdmonitionKind, ColorScheme, UnreadMarkPart
 from giruntime.ui.note_render.palette import (
     DARK_PALETTE,
     LIGHT_PALETTE,
@@ -125,9 +125,9 @@ class PaletteCompletenessTests(unittest.TestCase):
 
     def test_every_error_notice_line_has_a_foreground(self) -> None:
         for label, palette in _ALL_PALETTES:
-            for line in ErrorNoticeLine:
+            for line in UnreadMarkPart:
                 with self.subTest(palette=label, line=line):
-                    self.assertIn(line, palette.error_notice_foregrounds)
+                    self.assertIn(line, palette.unread_foregrounds)
 
     def test_no_mapping_carries_an_unknown_key(self) -> None:
         # The mirror of the above: a stale key left behind by a renamed
@@ -142,8 +142,8 @@ class PaletteCompletenessTests(unittest.TestCase):
                     set(AdmonitionKind),
                 )
                 self.assertEqual(
-                    set(palette.error_notice_foregrounds),
-                    set(ErrorNoticeLine),
+                    set(palette.unread_foregrounds),
+                    set(UnreadMarkPart),
                 )
 
 
@@ -212,17 +212,33 @@ class ContrastTests(unittest.TestCase):
                         _MIN_TEXT_CONTRAST_RATIO,
                     )
 
-    def test_notice_title_and_detail_clear_the_text_floor(self) -> None:
+    def test_unread_source_clears_the_text_floor(self) -> None:
         for label, palette in _ALL_PALETTES:
-            for line in (ErrorNoticeLine.TITLE, ErrorNoticeLine.DETAIL):
-                with self.subTest(palette=label, line=line):
-                    self.assertGreaterEqual(
-                        _contrast_ratio(
-                            palette.error_notice_foregrounds[line],
-                            palette.sheet,
-                        ),
-                        _MIN_TEXT_CONTRAST_RATIO,
-                    )
+            with self.subTest(palette=label):
+                self.assertGreaterEqual(
+                    _contrast_ratio(
+                        palette.unread_foregrounds[UnreadMarkPart.SOURCE],
+                        palette.sheet,
+                    ),
+                    _MIN_TEXT_CONTRAST_RATIO,
+                )
+
+    def test_unread_reason_clears_the_text_floor(self) -> None:
+        # The reason line is the amber the bar carries, wherever contrast
+        # allows. On the light sheet the bar's own amber measures 2.4
+        # against white, so the light palette drops to a darker stop of
+        # the same hue; this is the assertion that forced that split, and
+        # the one that would catch a well-meaning "make them match"
+        # edit that silently made the reason unreadable.
+        for label, palette in _ALL_PALETTES:
+            with self.subTest(palette=label):
+                self.assertGreaterEqual(
+                    _contrast_ratio(
+                        palette.unread_foregrounds[UnreadMarkPart.REASON],
+                        palette.sheet,
+                    ),
+                    _MIN_TEXT_CONTRAST_RATIO,
+                )
 
     def test_metadata_foreground_clears_the_secondary_floor(self) -> None:
         for label, palette in _ALL_PALETTES:
@@ -234,36 +250,17 @@ class ContrastTests(unittest.TestCase):
                     _MIN_SECONDARY_CONTRAST_RATIO,
                 )
 
-    def test_notice_hint_clears_the_secondary_floor(self) -> None:
+
+class UnreadBarTests(unittest.TestCase):
+    """The amber rule painted beside unread source."""
+
+    def test_bar_tint_is_opaque_in_both_palettes(self) -> None:
+        # Unlike the block tints (low-alpha washes read *through*), the
+        # unread rule is a solid marker: it has to stay legible as a rule
+        # rather than blend into the sheet behind it.
         for label, palette in _ALL_PALETTES:
             with self.subTest(palette=label):
-                self.assertGreaterEqual(
-                    _contrast_ratio(
-                        palette.error_notice_foregrounds[
-                            ErrorNoticeLine.HINT
-                        ],
-                        palette.sheet,
-                    ),
-                    _MIN_SECONDARY_CONTRAST_RATIO,
-                )
-
-    def test_dark_notice_glyph_is_no_fainter_than_the_light_one(self) -> None:
-        # The notice's warning glyph is the one foreground with no
-        # absolute floor: it is a 3x-scale decorative accent, and the
-        # shipped light amber measures 2.38 against white — a
-        # pre-existing choice this work carried over rather than
-        # redesigned. What must hold is that the dark variant is not a
-        # regression from it; the lines *below* the glyph are what
-        # actually carry the message, and those are floored above.
-        light = _contrast_ratio(
-            LIGHT_PALETTE.error_notice_foregrounds[ErrorNoticeLine.ICON],
-            LIGHT_PALETTE.sheet,
-        )
-        dark = _contrast_ratio(
-            DARK_PALETTE.error_notice_foregrounds[ErrorNoticeLine.ICON],
-            DARK_PALETTE.sheet,
-        )
-        self.assertGreaterEqual(dark, light)
+                self.assertEqual(palette.unread_bar_tint[3], 1.0)
 
 
 class RelativeLuminanceTests(unittest.TestCase):

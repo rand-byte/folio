@@ -335,31 +335,81 @@ class ColorScheme(Enum):
     DARK = auto()
 
 
-class ErrorNoticeLine(Enum):
-    """One of the four lines of the in-surface parse-error notice.
+class ParseMode(Enum):
+    """Whether the parser raises on a syntax error or flags it in the tree.
 
-    When a note's source fails to parse, the rendered view clears the
-    buffer and inserts a four-line notice in its place. This enum names
-    those lines so both halves of their presentation can be keyed by the
-    same member: the per-line foreground in a
-    :class:`giruntime.ui.note_render.palette.Palette`, and the per-line
-    :class:`giruntime.ui.note_render.tag_table.TagName` that carries the
-    rest of the line's styling.
+    :data:`STRICT` is the historical behaviour and the contract
+    :func:`asciidoc.parser.parse` keeps: the first syntactic violation
+    aborts the parse with a :class:`models.parse_error.ParseError`.
+    :data:`RECOVERING` is what :func:`asciidoc.parser.parse_recovering`
+    selects: the offending source is quarantined into an
+    :class:`asciidoc.ast.UnreadBlock` in the position it occupied and the
+    parse continues, so a single bad line costs one block rather than the
+    whole document.
 
-    It is the categorical concept *behind* the existing
-    ``TagName.ERROR_NOTICE_*`` members, which stay as they are: those are
-    buffer *tag names* (the string a :class:`Gtk.TextTag` is registered
-    under), not a classification. Keying a palette by tag name would tie
-    a colour table to GTK's naming; keying it by this enum does not.
+    Recovering is **not** lenient — it accepts no source strict mode
+    rejects, and produces an identical tree for any source strict mode
+    accepts. It only changes what happens to the error: raised, or placed
+    in the tree where the reader can see it.
+
+    Plain :class:`enum.Enum` with :func:`auto` values: a parse-time
+    choice, never persisted, so no migration is implied.
+    """
+
+    STRICT = auto()
+    RECOVERING = auto()
+
+
+class UnreadScope(Enum):
+    """Which recovery seam produced an :class:`asciidoc.ast.UnreadBlock`.
+
+    The rendered view marks a structural failure and stays silent on an
+    inline one, and this is the discriminator it reads. It records the
+    *seam*, not the :class:`ParseErrorKind`, because the kind cannot make
+    the distinction: :data:`ParseErrorKind.BAD_INLINE_SPAN` arises both
+    from a paragraph line's inline parse and from a table cell that takes
+    a whole table down with it.
+
+    :data:`LINE` — one source line of a paragraph run failed its inline
+    parse. The line is prose the parser could not read as markup; the
+    reference implementation renders exactly this case as ordinary text
+    with no diagnostic, so folio renders it unmarked.
+
+    :data:`BLOCK` — a block-level construct failed. Without a mark the
+    reader would see a bare ``|===`` or ``----`` sitting in the prose
+    with no account of itself.
+
+    Plain :class:`enum.Enum` with :func:`auto` values: presentation-time
+    classification, never persisted.
+    """
+
+    LINE = auto()
+    BLOCK = auto()
+
+
+class UnreadMarkPart(Enum):
+    """One of the two lines of an in-place unread-source mark.
+
+    When a note contains source the parser could not read as a block, the
+    rendered view shows that source verbatim under an amber left bar with
+    the reason beneath it. This enum names those two roles so both halves
+    of their presentation can be keyed by the same member: the per-part
+    foreground in a :class:`giruntime.ui.note_render.palette.Palette`, and
+    the per-part :class:`giruntime.ui.note_render.tag_table.TagName` that
+    carries the rest of the styling.
+
+    It is the categorical concept *behind* the ``TagName.UNREAD_*``
+    members: those are buffer *tag names* (the string a
+    :class:`Gtk.TextTag` is registered under), not a classification.
+    Keying a palette by tag name would tie a colour table to GTK's
+    naming; keying it by this enum does not.
 
     Plain :class:`enum.Enum` with :func:`auto` values: presentation-only,
     never persisted.
     """
 
-    ICON = auto()    # the large warning glyph
-    TITLE = auto()   # the headline
-    DETAIL = auto()  # the kind-specific message from ``_message_for``
-    HINT = auto()    # the recovery hint
+    SOURCE = auto()   # the verbatim source lines, under the bar
+    REASON = auto()   # the kind-specific message below them
 
 
 class AdmonitionKind(StrEnum):

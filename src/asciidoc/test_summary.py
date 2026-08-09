@@ -4,8 +4,10 @@ from __future__ import annotations
 
 import unittest
 
-from asciidoc.summary import derive_summary
+from asciidoc.ast import Document, UnreadBlock
+from asciidoc.summary import _snippet_of, derive_summary
 from config.defaults import SNIPPET_MAX_CHARS, UNTITLED
+from enums import ParseErrorKind, UnreadScope
 from models.note import NoteSummary
 
 
@@ -329,6 +331,53 @@ class DeriveSummaryNeverRaisesTests(unittest.TestCase):
         summary = derive_summary("*_" * 600 + "deep" + "_*" * 600)
         self.assertIsInstance(summary, NoteSummary)
         self.assertEqual(summary.title, UNTITLED)
+
+
+class UnreadBlockSnippetTests(unittest.TestCase):
+    """Source folio could not read still counts as prose in a snippet.
+
+    Unreachable from :func:`derive_summary` today, which parses strictly
+    and falls back to permissive extraction — so the node is constructed
+    directly here (the AST is pure data). The arm is what makes the
+    eventual switch to :func:`asciidoc.parser.parse_recovering` a
+    one-line change with the behaviour already decided, and this test is
+    the only thing pinning that decision.
+    """
+
+    def _document(self, block: UnreadBlock) -> Document:
+        return Document(
+            title=None, tags=(), blocks=(block,), source_line=1,
+        )
+
+    def test_should_treat_unread_source_as_prose_in_a_snippet(self) -> None:
+        # Given a document whose only content is a line that would not
+        # parse
+        document = self._document(
+            UnreadBlock(
+                lines=("foo_bar",),
+                kind=ParseErrorKind.BAD_INLINE_SPAN,
+                scope=UnreadScope.LINE,
+                source_line=1,
+            )
+        )
+
+        # When the snippet is derived
+        snippet = _snippet_of(document)
+
+        # Then the words survive, rather than the note-list row going
+        # blank and the note becoming unfindable
+        self.assertEqual(snippet, "foo_bar")
+
+    def test_should_keep_every_line_of_a_multi_line_unread_block(self) -> None:
+        document = self._document(
+            UnreadBlock(
+                lines=("|===", "| Region | Cluster"),
+                kind=ParseErrorKind.UNTERMINATED_TABLE,
+                scope=UnreadScope.BLOCK,
+                source_line=1,
+            )
+        )
+        self.assertEqual(_snippet_of(document), "|=== | Region | Cluster")
 
 
 if __name__ == "__main__":

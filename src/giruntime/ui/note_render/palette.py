@@ -45,7 +45,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import Final
 
-from enums import AdmonitionKind, ColorScheme, ErrorNoticeLine
+from enums import AdmonitionKind, ColorScheme, UnreadMarkPart
 
 
 type Rgba = tuple[float, float, float, float]
@@ -75,7 +75,7 @@ class Palette:  # pylint: disable=too-many-instance-attributes
     The field count is over pylint's ceiling by design. This is a record
     of the colours the renderer needs, and the count is set by that
     renderer, not by this class taking on responsibilities: there are
-    twelve because the rendered view paints twelve distinguishable
+    thirteen because the rendered view paints thirteen distinguishable
     things. Grouping them into sub-records to satisfy the ceiling would
     add a layer of naming (``palette.foregrounds.link``) that buys
     nothing — every field is read exactly once, by the one function that
@@ -93,7 +93,8 @@ class Palette:  # pylint: disable=too-many-instance-attributes
     blockquote_bar_tint: Rgba
     table_header_tint: Rgba
     table_rule_tint: Rgba
-    error_notice_foregrounds: Mapping[ErrorNoticeLine, str]
+    unread_foregrounds: Mapping[UnreadMarkPart, str]
+    unread_bar_tint: Rgba
 
 
 # ---------------------------------------------------------------------------
@@ -141,12 +142,17 @@ LIGHT_PALETTE: Final[Palette] = Palette(
     # Amber accent: the notice reads as a fixable warning rather than a
     # hard error. The other three mirror the metadata grey's role —
     # secondary text on the sheet.
-    error_notice_foregrounds={
-        ErrorNoticeLine.ICON: "#d4a017",
-        ErrorNoticeLine.TITLE: "#2c2c2a",
-        ErrorNoticeLine.DETAIL: "#5f5e5a",
-        ErrorNoticeLine.HINT: "#888780",
+    # Amber: an unread block reads as a fixable warning, not a hard
+    # error. The bar carries the accent at full strength; the reason
+    # line uses a darker stop of the same hue because the bar's own
+    # ``#d4a017`` measures 2.4:1 as text on this white sheet, under the
+    # 4.5:1 floor ``test_palette.py`` enforces. ``#8a5a00`` is not a new
+    # colour -- it is the NOTE admonition's accent, reused.
+    unread_foregrounds={
+        UnreadMarkPart.SOURCE: "#1a1a18",
+        UnreadMarkPart.REASON: "#8a5a00",
     },
+    unread_bar_tint=(0.83, 0.63, 0.09, 1.0),
 )
 
 
@@ -214,12 +220,15 @@ DARK_PALETTE: Final[Palette] = Palette(
     blockquote_bar_tint=(0.6, 0.6, 0.6, 0.55),
     table_header_tint=(0.5, 0.5, 0.5, 0.22),
     table_rule_tint=(0.5, 0.5, 0.5, 0.45),
-    error_notice_foregrounds={
-        ErrorNoticeLine.ICON: "#e8b93f",
-        ErrorNoticeLine.TITLE: "#e8e6e1",
-        ErrorNoticeLine.DETAIL: "#b8b6b0",
-        ErrorNoticeLine.HINT: "#95938c",
+    # On the dark sheet the bar's own amber clears the contrast floor as
+    # text (5.7:1), so the reason line and the bar are literally the same
+    # colour here -- the split in the light palette is a contrast
+    # concession, not a design difference.
+    unread_foregrounds={
+        UnreadMarkPart.SOURCE: "#e3e1dc",
+        UnreadMarkPart.REASON: "#e0b243",
     },
+    unread_bar_tint=(0.88, 0.70, 0.26, 1.0),
 )
 
 

@@ -51,7 +51,13 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from enums import AdmonitionKind, AttachmentTableColumn, LinkScheme
+from enums import (
+    AdmonitionKind,
+    AttachmentTableColumn,
+    LinkScheme,
+    ParseErrorKind,
+    UnreadScope,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -539,6 +545,48 @@ class AttachmentTable:
     source_line: int
 
 
+@dataclass(frozen=True)
+class UnreadBlock:
+    """Source the recovering parser could not read as markup.
+
+    Produced only by :func:`asciidoc.parser.parse_recovering`; strict
+    :func:`asciidoc.parser.parse` raises instead and never builds one. It
+    is what keeps recovery *lossless*: the offending source is carried
+    here verbatim and rendered in the position it occupied, so a note with
+    a syntax error shows all of its text — unstructured where folio could
+    not read it, intact everywhere else.
+
+    ``lines`` is sliced from the parser's raw ``source_lines`` (the
+    original ``str.splitlines()``), **not** from token text, which the
+    lexer right-strips. Indentation and trailing whitespace therefore
+    survive: what the user typed is what the reader sees.
+
+    ``kind`` is the :class:`ParseErrorKind` of the failure, so the
+    renderer can look up a user-facing sentence for it. The node
+    deliberately carries **no message string** — the copy belongs to the
+    UI layer, and putting it here would couple the pure core to one
+    interface's tone.
+
+    ``scope`` records which recovery seam produced the node, and is what
+    the renderer reads to decide whether to mark it; see
+    :class:`enums.UnreadScope`.
+
+    ``source_line`` is the line the failure was reported at — which is
+    not necessarily ``lines``' first line: an unterminated fence is
+    reported at its *opening* line, while a paragraph's bad inline span
+    is reported at the offending line itself.
+
+    ``column`` is deliberately absent. Pointing a caret inside the line is
+    not part of this feature; :attr:`models.parse_error.ParseError.column`
+    still carries it for whoever needs it later.
+    """
+
+    lines: tuple[str, ...]
+    kind: ParseErrorKind
+    scope: UnreadScope
+    source_line: int
+
+
 type BlockNode = (
     Section
     | Paragraph
@@ -550,6 +598,7 @@ type BlockNode = (
     | Admonition
     | Blockquote
     | AttachmentTable
+    | UnreadBlock
 )
 """The closed union of block node kinds the parser produces.
 
@@ -559,6 +608,11 @@ extends this union with :class:`Table`. Step 15 extends it further with
 :class:`Admonition` and :class:`Blockquote`. The attachment-links feature
 adds :class:`AttachmentTable`, the only node that is *expanded away*
 (into a :class:`Table`) before rendering rather than emitted directly.
+:class:`UnreadBlock` is the one member **no well-formed source can
+produce** — only :func:`asciidoc.parser.parse_recovering` builds one, from
+source that strict parsing rejects. Walkers must still handle it, so it is
+a union member like any other; tests that assert "every node kind appears
+in a document" have to exclude it explicitly.
 
 Membership in this union and exhaustive handling of it are both
 enforced statically (parser return types + ``match``/``assert_never``

@@ -964,160 +964,189 @@ class NoteViewRendererWiringTests(unittest.TestCase):
 
 
 @unittest.skipUnless(display_available(), "no GDK display")
-class NoteViewErrorNoticeTests(unittest.TestCase):
-    """The in-surface parse-error notice is absent by default, rendered
-    into the buffer on parse failure with a kind-specific message, and
-    cleared when the user navigates to a parseable note."""
+class NoteViewUnreadSourceTests(unittest.TestCase):
+    """A note that will not parse still renders.
 
-    def test_notice_absent_initially_with_no_selection(self) -> None:
-        # No note selected at construction → no notice, the buffer
-        # empty.
+    The pane no longer replaces a note with a notice. Source folio cannot
+    read is carried into the buffer verbatim and marked in place when the
+    failure is structural; the rest of the note renders normally.
+    """
+
+    def test_no_unread_blocks_with_no_selection(self) -> None:
         repo = _FakeNoteRepository()
         app_state = AppState()
-        view = NoteView(note_store=_build_tracking_store(repo), app_state=app_state)
-        self.assertFalse(view.error_notice_visible)
-        self.assertEqual(view.error_notice_text, "")
+        view = NoteView(
+            note_store=_build_tracking_store(repo), app_state=app_state,
+        )
+        self.assertEqual(view.unread_block_count, 0)
 
-    def test_notice_absent_on_successful_render(self) -> None:
+    def test_no_unread_blocks_on_a_clean_note(self) -> None:
         repo = _FakeNoteRepository()
-        repo.notes["note-A"] = _make_note("note-A")  # parses cleanly
+        repo.notes["note-A"] = _make_note("note-A")
         app_state = AppState()
-        view = NoteView(note_store=_build_tracking_store(repo), app_state=app_state)
+        view = NoteView(
+            note_store=_build_tracking_store(repo), app_state=app_state,
+        )
         app_state.set_selected_note_id("note-A")
-        self.assertFalse(view.error_notice_visible)
-        self.assertEqual(view.error_notice_text, "")
+        self.assertEqual(view.unread_block_count, 0)
 
-    def test_notice_shown_on_parse_error(self) -> None:
-        # A note whose source raises ParseError renders the notice into
-        # the surface with a kind-specific message AND replaces any
-        # prior content.
+    def test_structural_failure_is_counted(self) -> None:
         repo = _FakeNoteRepository()
-        # `:bad name:` lexes as a LineToken; the parser raises
-        # BAD_ATTRIBUTE_ENTRY against it.
+        # `:bad name:` lexes as a LineToken the parser rejects at
+        # block start — a structural failure, so it is marked.
         repo.notes["note-A"] = _make_note(
-            "note-A",
-            source=":bad name: value\n",
+            "note-A", source=":bad name: value\n",
         )
         app_state = AppState()
-        view = NoteView(note_store=_build_tracking_store(repo), app_state=app_state)
+        view = NoteView(
+            note_store=_build_tracking_store(repo), app_state=app_state,
+        )
+        app_state.set_selected_note_id("note-A")
+        self.assertEqual(view.unread_block_count, 1)
+
+    def test_inline_failure_is_not_counted(self) -> None:
+        # An unpaired marker renders as ordinary prose and carries no
+        # mark, so counting it would report a problem the reader has no
+        # evidence of.
+        repo = _FakeNoteRepository()
+        repo.notes["note-A"] = _make_note(
+            "note-A", source="a snake_case word\n",
+        )
+        app_state = AppState()
+        view = NoteView(
+            note_store=_build_tracking_store(repo), app_state=app_state,
+        )
+        app_state.set_selected_note_id("note-A")
+        self.assertEqual(view.unread_block_count, 0)
+
+    def test_structural_failure_renders_its_source_verbatim(self) -> None:
+        repo = _FakeNoteRepository()
+        repo.notes["note-A"] = _make_note(
+            "note-A", source=":bad name: value\n",
+        )
+        app_state = AppState()
+        view = NoteView(
+            note_store=_build_tracking_store(repo), app_state=app_state,
+        )
         app_state.set_selected_note_id("note-A")
 
-        self.assertTrue(view.error_notice_visible)
-        self.assertIn("Line 1", view.error_notice_text)
-        # The buffer now holds the notice: its headline and the
-        # kind-specific message, and nothing else.
         buffer = _find_text_view_buffer(view)
         rendered = buffer.get_text(
-            buffer.get_start_iter(),
-            buffer.get_end_iter(),
-            False,
+            buffer.get_start_iter(), buffer.get_end_iter(), False,
         )
-        self.assertIn("This note", rendered)
-        self.assertIn("Line 1", rendered)
+        self.assertIn(":bad name: value", rendered)
 
-    def test_notice_message_reflects_specific_error_kind(self) -> None:
-        # Different parse-error kinds produce different messages.
+    def test_structural_failure_renders_a_reason(self) -> None:
         repo = _FakeNoteRepository()
-        # Unsupported link scheme — an ftp:// link is outside the
-        # allowlist and surfaces a distinct message.
         repo.notes["note-A"] = _make_note(
-            "note-A",
-            source="link:ftp://example.com[click]\n",
+            "note-A", source="= D\n\n----\nopen forever\n",
         )
         app_state = AppState()
-        view = NoteView(note_store=_build_tracking_store(repo), app_state=app_state)
+        view = NoteView(
+            note_store=_build_tracking_store(repo), app_state=app_state,
+        )
         app_state.set_selected_note_id("note-A")
 
-        self.assertTrue(view.error_notice_visible)
-        text = view.error_notice_text
-        # The message says it's a link-scheme problem and lists the
-        # supported schemes.
-        self.assertIn("scheme", text)
-        for scheme in ("http", "https", "mailto"):
-            self.assertIn(scheme, text)
-
-    def test_notice_recovers_when_selecting_clean_note(self) -> None:
-        # After a parse-error display, navigating to a parseable
-        # note clears the notice — surface state and the error flag
-        # stay in lockstep with the current selection.
-        repo = _FakeNoteRepository()
-        repo.notes["bad"] = _make_note(
-            "bad", source="link:javascript:alert(1)[x]\n",
+        buffer = _find_text_view_buffer(view)
+        rendered = buffer.get_text(
+            buffer.get_start_iter(), buffer.get_end_iter(), False,
         )
+        self.assertIn("code block", rendered)
+
+    def test_the_rest_of_a_broken_note_still_renders(self) -> None:
+        # The whole point of the change: one bad construct costs that
+        # construct, not the note. Before this, the reader saw a notice
+        # and none of the surrounding prose.
+        repo = _FakeNoteRepository()
+        repo.notes["note-A"] = _make_note(
+            "note-A",
+            source=(
+                "= Deploy notes\n\nBefore the break.\n\n"
+                "// a comment\n\nAfter the break.\n"
+            ),
+        )
+        app_state = AppState()
+        view = NoteView(
+            note_store=_build_tracking_store(repo), app_state=app_state,
+        )
+        app_state.set_selected_note_id("note-A")
+
+        buffer = _find_text_view_buffer(view)
+        rendered = buffer.get_text(
+            buffer.get_start_iter(), buffer.get_end_iter(), False,
+        )
+        self.assertIn("Before the break.", rendered)
+        self.assertIn("After the break.", rendered)
+
+    def test_count_clears_when_selecting_a_clean_note(self) -> None:
+        repo = _FakeNoteRepository()
+        repo.notes["bad"] = _make_note("bad", source="// a comment\n")
         repo.notes["good"] = _make_note("good")
         app_state = AppState()
-        view = NoteView(note_store=_build_tracking_store(repo), app_state=app_state)
+        view = NoteView(
+            note_store=_build_tracking_store(repo), app_state=app_state,
+        )
 
         app_state.set_selected_note_id("bad")
-        self.assertTrue(view.error_notice_visible)
+        self.assertEqual(view.unread_block_count, 1)
 
         app_state.set_selected_note_id("good")
-        self.assertFalse(view.error_notice_visible)
-        self.assertEqual(view.error_notice_text, "")
+        self.assertEqual(view.unread_block_count, 0)
 
-    def test_notice_cleared_when_selection_clears_after_error(self) -> None:
-        # After a parse error, clearing the selection (None) must
-        # also clear the notice — the user is no longer looking at a
-        # note at all.
+    def test_count_clears_when_selection_clears(self) -> None:
         repo = _FakeNoteRepository()
-        repo.notes["bad"] = _make_note(
-            "bad", source="*unclosed bold\n",
-        )
+        repo.notes["bad"] = _make_note("bad", source="// a comment\n")
         app_state = AppState()
-        view = NoteView(note_store=_build_tracking_store(repo), app_state=app_state)
+        view = NoteView(
+            note_store=_build_tracking_store(repo), app_state=app_state,
+        )
         app_state.set_selected_note_id("bad")
-        self.assertTrue(view.error_notice_visible)
+        self.assertEqual(view.unread_block_count, 1)
 
         app_state.set_selected_note_id(None)
-        self.assertFalse(view.error_notice_visible)
+        self.assertEqual(view.unread_block_count, 0)
 
-    def test_notice_cleared_when_selection_points_to_missing_note(self) -> None:
-        # A stale id (note deleted in another window) clears the
-        # notice just like a None selection — the user gets neither
-        # stale content nor a stale error.
+    def test_count_clears_when_selection_points_to_missing_note(self) -> None:
         repo = _FakeNoteRepository()
-        repo.notes["bad"] = _make_note(
-            "bad", source="*unclosed\n",
-        )
+        repo.notes["bad"] = _make_note("bad", source="// a comment\n")
         app_state = AppState()
-        view = NoteView(note_store=_build_tracking_store(repo), app_state=app_state)
+        view = NoteView(
+            note_store=_build_tracking_store(repo), app_state=app_state,
+        )
         app_state.set_selected_note_id("bad")
-        self.assertTrue(view.error_notice_visible)
+        self.assertEqual(view.unread_block_count, 1)
 
         app_state.set_selected_note_id("does-not-exist")
-        self.assertFalse(view.error_notice_visible)
+        self.assertEqual(view.unread_block_count, 0)
 
-    def test_navigating_to_bad_note_does_not_show_stale_content(self) -> None:
-        # The plan's specific concern: the user clicks a note that
-        # doesn't parse and sees the *previous* note's render.
-        # After the fix, the buffer holds the error notice, not the
-        # previous note's content.
+    def test_navigating_to_a_broken_note_shows_no_stale_content(self) -> None:
+        # The buffer is rebuilt per render, so the previous note's text
+        # must not survive into a note that fails to parse.
         repo = _FakeNoteRepository()
         repo.notes["good"] = _make_note(
             "good", source="= Welcome\n\nIts contents.\n",
         )
-        repo.notes["bad"] = _make_note(
-            "bad", source="link:bogus://x[t]\n",
-        )
+        repo.notes["bad"] = _make_note("bad", source="// a comment\n")
         app_state = AppState()
-        view = NoteView(note_store=_build_tracking_store(repo), app_state=app_state)
+        view = NoteView(
+            note_store=_build_tracking_store(repo), app_state=app_state,
+        )
 
         app_state.set_selected_note_id("good")
         buffer = _find_text_view_buffer(view)
-        good_text = buffer.get_text(
-            buffer.get_start_iter(), buffer.get_end_iter(), False,
+        self.assertIn(
+            "Welcome",
+            buffer.get_text(
+                buffer.get_start_iter(), buffer.get_end_iter(), False,
+            ),
         )
-        self.assertIn("Welcome", good_text)
 
         app_state.set_selected_note_id("bad")
         bad_text = buffer.get_text(
             buffer.get_start_iter(), buffer.get_end_iter(), False,
         )
-        # No leftover from "good"; the notice has taken over the surface.
         self.assertNotIn("Welcome", bad_text)
-        self.assertIn("This note", bad_text)
-        # And the notice explains what happened.
-        self.assertTrue(view.error_notice_visible)
+        self.assertIn("// a comment", bad_text)
 
 
 @unittest.skipUnless(display_available(), "no GDK display")

@@ -21,7 +21,7 @@ from giruntime.ui.note_render.tag_table import (
     heading_tag_name,
     list_item_tag_name,
 )
-from enums import AdmonitionKind, ErrorNoticeLine, WashShape
+from enums import AdmonitionKind, UnreadMarkPart, WashShape
 from config.defaults import (
     LIST_MARKER_FIELD_CHARS,
     LIST_MARKER_GAP_CHARS,
@@ -95,12 +95,8 @@ class TagNameTests(unittest.TestCase):
         self.assertEqual(TagName.TABLE_ROW.value, "table_row")
         self.assertEqual(TagName.TABLE_HEADER.value, "table_header")
         self.assertEqual(TagName.METADATA.value, "metadata")
-        self.assertEqual(TagName.ERROR_NOTICE_ICON.value, "error_notice_icon")
-        self.assertEqual(TagName.ERROR_NOTICE_TITLE.value, "error_notice_title")
-        self.assertEqual(
-            TagName.ERROR_NOTICE_DETAIL.value, "error_notice_detail"
-        )
-        self.assertEqual(TagName.ERROR_NOTICE_HINT.value, "error_notice_hint")
+        self.assertEqual(TagName.UNREAD_SOURCE.value, "unread_source")
+        self.assertEqual(TagName.UNREAD_REASON.value, "unread_reason")
 
     def test_no_heading_1_member(self) -> None:
         # The parser produces level-0 (Document.title) and 2..6
@@ -150,10 +146,8 @@ class TagNameTests(unittest.TestCase):
             "TABLE_ROW",
             "TABLE_HEADER",
             "METADATA",
-            "ERROR_NOTICE_ICON",
-            "ERROR_NOTICE_TITLE",
-            "ERROR_NOTICE_DETAIL",
-            "ERROR_NOTICE_HINT",
+            "UNREAD_SOURCE",
+            "UNREAD_REASON",
         }
         self.assertEqual(set(TagName.__members__), expected)
 
@@ -799,71 +793,67 @@ class CodeBlockTagPropertyTests(unittest.TestCase):
         self.assertGreater(tag.get_property("pixels-below-lines"), 0)
 
 
-_ERROR_NOTICE_TAGS: tuple[TagName, ...] = (
-    TagName.ERROR_NOTICE_ICON,
-    TagName.ERROR_NOTICE_TITLE,
-    TagName.ERROR_NOTICE_DETAIL,
-    TagName.ERROR_NOTICE_HINT,
+_UNREAD_TAGS: tuple[TagName, ...] = (
+    TagName.UNREAD_SOURCE,
+    TagName.UNREAD_REASON,
 )
 
 
-class ErrorNoticeTagPropertyTests(unittest.TestCase):
-    """The four parse-error notice lines are centred, explicitly
-    coloured, and scaled — and carry no block layout (no margins)."""
+class UnreadMarkTagPropertyTests(unittest.TestCase):
+    """The two lines of an in-place unread-source mark.
+
+    The source line is a left-ruled monospace block; the reason beneath
+    it is dimmed annotation. Both stamp their own colour, because the
+    sheet's colour is the application's choice rather than the theme's.
+    """
 
     def setUp(self) -> None:
-        self.table = build_tag_table(char_width_px=_TEST_CHAR_WIDTH_PX, palette=LIGHT_PALETTE)
+        self.table = build_tag_table(
+            char_width_px=_TEST_CHAR_WIDTH_PX, palette=LIGHT_PALETTE,
+        )
 
-    def test_every_notice_line_is_centre_justified(self) -> None:
-        # Each line is its own paragraph, so the centre justification
-        # must live on every notice tag for the empty-state to read as
-        # centred rather than left-aligned.
-        for name in _ERROR_NOTICE_TAGS:
-            with self.subTest(name=name):
-                tag = self.table.lookup(name.value)
-                self.assertEqual(
-                    tag.get_property("justification"),
-                    Gtk.Justification.CENTER,
-                )
-
-    def test_every_notice_line_sets_an_explicit_foreground(self) -> None:
-        # The sheet is opaque light paper regardless of OS theme, so a
-        # theme-default (inherited) foreground could be invisible. Each
-        # notice line must stamp its own colour.
-        for name in _ERROR_NOTICE_TAGS:
+    def test_both_parts_set_an_explicit_foreground(self) -> None:
+        for name in _UNREAD_TAGS:
             with self.subTest(name=name):
                 tag = self.table.lookup(name.value)
                 self.assertTrue(tag.get_property("foreground-set"))
 
-    def test_every_notice_line_sets_a_scale(self) -> None:
-        # Scales are body-size multipliers so the notice tracks the
-        # user's font; all four set one explicitly.
-        for name in _ERROR_NOTICE_TAGS:
+    def test_source_uses_the_monospace_family(self) -> None:
+        # The content is raw source; the font is what says so, which is
+        # why the mark needs no "this is source" label.
+        tag = self.table.lookup(TagName.UNREAD_SOURCE.value)
+        self.assertEqual(tag.get_property("family"), "monospace")
+
+    def test_source_insets_its_text_by_one_char_width(self) -> None:
+        # The box inset is 0 so the rule aligns with the prose column;
+        # the text sits one M-width inside it, clearing the rule. Same
+        # split every other left-ruled block uses.
+        tag = self.table.lookup(TagName.UNREAD_SOURCE.value)
+        self.assertEqual(tag.get_property("left-margin"), _TEST_CHAR_WIDTH_PX)
+        self.assertEqual(tag.get_property("right-margin"), _TEST_CHAR_WIDTH_PX)
+
+    def test_reason_is_smaller_than_the_source_it_annotates(self) -> None:
+        tag = self.table.lookup(TagName.UNREAD_REASON.value)
+        self.assertLess(tag.get_property("scale"), 1.0)
+
+    def test_reason_opens_a_gap_below_the_mark(self) -> None:
+        # Separates the mark from whatever block follows it, so the
+        # reason reads as belonging to the source above rather than the
+        # prose below.
+        tag = self.table.lookup(TagName.UNREAD_REASON.value)
+        self.assertGreater(tag.get_property("pixels-below-lines"), 0)
+
+    def test_neither_part_is_centre_justified(self) -> None:
+        # The retired full-surface notice was centred; the in-place mark
+        # sits in the prose column and must read as part of the document
+        # flow, not as an empty state.
+        for name in _UNREAD_TAGS:
             with self.subTest(name=name):
                 tag = self.table.lookup(name.value)
-                self.assertTrue(tag.get_property("scale-set"))
-
-    def test_icon_is_the_largest_line(self) -> None:
-        # The warning glyph anchors the empty-state, so it is scaled up
-        # past the headline and the body lines.
-        scales = {
-            name: self.table.lookup(name.value).get_property("scale")
-            for name in _ERROR_NOTICE_TAGS
-        }
-        self.assertEqual(
-            scales[TagName.ERROR_NOTICE_ICON], max(scales.values()),
-        )
-        self.assertGreater(scales[TagName.ERROR_NOTICE_ICON], 1.0)
-
-    def test_notice_lines_set_no_block_margins(self) -> None:
-        # Unlike admonitions / blockquotes / code blocks, the notice
-        # sits in the body column with no inset — it must not stamp
-        # left/right margins.
-        for name in _ERROR_NOTICE_TAGS:
-            with self.subTest(name=name):
-                tag = self.table.lookup(name.value)
-                self.assertFalse(tag.get_property("left-margin-set"))
-                self.assertFalse(tag.get_property("right-margin-set"))
+                self.assertNotEqual(
+                    tag.get_property("justification"),
+                    Gtk.Justification.CENTER,
+                )
 
 
 class WashSpecTests(unittest.TestCase):
@@ -931,13 +921,19 @@ class WashSpecTests(unittest.TestCase):
         # absent entry produces no rect.
         self.assertNotIn(TagName.BLOCKQUOTE_ATTRIBUTION, self.specs)
 
-    def test_error_notice_tags_have_no_wash_entry(self) -> None:
-        # The parse-error notice is plain centred text on the normal
-        # sheet — Option C "empty state" paints no tint behind it — so
-        # none of its four lines may appear in the wash map.
-        for name in _ERROR_NOTICE_TAGS:
-            with self.subTest(name=name):
-                self.assertNotIn(name, self.specs)
+    def test_unread_reason_has_no_wash_entry(self) -> None:
+        # The amber rule stops at the source lines it quarantines. The
+        # reason beneath is annotation about the mark, not part of it,
+        # so nothing is painted beside it.
+        self.assertNotIn(TagName.UNREAD_REASON, self.specs)
+
+    def test_unread_source_paints_a_left_bar(self) -> None:
+        # The same painter shape the blockquote uses, so a left-ruled
+        # block reads as one visual family whatever put it there.
+        spec = self.specs[TagName.UNREAD_SOURCE]
+        self.assertEqual(spec.shape, WashShape.LEFT_BAR)
+        self.assertGreater(spec.bar_width_px, 0)
+        self.assertEqual(spec.tint, LIGHT_PALETTE.unread_bar_tint)
 
     def test_every_paragraph_background_tag_has_a_wash_spec(self) -> None:
         # The inverted complement of the test above: every tag that
@@ -1017,10 +1013,13 @@ class WashSpecTests(unittest.TestCase):
                 is_hairline = spec.shape is WashShape.HAIRLINE
                 self.assertEqual(is_hairline, name in hairline_names)
 
-    def test_only_blockquote_body_is_a_left_bar_spec(self) -> None:
-        # LEFT_BAR is currently unique to the blockquote body. Guards
-        # against a future block kind accidentally inheriting it.
-        left_bar_names = {TagName.BLOCKQUOTE_BODY}
+    def test_only_quotes_and_unread_source_are_left_bar_specs(self) -> None:
+        # LEFT_BAR is shared by exactly two block kinds: the blockquote
+        # body and the unread-source mark. They are deliberately the same
+        # shape — a left-ruled block reads as one visual family whatever
+        # put it there — and are told apart by the tint. Guards against a
+        # third block kind accidentally inheriting the rule.
+        left_bar_names = {TagName.BLOCKQUOTE_BODY, TagName.UNREAD_SOURCE}
         for name, spec in self.specs.items():
             with self.subTest(name=name):
                 is_left_bar = spec.shape is WashShape.LEFT_BAR
@@ -1069,10 +1068,8 @@ _COLOURED_TAG_NAMES: tuple[TagName, ...] = (
     TagName.ADMONITION_IMPORTANT_KIND,
     TagName.ADMONITION_WARNING_KIND,
     TagName.ADMONITION_CAUTION_KIND,
-    TagName.ERROR_NOTICE_ICON,
-    TagName.ERROR_NOTICE_TITLE,
-    TagName.ERROR_NOTICE_DETAIL,
-    TagName.ERROR_NOTICE_HINT,
+    TagName.UNREAD_SOURCE,
+    TagName.UNREAD_REASON,
 )
 """Every tag :func:`apply_palette` writes a foreground onto.
 
@@ -1170,21 +1167,19 @@ class ApplyPaletteTests(unittest.TestCase):
                     DARK_PALETTE.admonition_kind_foregrounds[kind],
                 )
 
-    def test_notice_lines_take_their_line_colour(self) -> None:
+    def test_unread_mark_parts_take_their_part_colour(self) -> None:
         table = build_tag_table(
             char_width_px=_TEST_CHAR_WIDTH_PX, palette=DARK_PALETTE,
         )
         expected = {
-            ErrorNoticeLine.ICON: TagName.ERROR_NOTICE_ICON,
-            ErrorNoticeLine.TITLE: TagName.ERROR_NOTICE_TITLE,
-            ErrorNoticeLine.DETAIL: TagName.ERROR_NOTICE_DETAIL,
-            ErrorNoticeLine.HINT: TagName.ERROR_NOTICE_HINT,
+            UnreadMarkPart.SOURCE: TagName.UNREAD_SOURCE,
+            UnreadMarkPart.REASON: TagName.UNREAD_REASON,
         }
-        for line, tag_name in expected.items():
-            with self.subTest(line=line):
+        for part, tag_name in expected.items():
+            with self.subTest(part=part):
                 self.assertEqual(
                     _foreground_of(table, tag_name),
-                    DARK_PALETTE.error_notice_foregrounds[line],
+                    DARK_PALETTE.unread_foregrounds[part],
                 )
 
     def test_applying_to_a_foreign_table_raises(self) -> None:

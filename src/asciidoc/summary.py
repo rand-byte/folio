@@ -76,6 +76,7 @@ from asciidoc.ast import (
     Text,
     Underline,
     UnorderedList,
+    UnreadBlock,
 )
 from asciidoc.lexer import (
     AttributeEntryToken,
@@ -214,6 +215,21 @@ def _prose_pieces(block: BlockNode) -> list[str]:
             for nested_block in blocks:
                 nested.extend(_prose_pieces(nested_block))
             return nested
+        case UnreadBlock(lines=lines):
+            # Source folio could not read as markup is still the user's
+            # words, so it counts as prose: a note whose only text is an
+            # unreadable line must not get an empty snippet, or its row
+            # in the note list becomes unfindable.
+            #
+            # Unreachable from :func:`derive_summary` today, which parses
+            # strictly and falls back to permissive extraction. The arm
+            # exists because the union is closed, and it is written this
+            # way so that switching this module to
+            # :func:`asciidoc.parser.parse_recovering` (which changes the
+            # cached snippet column and therefore needs a re-derive
+            # migration) is a one-line change with the behaviour already
+            # decided.
+            return list(lines)
         case CodeBlock() | Image() | Table() | AttachmentTable():
             return []
         case _:

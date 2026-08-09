@@ -34,15 +34,19 @@ from asciidoc.ast import (
     Table,
     TableCell,
     TableRow,
+    BlockNode,
+    Document,
     Text,
     UnorderedList,
+    UnreadBlock,
 )
-from asciidoc.parser import parse
+from asciidoc.parser import parse, parse_recovering
 from enums import (
     AdmonitionKind,
     AttachmentTableColumn,
     ParseErrorKind,
     SystemDocument,
+    UnreadScope,
 )
 from models.parse_error import ParseError
 from system_docs import load_text
@@ -2138,6 +2142,418 @@ class InlineNestingRegressionTests(unittest.TestCase):
             ParseErrorKind.INLINE_NESTING_TOO_DEEP,
         )
         self.assertEqual(ctx.exception.line, 5)
+
+
+# ---------------------------------------------------------------------------
+# Recovering parse
+# ---------------------------------------------------------------------------
+
+
+_WELL_FORMED_SAMPLE: str = """= Sample
+
+:tags: alpha, beta
+
+Opening prose with *bold* and _italic_ and `mono`.
+
+== A section
+
+* one
+* two
+.. nested
+
+----
+literal code
+----
+
+|===
+| Head A | Head B
+| a | b
+|===
+
+[NOTE]
+====
+An admonition body.
+====
+
+[quote, Someone, Somewhere]
+____
+A quoted line.
+____
+
+image::picture.png[]
+"""
+"""One document exercising most of the subset, used to pin the agreement
+invariant: recovering mode must reproduce strict mode exactly whenever
+strict mode succeeds."""
+
+
+def _flatten_blocks(blocks: tuple[BlockNode, ...]) -> list[BlockNode]:
+    """Return every block in ``blocks``, descending into sections."""
+    found: list[BlockNode] = []
+    for block in blocks:
+        found.append(block)
+        if isinstance(block, Section):
+            found.extend(_flatten_blocks(block.blocks))
+    return found
+
+
+def _unread_blocks(document: Document) -> list[UnreadBlock]:
+    """Return the :class:`UnreadBlock`\\ s anywhere in ``document``."""
+    return [
+        block
+        for block in _flatten_blocks(document.blocks)
+        if isinstance(block, UnreadBlock)
+    ]
+
+
+def _visible_text(document: Document) -> str:
+    """Return every piece of authored text the document carries.
+
+    Used by the losslessness assertions. Deliberately a *separate* walker
+    from the renderer's: if this reused production code, a node the
+    renderer silently dropped would be invisible to the test too.
+    """
+    parts: list[str] = []
+    if document.title is not None:
+        parts.append(_inline_text(document.title))
+    _collect_block_text(document.blocks, parts)
+    return " ".join(parts)
+
+
+def _inline_text(inlines: tuple[InlineNode, ...]) -> str:
+    """Flatten inline nodes to their authored text."""
+    parts: list[str] = []
+    for node in inlines:
+        content = getattr(node, "content", None)
+        if isinstance(content, str):
+            parts.append(content)
+        for attribute in ("children", "text"):
+            nested = getattr(node, attribute, None)
+            if isinstance(nested, tuple):
+                parts.append(_inline_text(nested))
+        target = getattr(node, "url", None)
+        if isinstance(target, str):
+            parts.append(target)
+        filename = getattr(node, "filename", None)
+        if isinstance(filename, str):
+            parts.append(filename)
+    return " ".join(parts)
+
+
+def _collect_block_text(
+    blocks: tuple[BlockNode, ...], parts: list[str],
+) -> None:
+    """Append every block's authored text to ``parts``, recursively."""
+    for block in blocks:
+        if isinstance(block, UnreadBlock):
+            parts.extend(block.lines)
+        elif isinstance(block, Section):
+            parts.append(_inline_text(block.title))
+            _collect_block_text(block.blocks, parts)
+        elif isinstance(block, Paragraph):
+            parts.append(_inline_text(block.inlines))
+        elif isinstance(block, (OrderedList, UnorderedList)):
+            _collect_list_text(block, parts)
+        elif isinstance(block, (Admonition, Blockquote)):
+            _collect_block_text(block.blocks, parts)
+        elif isinstance(block, Table):
+            _collect_table_text(block, parts)
+        elif isinstance(block, CodeBlock):
+            parts.append(block.content)
+        elif isinstance(block, Image):
+            parts.append(block.filename)
+
+
+def _collect_list_text(
+    block: OrderedList | UnorderedList, parts: list[str],
+) -> None:
+    """Append a list's item text, descending into nested sub-lists."""
+    for item in block.items:
+        parts.append(_inline_text(item.inlines))
+        _collect_block_text(item.children, parts)
+
+
+def _collect_table_text(block: Table, parts: list[str]) -> None:
+    """Append every cell's text, row by row."""
+    for row in block.rows:
+        for cell in row.cells:
+            parts.append(_inline_text(cell.inlines))
+
+
+class RecoveringParseAgreementTests(unittest.TestCase):
+    """Recovering mode changes nothing about source that already parses."""
+
+    def test_should_produce_the_same_tree_as_strict_for_valid_source(
+        self,
+    ) -> None:
+        # Given a document using most of the subset
+        source = _WELL_FORMED_SAMPLE
+
+        # When parsed in both modes
+        strict = parse(source)
+        recovered = parse_recovering(source)
+
+        # Then the trees are equal
+        self.assertEqual(recovered, strict)
+
+    def test_should_flag_nothing_in_valid_source(self) -> None:
+        self.assertEqual(_unread_blocks(parse_recovering(_WELL_FORMED_SAMPLE)), [])
+
+    def test_should_still_raise_in_strict_mode_on_an_unpaired_marker(
+        self,
+    ) -> None:
+        with self.assertRaises(ParseError):
+            parse("a snake_case word\n")
+
+
+class RecoveringParseLineTests(unittest.TestCase):
+    """A paragraph line that will not parse costs that line only."""
+
+    def test_should_flag_only_the_offending_line_of_a_paragraph(self) -> None:
+        # Given a three-line paragraph whose middle line has an
+        # unpaired marker
+        source = "first line\nsecond snake_case line\nthird line\n"
+
+        # When parsed in recovering mode
+        document = parse_recovering(source)
+
+        # Then only that line is quarantined
+        unread = _unread_blocks(document)
+        self.assertEqual(len(unread), 1)
+        self.assertEqual(unread[0].lines, ("second snake_case line",))
+
+    def test_should_keep_the_lines_around_a_flagged_line_as_paragraphs(
+        self,
+    ) -> None:
+        document = parse_recovering(
+            "first line\nsecond snake_case line\nthird line\n"
+        )
+        kinds = [type(block).__name__ for block in document.blocks]
+        self.assertEqual(kinds, ["Paragraph", "UnreadBlock", "Paragraph"])
+
+    def test_should_scope_a_paragraph_line_failure_to_line(self) -> None:
+        document = parse_recovering("a snake_case word\n")
+        self.assertEqual(_unread_blocks(document)[0].scope, UnreadScope.LINE)
+
+    def test_should_report_the_offending_line_number(self) -> None:
+        document = parse_recovering("ok\n\nfine\nsnake_case\n")
+        self.assertEqual(_unread_blocks(document)[0].source_line, 4)
+
+    def test_should_preserve_the_offending_source_text_verbatim(self) -> None:
+        # Leading whitespace survives: the node slices the raw source
+        # lines, not the lexer's right-stripped token text.
+        document = parse_recovering("ok line\n   indented snake_case\n")
+        self.assertEqual(
+            _unread_blocks(document)[0].lines, ("   indented snake_case",),
+        )
+
+
+class RecoveringParseBlockTests(unittest.TestCase):
+    """A structural failure costs its block, and parsing resumes after it."""
+
+    def test_should_scope_a_structural_failure_to_block(self) -> None:
+        document = parse_recovering("----\ncode line\n\nAfter.\n")
+        self.assertEqual(_unread_blocks(document)[0].scope, UnreadScope.BLOCK)
+
+    def test_should_resume_at_the_next_blank_line_after_an_unread_block(
+        self,
+    ) -> None:
+        document = parse_recovering("----\ncode line\n\nAfter.\n")
+        unread = _unread_blocks(document)
+        self.assertEqual(unread[0].lines, ("----", "code line"))
+        self.assertEqual(
+            [type(block).__name__ for block in document.blocks],
+            ["UnreadBlock", "Paragraph"],
+        )
+
+    def test_should_resume_at_the_next_heading_after_an_unread_block(
+        self,
+    ) -> None:
+        # No blank line separates the broken fence from the heading, so
+        # only the heading itself can end the quarantined run.
+        document = parse_recovering(
+            "----\ncode line\n== Next section\n\nUnder it.\n"
+        )
+        unread = _unread_blocks(document)
+        self.assertEqual(unread[0].lines, ("----", "code line"))
+        self.assertEqual(type(document.blocks[1]).__name__, "Section")
+
+    def test_should_not_resync_at_a_fence_inside_an_unread_block(self) -> None:
+        # A fence is ambiguous between opening the next block and
+        # closing the failed one, so it is deliberately not a resync
+        # point: the admonition below is absorbed rather than parsed.
+        # Pinned so that adding delimiter-matching resync later is a
+        # deliberate change rather than an accident.
+        document = parse_recovering(
+            "|===\n| a | b\n====\nNOTE: hi\n====\n\nAfter.\n"
+        )
+        unread = _unread_blocks(document)
+        self.assertEqual(len(unread), 1)
+        self.assertIn("NOTE: hi", unread[0].lines)
+
+    def test_should_flag_a_comment_line_as_a_block(self) -> None:
+        # A line comment is rejected at block start, so it fails the
+        # whole block rather than one paragraph line.
+        document = parse_recovering("Fine.\n\n// a comment\n\nAlso fine.\n")
+        unread = _unread_blocks(document)
+        self.assertEqual(unread[0].scope, UnreadScope.BLOCK)
+        self.assertEqual(unread[0].lines, ("// a comment",))
+
+    def test_should_flag_the_whole_table_when_a_cell_cannot_be_read(
+        self,
+    ) -> None:
+        document = parse_recovering("|===\n| a snake_case | b\n|===\n")
+        unread = _unread_blocks(document)
+        self.assertEqual(len(unread), 1)
+        self.assertEqual(unread[0].scope, UnreadScope.BLOCK)
+
+    def test_should_flag_every_unread_block_not_just_the_first(self) -> None:
+        document = parse_recovering(
+            "// one\n\nFine.\n\n// two\n\nAlso fine.\n"
+        )
+        self.assertEqual(len(_unread_blocks(document)), 2)
+
+    def test_should_recover_inside_a_section(self) -> None:
+        document = parse_recovering(
+            "== Heading\n\n// a comment\n\nBody.\n"
+        )
+        section = document.blocks[0]
+        assert isinstance(section, Section)
+        self.assertEqual(
+            [type(block).__name__ for block in section.blocks],
+            ["UnreadBlock", "Paragraph"],
+        )
+
+
+class RecoveringParseTotalityTests(unittest.TestCase):
+    """The recovering parser is total: it always returns a document."""
+
+    def test_should_terminate_when_no_line_can_be_read(self) -> None:
+        # Every recovery step consumes at least one token, so a source
+        # that is entirely unreadable finishes rather than spinning.
+        document = parse_recovering("a_1\nb_2\nc_3\n")
+        self.assertEqual(len(_unread_blocks(document)), 3)
+
+    def test_should_return_a_document_for_empty_source(self) -> None:
+        self.assertEqual(parse_recovering("").blocks, ())
+
+    def test_should_not_raise_on_a_pile_of_broken_constructs(self) -> None:
+        source = "|===\n----\n// x\n:bad name: v\n____\n====\n"
+        # No assertion beyond "this returns": totality is the property.
+        self.assertIsNotNone(parse_recovering(source))
+
+
+class RecoveringParseLosslessnessTests(unittest.TestCase):
+    """Every source line survives into the document."""
+
+    def _assert_every_line_accounted_for(self, source: str) -> None:
+        """Assert each non-blank source line reaches the tree.
+
+        A line is accounted for when its alphanumeric content appears in
+        the document's visible text — either because a construct parsed
+        it, or because an :class:`UnreadBlock` carries it verbatim.
+        Comparison is on alphanumerics only, because markup characters
+        (``*``, ``_``, fence delimiters) are legitimately consumed as
+        syntax by a successful parse.
+
+        The sources here are therefore made of *content* lines. A
+        directive line such as ``[quote, Someone]`` or ``image::f[]``
+        carries keywords that are syntax rather than authored text, and a
+        successful parse is entitled to consume them — so those lines are
+        outside what this property can state.
+        """
+        document = parse_recovering(source)
+        visible = _visible_text(document)
+        haystack = "".join(ch for ch in visible if ch.isalnum())
+        for line in source.splitlines():
+            needle = "".join(ch for ch in line if ch.isalnum())
+            if not needle:
+                continue
+            with self.subTest(line=line):
+                self.assertIn(needle, haystack)
+
+    def test_should_account_for_every_line_of_a_broken_paragraph(self) -> None:
+        self._assert_every_line_accounted_for(
+            "first line\nsecond snake_case line\nthird line\n"
+        )
+
+    def test_should_account_for_every_line_of_a_broken_fence(self) -> None:
+        self._assert_every_line_accounted_for(
+            "= Log\n\n----\nmake test\n---\n\n== Results\n\nPassed.\n"
+        )
+
+    def test_should_account_for_every_line_of_an_absorbed_construct(
+        self,
+    ) -> None:
+        self._assert_every_line_accounted_for(
+            "|===\n| a | b\n====\nNOTE: hi\n====\n\nAfter.\n"
+        )
+
+    def test_should_account_for_every_line_of_a_mixed_note(self) -> None:
+        # Prose, a heading, a code block and a broken construct in one
+        # note: the realistic shape, and the one where a resync
+        # off-by-one would quietly eat a line.
+        self._assert_every_line_accounted_for(
+            "= Deploy notes\n\n"
+            "Before the break.\n\n"
+            "----\n"
+            "make test\n"
+            "----\n\n"
+            "|===\n"
+            "| Region | Cluster\n\n"
+            "== Results\n\n"
+            "After the break.\n"
+        )
+
+
+class RecoveringParseHeaderTests(unittest.TestCase):
+    """The document header is not a block, so it is tolerated, not flagged."""
+
+    def test_should_drop_a_bad_tags_value_and_keep_the_body(self) -> None:
+        document = parse_recovering(":tags: NOT A TAG!!\n\nBody.\n")
+        self.assertEqual(document.tags, ())
+        self.assertEqual(type(document.blocks[0]).__name__, "Paragraph")
+
+    def test_should_keep_the_first_tags_entry_when_duplicated(self) -> None:
+        document = parse_recovering(
+            "= T\n:tags: alpha\n:tags: beta\n\nBody.\n"
+        )
+        self.assertEqual(document.tags, ("alpha",))
+
+    def test_should_still_raise_on_a_bad_tags_value_in_strict_mode(
+        self,
+    ) -> None:
+        with self.assertRaises(ParseError):
+            parse(":tags: NOT A TAG!!\n\nBody.\n")
+
+
+class RecoveringParseTitleLineTests(unittest.TestCase):
+    """A title line that will not parse keeps its text as the title.
+
+    Both halves matter. A flagged title would leave the note listed as
+    *Untitled* and leak the heading text into the note-list snippet as an
+    ordinary block — two regressions against the permissive fallback this
+    replaces. It is also what the reference does: Asciidoctor renders
+    ``= My *title`` as a title reading ``My *title``, silently.
+    """
+
+    def test_should_keep_the_heading_text_as_the_title(self) -> None:
+        document = parse_recovering("= My *title\n\nBody text here.\n")
+        self.assertEqual(document.title, (Text(content="My *title", source_line=1),))
+
+    def test_should_not_flag_the_title_line(self) -> None:
+        document = parse_recovering("= My *title\n\nBody text here.\n")
+        self.assertEqual(_unread_blocks(document), [])
+
+    def test_should_not_leak_the_title_into_the_body(self) -> None:
+        document = parse_recovering("= My *title\n\nBody text here.\n")
+        self.assertEqual(
+            [type(block).__name__ for block in document.blocks], ["Paragraph"],
+        )
+
+    def test_should_still_raise_on_a_bad_title_in_strict_mode(self) -> None:
+        with self.assertRaises(ParseError):
+            parse("= My *title\n\nBody.\n")
 
 
 if __name__ == "__main__":

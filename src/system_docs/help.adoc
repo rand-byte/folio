@@ -12,11 +12,11 @@ You edit a note in the *Source* view and read it in the *View* view; the
 toggle at the top switches between them. The View view is exactly what
 the examples below preview. Folio accepts a deliberately *strict subset*
 of AsciiDoc, so most of what you write is ordinary prose with the
-occasional marker. Two promises make that subset safe to live in:
-well-formed markup renders, while a malformed inline marker surfaces a
-clear _error_ in the View rather than quietly rendering garbage — and a
-note still saves while you are mid-edit, so a half-finished line never
-costs you your work.
+occasional marker. Two promises make that subset safe to live in: your
+note always renders, with anything folio cannot read shown as you typed
+it and marked in place rather than replacing the page — and a note still
+saves while you are mid-edit, so a half-finished line never costs you
+your work.
 
 This page is itself a Folio note, written in the very subset it
 documents. The full AsciiDoc language is much larger; for anything beyond
@@ -118,9 +118,9 @@ This *sentence* uses _italic_, [.line-through]#strikethrough#,
 ----
 
 Limit: a marker does not nest inside the same marker (no bold inside
-bold), though different markers may nest, such as bold inside italic. An
-unpaired marker on a line is reported as an error rather than rendered
-literally.
+bold), though different markers may nest, such as bold inside italic. A
+line with an unpaired marker is left as the plain text you typed; the
+rest of the note is unaffected.
 
 === Hard line breaks
 

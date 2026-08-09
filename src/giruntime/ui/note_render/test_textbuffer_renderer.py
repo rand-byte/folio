@@ -33,9 +33,8 @@ from giruntime.ui.note_render.textbuffer_renderer import (
     _truncate_cell,
 )
 from giruntime.ui.test_display_guard import display_available
-from enums import AdmonitionKind, ListNumberStyle
+from enums import AdmonitionKind, ListNumberStyle, UnreadScope
 from models.attachment import Attachment
-from models.parse_error import ParseError
 from config.defaults import (
     LIST_MARKER_FIELD_CHARS,
     LIST_MARKER_GAP_CHARS,
@@ -963,18 +962,95 @@ class RebuildSemanticsTests(unittest.TestCase):
 
 
 @unittest.skipUnless(display_available(), "no GDK display")
-class ParseErrorPropagationTests(unittest.TestCase):
-    def test_parse_error_propagates_to_caller(self) -> None:
-        # An unterminated code fence should reach the caller as a
-        # :class:`ParseError`, untouched. The renderer never silently
-        # produces a degraded buffer for malformed source.
+class UnreadBlockRenderTests(unittest.TestCase):
+    """Source the parser could not read is rendered, and marked if structural.
+
+    The renderer parses with :func:`asciidoc.parser.parse_recovering`, so
+    it never raises on malformed source. A structural failure gets the
+    amber rule and a reason; an inline one renders as ordinary prose,
+    because unreadable inline markup is prose and the reference renders
+    it silently.
+    """
+
+    def test_should_return_no_unread_blocks_for_a_clean_note(self) -> None:
         renderer, buffer, _ = _build_renderer()
-        with self.assertRaises(ParseError):
-            renderer.render_into(
-                "= D\n\n----\nopen forever\n",
-                buffer,
-                note_id="n1",
-            )
+        unread = renderer.render_into(
+            "= D\n\nAll fine.\n", buffer, note_id="n1",
+        )
+        self.assertEqual(unread, ())
+
+    def test_should_not_raise_on_an_unterminated_fence(self) -> None:
+        # Given source that strict parsing rejects
+        renderer, buffer, _ = _build_renderer()
+
+        # When rendered
+        unread = renderer.render_into(
+            "= D\n\n----\nopen forever\n", buffer, note_id="n1",
+        )
+
+        # Then it renders, reporting the block it could not read
+        self.assertEqual(len(unread), 1)
+        self.assertEqual(unread[0].scope, UnreadScope.BLOCK)
+
+    def test_should_render_the_unread_source_text_verbatim(self) -> None:
+        renderer, buffer, _ = _build_renderer()
+        renderer.render_into(
+            "= D\n\n----\nopen forever\n", buffer, note_id="n1",
+        )
+        self.assertIn("open forever", _full_text(buffer))
+
+    def test_should_render_the_kind_specific_message_under_a_structural_flag(
+        self,
+    ) -> None:
+        renderer, buffer, _ = _build_renderer()
+        renderer.render_into(
+            "= D\n\n----\nopen forever\n", buffer, note_id="n1",
+        )
+        self.assertIn("code block", _full_text(buffer))
+
+    def test_should_tag_structural_unread_source(self) -> None:
+        renderer, buffer, _ = _build_renderer()
+        renderer.render_into(
+            "= D\n\n----\nopen forever\n", buffer, note_id="n1",
+        )
+        self.assertNotEqual(
+            _ranges_with_tag(buffer, TagName.UNREAD_SOURCE.value), [],
+        )
+
+    def test_should_render_the_blocks_around_an_unread_line(self) -> None:
+        renderer, buffer, _ = _build_renderer()
+        renderer.render_into(
+            "= D\n\nBefore.\n\n// a comment\n\nAfter.\n",
+            buffer,
+            note_id="n1",
+        )
+        rendered = _full_text(buffer)
+        self.assertIn("Before.", rendered)
+        self.assertIn("After.", rendered)
+
+    def test_should_render_an_inline_failure_as_plain_prose(self) -> None:
+        # The UnreadScope.LINE half: no rule, no reason, no tag. This is
+        # what would break first if the renderer regressed to marking
+        # everything.
+        renderer, buffer, _ = _build_renderer()
+        unread = renderer.render_into(
+            "= D\n\na snake_case word\n", buffer, note_id="n1",
+        )
+        self.assertEqual(unread[0].scope, UnreadScope.LINE)
+        rendered = _full_text(buffer)
+        self.assertIn("a snake_case word", rendered)
+        self.assertEqual(
+            _ranges_with_tag(buffer, TagName.UNREAD_SOURCE.value), [],
+        )
+
+    def test_should_not_explain_an_inline_failure(self) -> None:
+        renderer, buffer, _ = _build_renderer()
+        renderer.render_into(
+            "= D\n\na snake_case word\n", buffer, note_id="n1",
+        )
+        # The message table's wording for an unpaired marker must not
+        # appear: the reference calls this prose, and so do we.
+        self.assertNotIn("was opened but not closed", _full_text(buffer))
 
 
 @unittest.skipUnless(display_available(), "no GDK display")
@@ -2174,22 +2250,21 @@ class PostTitleHookTests(unittest.TestCase):
 
         self.assertEqual(_anchor_offsets(buffer), [])
 
-    def test_hook_not_called_when_parse_fails(self) -> None:
+    def test_hook_still_called_when_source_does_not_parse(self) -> None:
+        # Recovery means there is always a document, so the hook always
+        # has a place to insert into. Before recovery this asserted the
+        # opposite: the parse raised and the hook never ran.
         renderer, buffer, _ = _build_renderer()
         calls: list[Gtk.TextBuffer] = []
 
-        # An unterminated monospace span — guaranteed to raise
-        # ``ParseError`` during ``parse(source)`` at the top of
-        # ``render_into``, before any buffer mutation.
-        with self.assertRaises(ParseError):
-            renderer.render_into(
-                "an `unterminated monospace span\n",
-                buffer,
-                note_id="n1",
-                post_title_hook=calls.append,
-            )
+        renderer.render_into(
+            "an `unterminated monospace span\n",
+            buffer,
+            note_id="n1",
+            post_title_hook=calls.append,
+        )
 
-        self.assertEqual(calls, [])
+        self.assertEqual(len(calls), 1)
 
     def test_hook_omitted_runs_clean(self) -> None:
         renderer, buffer, _ = _build_renderer()

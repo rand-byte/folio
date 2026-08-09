@@ -2,7 +2,7 @@
 
 Principles & invariants
 -----------------------
-* :func:`_message_for` maps a :class:`~enums.ParseErrorKind` to the single
+* :func:`message_for` maps a :class:`~enums.ParseErrorKind` to the single
   sentence shown in the read pane's in-surface error notice. The ``match``
   is **exhaustive** over :class:`ParseErrorKind` — one distinct message per
   member — and is closed for the type-checker (a missing arm is a ``Never``
@@ -37,7 +37,7 @@ enum's members and cannot drift from them.
 """
 
 
-def _message_for(kind: ParseErrorKind, line: int) -> str:
+def message_for(kind: ParseErrorKind, line: int) -> str:
     # pylint: disable=too-many-return-statements
     # The ``match`` is intentionally exhaustive over
     # :class:`ParseErrorKind` — every member produces a distinct

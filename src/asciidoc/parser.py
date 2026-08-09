@@ -115,7 +115,9 @@ from asciidoc.ast import (
     Table,
     TableCell,
     TableRow,
+    Text,
     UnorderedList,
+    UnreadBlock,
 )
 from asciidoc.inline_parser import parse_inline
 from asciidoc.lexer import (
@@ -145,7 +147,9 @@ from enums import (
     AdmonitionKind,
     AttachmentTableColumn,
     ParseErrorKind,
+    ParseMode,
     TokenKind,
+    UnreadScope,
 )
 from models.parse_error import ParseError
 
@@ -216,7 +220,7 @@ _TAG_VALIDATION_RE: re.Pattern[str] = re.compile(r"^[a-z0-9][a-z0-9-]*$")
 
 
 def parse(source: str) -> Document:
-    """Parse ``source`` into a :class:`Document`.
+    """Parse ``source`` into a :class:`Document`, strictly.
 
     Raises
     ------
@@ -225,7 +229,34 @@ def parse(source: str) -> Document:
         carries a 1-indexed source line and a :class:`ParseErrorKind`
         so the caller can render a category-specific help message.
     """
-    parser = _Parser(source)
+    parser = _Parser(source, mode=ParseMode.STRICT)
+    return parser.parse_document()
+
+
+def parse_recovering(source: str) -> Document:
+    """Parse ``source`` into a :class:`Document`, flagging what will not read.
+
+    The total counterpart of :func:`parse`: it never raises
+    :class:`ParseError`. Where strict parsing would abort, the offending
+    source is quarantined into an :class:`UnreadBlock` at the position it
+    occupied and parsing continues from a resync point, so one bad line
+    costs one block rather than the whole document.
+
+    Three invariants hold, and each is pinned by a test in
+    ``test_parser.py``:
+
+    * **Agreement** — for any ``source`` :func:`parse` accepts, this
+      returns an equal :class:`Document` containing no
+      :class:`UnreadBlock`. Recovery is reachable only from a failure, so
+      this function accepts nothing strict mode rejects.
+    * **Totality** — it never raises :class:`ParseError`, and it
+      terminates on any input, because every recovery step consumes at
+      least one token.
+    * **Losslessness** — every source line is either consumed by a
+      successfully parsed construct or present verbatim in some
+      :class:`UnreadBlock`. No line is dropped.
+    """
+    parser = _Parser(source, mode=ParseMode.RECOVERING)
     return parser.parse_document()
 
 
@@ -279,11 +310,18 @@ class _Parser:
     tokens: list[Token]
     source_lines: list[str]
     pos: int
+    mode: ParseMode
 
-    def __init__(self, source: str) -> None:
+    def __init__(self, source: str, *, mode: ParseMode) -> None:
         self.tokens = tokenize(source)
         self.source_lines = source_lines(source)
         self.pos = 0
+        self.mode = mode
+
+    @property
+    def _recovering(self) -> bool:
+        """Whether a failure becomes an :class:`UnreadBlock` or an exception."""
+        return self.mode is ParseMode.RECOVERING
 
     # -- top-level -----------------------------------------------------------
 
@@ -331,17 +369,25 @@ class _Parser:
             if isinstance(token, AttributeEntryToken):
                 if token.name == _TAG_ATTRIBUTE_NAME:
                     if tags_seen:
-                        raise ParseError(
-                            line=token.line,
-                            column=0,
-                            message=(
-                                "duplicate :tags: attribute in document "
-                                "header"
-                            ),
-                            kind=ParseErrorKind.DUPLICATE_TAG_ATTRIBUTE,
-                        )
+                        if not self._recovering:
+                            raise ParseError(
+                                line=token.line,
+                                column=0,
+                                message=(
+                                    "duplicate :tags: attribute in "
+                                    "document header"
+                                ),
+                                kind=ParseErrorKind.DUPLICATE_TAG_ATTRIBUTE,
+                            )
+                        # Recovering: the header is not a block, so
+                        # there is nowhere to hang a flag. Keep the
+                        # first entry's tags and discard the duplicate,
+                        # exactly as an unrecognised attribute name is
+                        # discarded.
+                        self.pos += 1
+                        continue
                     tags_seen = True
-                    tags = parse_tags_value(token.value, token.line)
+                    tags = self._tags_from(token)
                 self.pos += 1
                 continue
             if isinstance(token, BlankToken):
@@ -359,6 +405,24 @@ class _Parser:
                     continue
             return tags
         return tags
+
+    def _tags_from(self, token: AttributeEntryToken) -> tuple[str, ...]:
+        """Parse a ``:tags:`` entry's value, tolerating it when recovering.
+
+        The document header is not a block, so a malformed ``:tags:``
+        line has no position in ``Document.blocks`` to be flagged at. In
+        :data:`ParseMode.RECOVERING` the entry therefore resolves to no
+        tags rather than failing the parse — the same treatment the
+        parser already gives every attribute name it does not model, and
+        the same answer :func:`asciidoc.summary.derive_summary`'s
+        permissive fallback reaches for the identical source.
+        """
+        try:
+            return parse_tags_value(token.value, token.line)
+        except ParseError:
+            if not self._recovering:
+                raise
+            return ()
 
     def _try_consume_document_title(self) -> tuple[InlineNode, ...] | None:
         """If the next token is a level-1 heading, consume it as the title.
@@ -384,7 +448,30 @@ class _Parser:
                 kind=ParseErrorKind.EMPTY_HEADING,
             )
         self.pos += 1
-        return parse_inline(token.text, token.line)
+        try:
+            return parse_inline(token.text, token.line)
+        except ParseError:
+            if not self._recovering:
+                raise
+            # **Title-line rule.** The heading is kept, with its text
+            # taken literally, rather than flagged. Two reasons, and the
+            # second is the stronger one:
+            #
+            # 1. A flagged title is no title: ``Document.title`` would be
+            #    ``None``, the note would list as "Untitled", and the
+            #    heading text would leak into the note-list snippet as an
+            #    ordinary block. Both are regressions against the
+            #    permissive fallback this recovery is meant to replace.
+            # 2. It is what the reference does. Asciidoctor renders
+            #    ``= My *title`` as a title reading ``My *title``,
+            #    silently — so keeping the literal text is the
+            #    *conformant* reading, and the absence of a mark here is
+            #    correct rather than a swallowed error.
+            #
+            # A title line is a single line of inline content, so an
+            # inline failure is the only way it can fail; there is no
+            # structural case to fall through to.
+            return (Text(content=token.text, source_line=token.line),)
 
     # -- block-list parsing --------------------------------------------------
 
@@ -416,12 +503,104 @@ class _Parser:
                 ):
                     # Belongs to an enclosing scope.
                     return blocks
-                blocks.append(self._parse_heading_block(token))
+                blocks.extend(self._parse_one_block(token))
                 continue
 
-            blocks.append(self._parse_non_heading_block(token))
+            blocks.extend(self._parse_one_block(token))
 
         return blocks
+
+    def _parse_one_block(self, token: Token) -> list[BlockNode]:
+        """Parse the block at the cursor, recovering from failure if allowed.
+
+        Returns a *list* because a single block-start token can yield
+        more than one node: in :data:`ParseMode.RECOVERING` a paragraph
+        run whose middle line will not parse splits into
+        paragraph / :class:`UnreadBlock` / paragraph (see
+        :meth:`_parse_paragraph_run`).
+
+        In :data:`ParseMode.STRICT` this is a thin wrapper that lets the
+        :class:`ParseError` propagate, so the strict tree is byte-identical
+        to what the dispatch produced before recovery existed.
+        """
+        start_pos = self.pos
+        if not self._recovering:
+            return self._dispatch_block(token)
+        try:
+            return self._dispatch_block(token)
+        except ParseError as exc:
+            # The failing sub-parser left the cursor at an arbitrary
+            # depth, so it is not trusted: rewind to where this block
+            # started and advance deterministically to the resync point.
+            self.pos = start_pos
+            return [self._unread_block_from(start_pos, exc)]
+
+    def _dispatch_block(self, token: Token) -> list[BlockNode]:
+        """Route one block-start token to its parser."""
+        if isinstance(token, HeadingToken):
+            return [self._parse_heading_block(token)]
+        if isinstance(token, LineToken):
+            # The only construct that can split under recovery. The
+            # unknown-block check runs inside it, so a ``//`` comment
+            # still fails the whole block rather than one line.
+            return self._parse_paragraph_run()
+        return [self._parse_non_heading_block(token)]
+
+    # -- recovery ------------------------------------------------------------
+
+    def _unread_block_from(
+        self,
+        start_pos: int,
+        exc: ParseError,
+    ) -> UnreadBlock:
+        """Quarantine the failed block's source and advance past it.
+
+        Called with the cursor rewound to ``start_pos`` (the failing
+        block's first token). Scans forward for the resync point, moves
+        the cursor there, and returns the intervening source verbatim.
+
+        **Resync rule:** the first :class:`BlankToken` (consumed — it is
+        whitespace, and consuming it is what guarantees forward progress)
+        or the first :class:`HeadingToken` (**not** consumed — a heading
+        is an unambiguous block start carrying the section structure the
+        renderer and summary both walk, so swallowing one would silently
+        reparent everything below it), whichever comes first; otherwise
+        end of input.
+
+        Fences (``----``, ``|===``, ``====``, ``____``) are deliberately
+        *not* resync points. A fence is ambiguous between opening the next
+        block and closing the one that just failed, so stopping before a
+        closing ``|===`` would hand this loop a delimiter to start a new
+        block from — turning one error into two flags. The cost of the
+        coarser rule is styling, never content: everything swallowed is
+        rendered verbatim by the caller.
+
+        At least one token is always consumed, so the enclosing loop
+        cannot spin.
+        """
+        start_line = _token_line(self.tokens[start_pos])
+        scan = start_pos + 1
+        end_line = len(self.source_lines) + 1
+        while scan < len(self.tokens):
+            token = self.tokens[scan]
+            if isinstance(token, HeadingToken):
+                # Not consumed: the heading opens the next block.
+                end_line = token.line
+                break
+            if isinstance(token, BlankToken):
+                # Consumed, and excluded from the quarantined lines --
+                # it is whitespace, not content the reader lost.
+                end_line = token.line
+                scan += 1
+                break
+            scan += 1
+        self.pos = scan
+        return UnreadBlock(
+            lines=tuple(self.source_lines[start_line - 1:end_line - 1]),
+            kind=exc.kind,
+            scope=UnreadScope.BLOCK,
+            source_line=exc.line,
+        )
 
     # -- block dispatch ------------------------------------------------------
 
@@ -610,8 +789,94 @@ class _Parser:
 
     # -- paragraphs ---------------------------------------------------------
 
+    def _parse_paragraph_run(self) -> list[BlockNode]:
+        """Consume a run of :class:`LineToken`s into one or more blocks.
+
+        In :data:`ParseMode.STRICT` this is exactly
+        :meth:`_parse_paragraph` wrapped in a one-element list, so the
+        strict tree is unchanged.
+
+        In :data:`ParseMode.RECOVERING` the run is split around any line
+        whose inline parse fails: the lines before it become a
+        :class:`Paragraph`, the line itself becomes an
+        :class:`UnreadBlock` scoped :data:`UnreadScope.LINE`, and the
+        lines after it continue in a fresh paragraph. This is why the
+        inline union needs no "unread" member — the offending line is
+        lifted to block level, and the lines around it keep their normal
+        formatting.
+
+        The unknown-block check runs first and is *not* caught here: a
+        ``//`` comment or an unrecognised ``[…]`` directive is a failure
+        of the whole block, so it propagates to :meth:`_parse_one_block`
+        and is flagged :data:`UnreadScope.BLOCK`.
+
+        Per-line splitting does **not** reach admonition or blockquote
+        bodies: :attr:`Admonition.blocks` and :attr:`Blockquote.blocks`
+        are typed ``tuple[Paragraph, ...]``, so an :class:`UnreadBlock`
+        cannot sit inside one. A bad line there fails its container,
+        which is flagged at block level instead — coarser, but every line
+        is still rendered verbatim.
+        """
+        first_token = self.tokens[self.pos]
+        assert isinstance(first_token, LineToken), (
+            "_parse_paragraph_run called without a LineToken at the cursor"
+        )
+        self._reject_unknown_block(first_token)
+        if not self._recovering:
+            return [self._parse_paragraph()]
+
+        line_tokens = self._consume_line_tokens()
+        blocks: list[BlockNode] = []
+        pending: list[LineToken] = []
+
+        def flush() -> None:
+            if pending:
+                blocks.append(
+                    Paragraph(
+                        inlines=_join_source_lines(pending),
+                        source_line=pending[0].line,
+                    )
+                )
+                pending.clear()
+
+        for line_token in line_tokens:
+            content, _ = _split_hard_break_marker(line_token.text)
+            try:
+                parse_inline(content, line_token.line)
+            except ParseError as exc:
+                flush()
+                blocks.append(
+                    UnreadBlock(
+                        lines=(self.source_lines[line_token.line - 1],),
+                        kind=exc.kind,
+                        scope=UnreadScope.LINE,
+                        source_line=line_token.line,
+                    )
+                )
+                continue
+            pending.append(line_token)
+        flush()
+        return blocks
+
+    def _consume_line_tokens(self) -> list[LineToken]:
+        """Consume the adjacent :class:`LineToken` run at the cursor."""
+        line_tokens: list[LineToken] = []
+        while (
+            self.pos < len(self.tokens)
+            and isinstance(self.tokens[self.pos], LineToken)
+        ):
+            line_token = self.tokens[self.pos]
+            assert isinstance(line_token, LineToken)
+            line_tokens.append(line_token)
+            self.pos += 1
+        return line_tokens
+
     def _parse_paragraph(self) -> Paragraph:
         """Consume consecutive :class:`LineToken`s into one paragraph.
+
+        The strict-mode body of :meth:`_parse_paragraph_run`; recovery
+        splitting lives there, so this stays a pure "one run, one
+        paragraph" builder.
 
         Inline content is parsed per-line so that error line numbers in
         :class:`ParseError`\\ s are exact. Lines are joined in the AST by
@@ -626,18 +891,8 @@ class _Parser:
         )
         start_line = first_line_token.line
 
-        line_tokens: list[LineToken] = []
-        while (
-            self.pos < len(self.tokens)
-            and isinstance(self.tokens[self.pos], LineToken)
-        ):
-            line_token = self.tokens[self.pos]
-            assert isinstance(line_token, LineToken)
-            line_tokens.append(line_token)
-            self.pos += 1
-
         return Paragraph(
-            inlines=_join_source_lines(line_tokens),
+            inlines=_join_source_lines(self._consume_line_tokens()),
             source_line=start_line,
         )
 
@@ -1680,6 +1935,20 @@ def _split_hard_break_marker(text: str) -> tuple[str, bool]:
     if text.endswith(_HARD_BREAK_MARKER):
         return text[:-1].rstrip(), True
     return text, False
+
+
+def _token_line(token: Token) -> int:
+    """Return a token's 1-indexed source line.
+
+    Every :data:`Token` member carries ``line``, but the union has no
+    common base class to hang the attribute off, so the read is funnelled
+    through here rather than repeated with a ``getattr`` at each site.
+    """
+    line = getattr(token, "line", None)
+    assert isinstance(line, int), (
+        f"token {type(token).__name__} carries no source line"
+    )
+    return line
 
 
 def _join_source_lines(line_tokens: Iterable[LineToken]) -> tuple[InlineNode, ...]:
