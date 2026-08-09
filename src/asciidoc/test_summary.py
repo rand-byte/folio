@@ -415,5 +415,28 @@ class UrlAndAddressSnippetTests(unittest.TestCase):
         self.assertEqual(summary.snippet, "mailto:ada@example.com")
 
 
+class EscapedSourceSummaryTests(unittest.TestCase):
+    """An escape changes the *characters* a summary is derived from.
+
+    Unlike the URL-boundary rules, which only move the boundary between
+    a link's display text and the text around it, escaping removes a
+    backslash from the flattened text. Cached ``title`` / ``snippet``
+    are therefore a different string for any note that uses one, which
+    is what the v6 re-derive migration exists for.
+    """
+
+    def test_an_escaped_title_drops_the_backslash(self) -> None:
+        summary = derive_summary("= My \\*starred* title\n\nBody.\n")
+        self.assertEqual(summary.title, "My *starred* title")
+
+    def test_an_escaped_snippet_drops_the_backslash(self) -> None:
+        summary = derive_summary("= T\n\nA \\_quoted_ word.\n")
+        self.assertEqual(summary.snippet, "A _quoted_ word.")
+
+    def test_a_backslash_that_escapes_nothing_survives(self) -> None:
+        summary = derive_summary("= T\n\nThe path C:\\temp is fine.\n")
+        self.assertEqual(summary.snippet, "The path C:\\temp is fine.")
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -1835,6 +1835,332 @@ class InlineNestingDepthTests(unittest.TestCase):
             (_bold(_t("bold")),),
         )
 
+    def test_an_escaped_span_at_the_cap_is_accepted(self) -> None:
+        """The trial costs no level of its own."""
+        source = f"\\{_nested_spans(MAX_INLINE_DEPTH)}"
+        self.assertEqual(
+            parse_inline(source, _LINE),
+            (_t(source[1:]),),
+        )
+
+    def test_an_escaped_span_past_the_cap_is_still_rejected(self) -> None:
+        """The cap is a refusal to spend stack, not a claim about prose.
+
+        A backslash cannot rescue it, and swallowing the error would
+        change nothing: the deep nesting is still in the text for the
+        ordinary scan to walk into.
+        """
+        with self.assertRaises(ParseError) as ctx:
+            parse_inline(f"\\{_nested_spans(MAX_INLINE_DEPTH + 1)}", _LINE)
+        self.assertEqual(
+            ctx.exception.kind,
+            ParseErrorKind.INLINE_NESTING_TOO_DEEP,
+        )
+
+
+class EscapeTests(unittest.TestCase):
+    """A backslash suppresses the construct that would have followed it.
+
+    The rule is *the recogniser*: a backslash escapes exactly when
+    running the ordinary recognition at the next position succeeds, and
+    the whole construct's source is then emitted literally.
+    """
+
+    def test_should_escape_bold(self) -> None:
+        self.assertEqual(
+            parse_inline("\\*bold*", _LINE),
+            (_t("*bold*"),),
+        )
+
+    def test_should_escape_italic(self) -> None:
+        self.assertEqual(
+            parse_inline("\\_it_", _LINE),
+            (_t("_it_"),),
+        )
+
+    def test_should_escape_monospace(self) -> None:
+        self.assertEqual(
+            parse_inline("\\`code`", _LINE),
+            (_t("`code`"),),
+        )
+
+    def test_should_escape_a_role_span(self) -> None:
+        self.assertEqual(
+            parse_inline("\\[.underline]#x#", _LINE),
+            (_t("[.underline]#x#"),),
+        )
+
+    def test_should_emit_the_whole_construct_not_just_the_marker(
+        self,
+    ) -> None:
+        """The span's extent is literal, so nothing inside re-forms.
+
+        Emitting only the opening marker would leave ``*b*`` to be
+        recognised one position later, splitting the line into a literal
+        head, a bold span and a literal tail.
+        """
+        self.assertEqual(
+            parse_inline("\\*a *b* c*", _LINE),
+            (_t("*a *b* c*"),),
+        )
+
+    def test_escaped_text_merges_into_one_text_node(self) -> None:
+        self.assertEqual(
+            parse_inline("a\\*b* c", _LINE),
+            (_t("a*b* c"),),
+        )
+
+    def test_should_escape_a_bare_url(self) -> None:
+        self.assertEqual(
+            parse_inline("\\https://example.com[l]", _LINE),
+            (_t("https://example.com[l]"),),
+        )
+
+    def test_should_escape_a_bare_address(self) -> None:
+        self.assertEqual(
+            parse_inline("\\ada@example.com", _LINE),
+            (_t("ada@example.com"),),
+        )
+
+    def test_an_escaped_url_does_not_disarm_a_later_one(self) -> None:
+        self.assertEqual(
+            parse_inline("see \\https://a.com and https://b.com", _LINE),
+            (
+                _t("see https://a.com and "),
+                _link(
+                    "https://b.com",
+                    LinkScheme.HTTPS,
+                    _t("https://b.com"),
+                ),
+            ),
+        )
+
+    def test_should_escape_a_link_macro_without_raising(self) -> None:
+        """The regression this feature exists for.
+
+        ``link:https://x`` with no display text is a committed macro
+        with a malformed remainder, so it raises today. Escaped, the
+        author has said it is prose — the error is caught inside the
+        trial and the macro's lexical extent is emitted literally.
+        """
+        self.assertEqual(
+            parse_inline("\\link:https://example.com", _LINE),
+            (_t("link:https://example.com"),),
+        )
+
+    def test_should_escape_a_malformed_link_macro_without_raising(
+        self,
+    ) -> None:
+        self.assertEqual(
+            parse_inline("\\link:nonsense[t]", _LINE),
+            (_t("link:nonsense[t]"),),
+        )
+
+    def test_should_escape_inside_a_span_body(self) -> None:
+        self.assertEqual(
+            parse_inline("*a \\_b_ c*", _LINE),
+            (_bold(_t("a _b_ c")),),
+        )
+
+    def test_should_escape_inside_a_link_display_text(self) -> None:
+        self.assertEqual(
+            parse_inline("https://example.com[\\*t*]", _LINE),
+            (_link("https://example.com", LinkScheme.HTTPS, _t("*t*")),),
+        )
+
+    def test_should_emphasise_a_body_containing_literal_markers(
+        self,
+    ) -> None:
+        """Escaping inside a doubled pair is how this is written."""
+        self.assertEqual(
+            parse_inline("**\\*b***", _LINE),
+            (_bold(_t("*b*")),),
+        )
+
+    def test_an_escaped_region_is_emitted_verbatim(self) -> None:
+        """A backslash inside an escaped region is one of the characters.
+
+        Escape processing is suspended for the duration of a trial, so
+        the inner marker cannot consume the closer the outer span needs.
+        """
+        self.assertEqual(
+            parse_inline("\\*a\\*b*", _LINE),
+            (_t("*a\\*b*"),),
+        )
+
+
+class EscapeIsDecidedByRecognitionTests(unittest.TestCase):
+    """The backslash survives when nothing would have been recognised.
+
+    Each pair here differs only in whether the construct after the
+    backslash would have been a construct at all — which is the whole
+    rule, and the reason there is no separate list of escapable
+    characters.
+    """
+
+    def test_keeps_the_backslash_with_no_valid_closer(self) -> None:
+        self.assertEqual(
+            parse_inline("\\*bold", _LINE),
+            (_t("\\*bold"),),
+        )
+
+    def test_keeps_the_backslash_in_a_windows_path(self) -> None:
+        self.assertEqual(
+            parse_inline("C:\\path\\to", _LINE),
+            (_t("C:\\path\\to"),),
+        )
+
+    def test_keeps_the_backslash_when_the_closer_is_followed_by_a_word(
+        self,
+    ) -> None:
+        self.assertEqual(
+            parse_inline("a\\_b_c", _LINE),
+            (_t("a\\_b_c"),),
+        )
+
+    def test_consumes_the_backslash_when_the_closer_is_valid(self) -> None:
+        """The pair to the test above: only the closer differs."""
+        self.assertEqual(
+            parse_inline("a\\_b_", _LINE),
+            (_t("a_b_"),),
+        )
+
+    def test_the_backslash_is_the_preceding_character(self) -> None:
+        """``word_word_`` is prose; ``word\\_word_`` escapes emphasis.
+
+        The marker can only open because the backslash sits in front of
+        it, and the constrained opener test counts that as a word
+        boundary.
+        """
+        self.assertEqual(
+            parse_inline("word\\_word_", _LINE),
+            (_t("word_word_"),),
+        )
+
+    def test_keeps_the_backslash_before_a_space(self) -> None:
+        self.assertEqual(
+            parse_inline("x \\* y", _LINE),
+            (_t("x \\* y"),),
+        )
+
+    def test_keeps_a_trailing_lone_backslash(self) -> None:
+        self.assertEqual(
+            parse_inline("ends with\\", _LINE),
+            (_t("ends with\\"),),
+        )
+
+    def test_an_escape_does_not_protect_a_closer(self) -> None:
+        """The terminator test runs before the escape branch."""
+        self.assertEqual(
+            parse_inline("*bold \\* still*", _LINE),
+            (_bold(_t("bold \\")), _t(" still*")),
+        )
+
+    def test_no_escape_processing_inside_a_monospace_body(self) -> None:
+        self.assertEqual(
+            parse_inline("`a\\*b`", _LINE),
+            (_mono("a\\*b"),),
+        )
+
+
+class DoubledMarkerEscapeTests(unittest.TestCase):
+    """A two-character marker takes one backslash or two.
+
+    The language documents ``\\\\__func__`` for a doubled marker, so that
+    spelling must not be the one that leaves a stray backslash on
+    screen; a single backslash also works, because an escape suppresses
+    the construct rather than half of it.
+    """
+
+    def test_one_backslash_escapes_a_doubled_marker(self) -> None:
+        self.assertEqual(
+            parse_inline("\\**b**", _LINE),
+            (_t("**b**"),),
+        )
+
+    def test_two_backslashes_escape_a_doubled_marker(self) -> None:
+        self.assertEqual(
+            parse_inline("\\\\__func__", _LINE),
+            (_t("__func__"),),
+        )
+
+    def test_two_backslashes_before_a_constrained_marker_keep_one(
+        self,
+    ) -> None:
+        """The absorption needs a doubled marker; this is the boundary."""
+        self.assertEqual(
+            parse_inline("\\\\*bold*", _LINE),
+            (_t("\\*bold*"),),
+        )
+
+    def test_a_lone_pair_of_backslashes_is_two_characters(self) -> None:
+        """There is no backslash-escapes-backslash rule."""
+        self.assertEqual(
+            parse_inline("\\\\", _LINE),
+            (_t("\\\\"),),
+        )
+
+
+class EscapeDivergesFromTheReferenceTests(unittest.TestCase):
+    """Four escape differences from Asciidoctor that are decisions.
+
+    Recorded as tests because the temptation is to "fix" them after
+    comparing folio to the reference. The full reasoning is in the
+    module docstring of ``asciidoc/inline_parser.py``; each test names
+    the reference's answer and why folio's differs.
+    """
+
+    def test_escaping_the_attachment_macro_consumes_the_backslash(
+        self,
+    ) -> None:
+        """Reference: keeps the backslash — it has no such macro.
+
+        folio implements ``attachment:``, so folio must let it be
+        escaped: an extension that is active must also be escapable.
+        """
+        self.assertEqual(
+            parse_inline("\\attachment:notes.pdf[l]", _LINE),
+            (_t("attachment:notes.pdf[l]"),),
+        )
+
+    def test_escaping_a_labelled_link_macro_produces_no_link(self) -> None:
+        """Reference: keeps the backslash *and* still renders the link.
+
+        That is an artefact of its substitution order — the bare-URL
+        pass consumes the URL before the macro pass sees the escape —
+        against its own documented rule that every inline macro can be
+        escaped with a leading backslash. folio follows the rule.
+        """
+        self.assertEqual(
+            parse_inline("\\link:https://example.com[t]", _LINE),
+            (_t("link:https://example.com[t]"),),
+        )
+
+    def test_escaping_a_doubled_marker_suppresses_it_entirely(self) -> None:
+        """Reference: half-escapes into ``*``, bold ``b``, ``*``.
+
+        And it does so differently at line start than mid-word. An
+        escape here suppresses the construct; it never half-fires.
+        """
+        self.assertEqual(
+            parse_inline("a\\**b**c", _LINE),
+            (_t("a**b**c"),),
+        )
+
+    def test_escaping_a_non_member_construct_keeps_the_backslash(
+        self,
+    ) -> None:
+        """Reference: drops it, because ``#…#`` is a highlight there.
+
+        A bare ``#…#`` is not in this subset, so the backslash prevented
+        nothing and stays — the mirror image of the ``attachment:`` row
+        above, and the same rule producing both.
+        """
+        self.assertEqual(
+            parse_inline("\\#x#", _LINE),
+            (_t("\\#x#"),),
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

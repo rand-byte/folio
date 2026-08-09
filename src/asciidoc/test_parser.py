@@ -2618,5 +2618,55 @@ class RecoveringParseTitleLineTests(unittest.TestCase):
             parse("= My link:ftp://x.test[y] title\n\nBody.\n")
 
 
+class EscapedBlockMarkerTests(unittest.TestCase):
+    """A backslash before a block marker keeps both the backslash and
+    the paragraph.
+
+    Escaping is an *inline* rule and the block markers are out of its
+    reach by construction: a marker followed by a space cannot open a
+    span, so nothing is recognised and the backslash is ordinary text.
+    The lexer already declines to read these lines as block constructs,
+    which is the half that matters to the reader, and the reference
+    behaves the same way — it also leaves the backslash visible. Pinned
+    here because "strip the backslash so it renders as ``* item``" is a
+    plausible-sounding change that would break agreement with the
+    reference.
+    """
+
+    def _paragraph_text(self, source: str) -> str:
+        document = parse(source)
+        self.assertEqual(len(document.blocks), 1)
+        block = document.blocks[0]
+        self.assertIsInstance(block, Paragraph)
+        assert isinstance(block, Paragraph)
+        self.assertEqual(len(block.inlines), 1)
+        inline = block.inlines[0]
+        self.assertIsInstance(inline, Text)
+        assert isinstance(inline, Text)
+        return inline.content
+
+    def test_an_escaped_list_marker_stays_a_paragraph(self) -> None:
+        self.assertEqual(self._paragraph_text("\\* item\n"), "\\* item")
+
+    def test_an_escaped_heading_marker_stays_a_paragraph(self) -> None:
+        self.assertEqual(self._paragraph_text("\\== Section\n"), "\\== Section")
+
+    def test_an_escaped_table_fence_stays_a_paragraph(self) -> None:
+        self.assertEqual(self._paragraph_text("\\|===\n"), "\\|===")
+
+    def test_an_escaped_admonition_stays_a_paragraph(self) -> None:
+        self.assertEqual(self._paragraph_text("\\NOTE: text\n"), "\\NOTE: text")
+
+    def test_an_escaped_inline_marker_inside_a_list_item(self) -> None:
+        document = parse("* \\*item*\n")
+        list_block = document.blocks[0]
+        self.assertIsInstance(list_block, UnorderedList)
+        assert isinstance(list_block, UnorderedList)
+        self.assertEqual(
+            list_block.items[0].inlines,
+            (Text(content="*item*", source_line=1),),
+        )
+
+
 if __name__ == "__main__":
     unittest.main()

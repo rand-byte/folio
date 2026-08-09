@@ -358,6 +358,36 @@ def _apply_v5(connection: sqlite3.Connection, now: datetime) -> None:
 
 
 # ---------------------------------------------------------------------------
+# v6 migration body — re-derive cached columns after escaping was added
+# ---------------------------------------------------------------------------
+
+
+def _apply_v6(connection: sqlite3.Connection, now: datetime) -> None:
+    """Re-derive ``title``, ``snippet`` and ``note_tags`` for every note.
+
+    The same re-derive as v5, for the same structural reason and a
+    different rule change: the inline parser learned backslash escaping,
+    so a note containing one now flattens to a *different string*. Text
+    that used to carry a visible backslash loses it, markup that used to
+    fire beside one stops firing, and a line that used to be quarantined
+    as unreadable (``\\link:…`` with no display text) now reads as prose.
+    Any such note has a stale cache: the note-list row would keep showing
+    a title or snippet the note no longer renders, and search would keep
+    matching on it.
+
+    Delegating to :func:`_apply_v5` rather than restating its body is
+    deliberate. A shipped migration is frozen by the append-only rule, so
+    its behaviour cannot drift out from under this call, and re-deriving
+    every note is exactly what v6 needs to do — copying fifteen lines to
+    say so would leave two places to read and one of them out of date.
+
+    ``now`` is forwarded but unused downstream: re-deriving a cache is
+    not a user edit and must not disturb ``updated_at``.
+    """
+    _apply_v5(connection, now)
+
+
+# ---------------------------------------------------------------------------
 # Migration registry — append-only
 # ---------------------------------------------------------------------------
 
@@ -367,6 +397,7 @@ ALL_MIGRATIONS: tuple[Migration, ...] = (
     Migration(version=3, apply=_apply_v3),
     Migration(version=4, apply=_apply_v4),
     Migration(version=5, apply=_apply_v5),
+    Migration(version=6, apply=_apply_v6),
 )
 
 

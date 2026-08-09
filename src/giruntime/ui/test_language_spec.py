@@ -826,5 +826,63 @@ class AttachmentMacroPatternTests(unittest.TestCase):
         self.assertEqual(_first_end("attachment-macro", "The notes]"), "]")
 
 
+class EscapePatternTests(unittest.TestCase):
+    """The escape token: a backslash plus the opener it suppresses.
+
+    The context colours the token, not the whole escaped construct —
+    once the opener is claimed here, the inline contexts cannot match
+    the rest of the run, which is the behaviour that matters.
+    """
+
+    def test_matches_a_backslash_before_a_constrained_marker(self) -> None:
+        self.assertEqual(_first_match("escape", "\\*bold*"), "\\*")
+
+    def test_matches_a_backslash_before_a_doubled_marker(self) -> None:
+        # The doubled alternatives are listed first, so the token is the
+        # whole marker rather than one of its two characters.
+        self.assertEqual(_first_match("escape", "\\**bold**"), "\\**")
+
+    def test_matches_two_backslashes_before_a_doubled_marker(self) -> None:
+        # The language's own spelling for a two-character marker; the
+        # parser absorbs both, so both are part of the token.
+        self.assertEqual(_first_match("escape", "\\\\__func__"), "\\\\__")
+
+    def test_matches_a_backslash_before_a_role_span(self) -> None:
+        self.assertEqual(
+            _first_match("escape", "\\[.underline]#x#"),
+            "\\[.underline]#",
+        )
+
+    def test_matches_a_backslash_before_a_url(self) -> None:
+        self.assertEqual(
+            _first_match("escape", "see \\https://example.com"),
+            "\\https://",
+        )
+
+    def test_matches_a_backslash_before_a_macro_prefix(self) -> None:
+        self.assertEqual(
+            _first_match("escape", "\\attachment:notes.pdf[l]"),
+            "\\attachment:",
+        )
+
+    def test_does_not_match_a_backslash_before_ordinary_text(self) -> None:
+        self.assertIsNone(_first_match("escape", "C:\\temp and D:\\data"))
+
+    def test_does_not_match_a_lone_trailing_backslash(self) -> None:
+        self.assertIsNone(_first_match("escape", "ends with\\"))
+
+    def test_known_divergence_matches_an_opener_that_never_closes(
+        self,
+    ) -> None:
+        """The parser keeps this backslash; the grammar cannot tell.
+
+        Deciding it needs the closer search that makes ``\\*bold`` prose,
+        and a context regex cannot ask whether a marker has a partner
+        later on the line. Pinned as current behaviour, not endorsed —
+        the same shape as the bare-url doubled-marker divergence.
+        """
+        self.assertEqual(_first_match("escape", "\\*bold"), "\\*")
+
+
 if __name__ == "__main__":
     unittest.main()

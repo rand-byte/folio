@@ -62,6 +62,7 @@
     <style id="single-admonition"    name="Single-Line Admonition" map-to="def:note"/>
     <style id="quote-directive"      name="Quote Directive"      map-to="def:preprocessor"/>
     <style id="quote-fence"          name="Quote Fence"          map-to="def:preprocessor"/>
+    <style id="escape"               name="Escape"               map-to="def:special-char"/>
   </styles>
 
   <definitions>
@@ -413,10 +414,37 @@
       </include>
     </context>
 
+    <!--
+      Escape — a backslash suppressing the construct that follows it.
+      Dispatched before every inline context so the marker it covers
+      cannot also open a span: without it, the '*' in '\*x*' would be
+      claimed by inline-bold and the line would highlight as bold
+      despite rendering literally.
+
+      The match is the backslash (optionally two, which is the
+      language's spelling for a doubled marker) plus the opener it
+      escapes — not the whole escaped construct. Colouring the token is
+      what the reader needs, and the rest of the run is left to the
+      ordinary contexts, which cannot claim it once the opener is gone.
+
+      Known divergence: the parser only treats a backslash as an escape
+      when the construct after it would really have been recognised,
+      which for a span means finding a valid closer. A context regex
+      cannot run that search, so this pattern also styles '\*bold',
+      where the parser keeps the backslash as prose. Pinned by
+      EscapePatternTests rather than endorsed — the same honesty as the
+      bare-url note above.
+    -->
+    <context id="escape" style-ref="escape">
+      <match>\\\\?(?:\*\*|__|``|\*|_|`|\[\.(?:line-through|underline)\]#|https?://|mailto:|link:|attachment:)</match>
+    </context>
+
     <!-- Top-level dispatch: order matters for overlapping patterns.
          Block-level constructs are tried first so a line beginning
          with ``*`` is recognised as a list item before the inline
-         bold context can match the asterisk. The link contexts
+         bold context can match the asterisk. The escape context comes
+         before every inline construct, so an escaped marker is never
+         also highlighted as the thing it escapes. The link contexts
          appear before bare-url because url-with-text and the link:
          macro both contain a bare URL at their start — without
          the precedence, the bare-url match would consume the
@@ -443,6 +471,7 @@
         <context ref="unordered-list-bullet"/>
         <context ref="ordered-list-bullet"/>
         <context ref="table-cell-separator"/>
+        <context ref="escape"/>
         <context ref="link-macro"/>
         <context ref="attachment-macro"/>
         <context ref="url-with-text"/>

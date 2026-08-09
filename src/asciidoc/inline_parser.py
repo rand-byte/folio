@@ -126,10 +126,55 @@ Principles & invariants
   are in the block parser. Only *enclosing* spans count; siblings on
   one line do not accumulate.
 * Mid-word emphasis is expressed with the doubled marker, which is
-  AsciiDoc's own mechanism; there is still no backslash escape (see
-  ``plan-inline-escaping.md``). A URL that must contain whitespace, a
+  AsciiDoc's own mechanism. A URL that must contain whitespace, a
   bracket, or a paired doubled marker is written with the
   ``link:++…++`` passthrough, which is what that construct is for.
+* **A backslash escapes the construct that would have followed it.**
+  The rule is one sentence: a ``\\`` is an escape if and only if the
+  ordinary recogniser, run at the very next position, recognises a
+  construct; when it fires, the backslash is dropped and the
+  construct's *entire source text* is emitted as literal text.
+  Otherwise the backslash is an ordinary character. Three consequences
+  are worth stating because each is easy to get wrong:
+
+  - **Recognition includes the closer**, because it *is* the
+    recogniser (:meth:`_Scanner._recognise_escaped_construct`). So
+    ``\\*bold*`` is literal while ``\\*bold`` keeps its backslash —
+    nothing was prevented there. It follows that whatever the parser
+    learns to recognise becomes escapable at the same moment, with no
+    second list to update.
+  - **The backslash counts as the preceding character** for the
+    boundary tests, which is why ``word\\_word_`` escapes and
+    ``a\\_b_c`` does not.
+  - **An escape does not protect a closer**, since the terminator test
+    runs first: ``*bold \\* still*`` closes at the escaped marker, as
+    the reference does. Nor is there escape processing inside a
+    monospace body, a passthrough body, or a recognition trial — all
+    three are verbatim.
+
+  A doubled marker may be escaped with one backslash or two: the
+  language documents ``\\\\__func__`` for a two-character marker, so a
+  redundant second backslash is absorbed rather than left on screen
+  (:meth:`_Scanner._escaped_construct_start`). To emphasise text that
+  itself contains a marker, escape inside the pair: ``**\\*b***``.
+* **Four escape divergences from the reference are deliberate.** They
+  are decisions, not defects, and "fixing" any of them would be a
+  regression:
+
+  - ``\\attachment:f[l]`` is literal here and keeps its backslash in
+    the reference, which has no such macro. An extension that is
+    active must also be escapable.
+  - ``\\link:https://x[t]`` is literal here; the reference leaves the
+    backslash *and* links, because its bare-URL pass consumes the URL
+    before its macro pass sees the escape — an artefact its own FAQ
+    describes. folio follows the documented rule, which says every
+    inline macro can be escaped with a leading backslash.
+  - ``\\**b**`` is literal here; the reference half-escapes it into
+    ``*``, bold ``b``, ``*``, differently at line start than mid-word.
+    An escape suppresses the construct entirely; it never half-fires.
+  - ``\\#x#`` keeps its backslash here and loses it in the reference,
+    because a bare ``#…#`` highlight is not in this subset and so
+    there is nothing to prevent.
 * The scanner reports errors with ``column == 0``. Column tracking
   inside inline content adds complexity that the editor's gutter
   doesn't currently consume — the line number is enough to position
@@ -188,6 +233,21 @@ _MONOSPACE_MARKER: str = "`"
 _BOLD_UNCONSTRAINED_MARKER: str = "**"
 _ITALIC_UNCONSTRAINED_MARKER: str = "__"
 _MONOSPACE_UNCONSTRAINED_MARKER: str = "``"
+
+# The doubled markers as a set. Two rules read it — the URL scan (a
+# doubled marker that pairs later ends a bare URL) and the escape rule
+# (a two-character marker may carry a redundant second backslash) — so
+# it is named once here rather than restated at each.
+_UNCONSTRAINED_MARKERS: tuple[str, ...] = (
+    _BOLD_UNCONSTRAINED_MARKER,
+    _ITALIC_UNCONSTRAINED_MARKER,
+    _MONOSPACE_UNCONSTRAINED_MARKER,
+)
+
+# The escape character. A backslash suppresses the construct that would
+# otherwise have been recognised immediately after it; see
+# :meth:`_Scanner._try_consume_escape` and the module docstring.
+_ESCAPE_MARKER: str = "\\"
 
 # Characters that block a *constrained* opener even though they are not
 # word characters, mirroring the reference implementation's ``[^\w;:]``
@@ -252,11 +312,7 @@ _URL_STOP_CHARACTERS: frozenset[str] = frozenset(
 # the target; a lone ``__`` with no twin is an ordinary URL character.
 # ``https://x/a**b**c`` therefore splits while ``https://x/a__b`` does
 # not.
-_URL_STOP_SEQUENCES: tuple[str, ...] = (
-    _BOLD_UNCONSTRAINED_MARKER,
-    _ITALIC_UNCONSTRAINED_MARKER,
-    _MONOSPACE_UNCONSTRAINED_MARKER,
-)
+_URL_STOP_SEQUENCES: tuple[str, ...] = _UNCONSTRAINED_MARKERS
 
 # Sentence punctuation peeled off the end of a bare URL and re-emitted
 # as text, repeatedly, until the target's last character is not one of
@@ -494,7 +550,9 @@ def parse_inline(text: str, line: int) -> tuple[InlineNode, ...]:
         :data:`BAD_ATTACHMENT_MACRO`, :data:`UNTERMINATED_PASSTHROUGH`,
         or :data:`INLINE_NESTING_TOO_DEEP` — all of them refusals of a
         construct the source reached for. An unpaired formatting marker
-        is **not** among them: it is returned as :class:`Text`.
+        is **not** among them: it is returned as :class:`Text`, and
+        neither is a construct the source *escaped*, which is prose by
+        the author's own instruction.
     """
     scanner = _Scanner(text, line)
     return scanner.parse_top_level()
@@ -537,6 +595,7 @@ class _Scanner:
     depth: int
     closer_index: dict[str, int]
     email_index: dict[int, str] | None
+    in_escape_trial: bool
 
     def __init__(self, text: str, line: int) -> None:
         self.text = text
@@ -545,6 +604,7 @@ class _Scanner:
         self.depth = 0
         self.closer_index = {}
         self.email_index = None
+        self.in_escape_trial = False
 
     # ------------------------------------------------------------------
     # Nesting guard
@@ -575,6 +635,24 @@ class _Scanner:
             yield
         finally:
             self.depth -= 1
+
+    @contextmanager
+    def _escape_trial(self) -> Iterator[None]:
+        """Run a recognition trial with escape processing suspended.
+
+        A trial answers "would a construct have been recognised here?"
+        and its text is then emitted **verbatim**, so a further backslash
+        inside the region it covers is one of the characters being made
+        literal rather than an escape of its own. Suspending the branch
+        for the duration is what keeps ``\\*a\\*b*`` whole: without it the
+        inner escape consumes the marker the outer span needs to close,
+        and the outer escape fails.
+        """
+        self.in_escape_trial = True
+        try:
+            yield
+        finally:
+            self.in_escape_trial = False
 
     # ------------------------------------------------------------------
     # Top-level entry
@@ -631,66 +709,19 @@ class _Scanner:
                 self.pos += len(close.marker)
                 continue
 
-            # Monospace: matched-pair span with verbatim body. Consumed
-            # before the recursive-span dispatch table because a backtick
-            # would otherwise fall through to plain text.
-            monospace = self._try_consume_monospace()
-            if monospace is not None:
-                flush()
-                nodes.append(monospace)
-                continue
-
-            # Bare URL (recognised at a word boundary) — covers both
-            # the ``https://x`` shape and the ``https://x[t]`` shape.
-            url_link = self._try_consume_bare_url(
-                forbid_link=forbid_link,
-                active_close=close,
+            escaped = self._try_consume_escape(
+                close=close, forbid_link=forbid_link
             )
-            if url_link is not None:
-                flush()
-                nodes.append(url_link)
+            if escaped is not None:
+                text_buffer.append(escaped)
                 continue
 
-            # ``link:`` macro — also boundary-required. Distinct from
-            # bare URL because the URL part may carry any scheme
-            # (validated downstream).
-            macro_link = self._try_consume_link_macro(
-                forbid_link=forbid_link,
-                active_close=close,
+            construct = self._try_consume_construct(
+                close=close, forbid_link=forbid_link
             )
-            if macro_link is not None:
+            if construct is not None:
                 flush()
-                nodes.append(macro_link)
-                continue
-
-            # Bare email address — autolinked to a ``mailto:`` target.
-            # Attempted after the URL and macro forms so that an address
-            # inside a URL path or after a ``mailto:`` prefix is already
-            # consumed (or already suppressed) by the time the index is
-            # consulted.
-            email_link = self._try_consume_email(forbid_link=forbid_link)
-            if email_link is not None:
-                flush()
-                nodes.append(email_link)
-                continue
-
-            # ``attachment:FILE[label]`` — the save-link sibling of
-            # ``link:``. Consumed before the recursive-span dispatch so
-            # its bracketed label is never mistaken for a span opener,
-            # and gated by the same ``forbid_link`` flag: activatable
-            # things do not nest.
-            attachment_link = self._try_consume_attachment_macro(
-                forbid_link=forbid_link,
-            )
-            if attachment_link is not None:
-                flush()
-                nodes.append(attachment_link)
-                continue
-
-            span = self._try_consume_span()
-            if span is not None:
-                flush()
-                nodes.append(span)
+                nodes.append(construct)
                 continue
 
             text_buffer.append(self.text[self.pos])
@@ -698,6 +729,198 @@ class _Scanner:
 
         flush()
         return _ScanResult(nodes=tuple(nodes), closed=close is None)
+
+    # ------------------------------------------------------------------
+    # Escaping
+    # ------------------------------------------------------------------
+
+    def _try_consume_escape(
+        self,
+        *,
+        close: _CloseMarker | None,
+        forbid_link: bool,
+    ) -> str | None:
+        """Try to consume an escape at the cursor, returning its text.
+
+        Returns the literal text to buffer, or :data:`None` with the
+        cursor left on the backslash when nothing would have been
+        recognised after it — the backslash is then ordinary prose, which
+        is why ``C:\\path`` and ``\\*bold`` keep theirs.
+
+        The returned text is the escaped construct's **source slice**, so
+        the whole construct is made literal rather than only its opening
+        marker. That is what keeps ``\\*a *b* c*`` entirely literal
+        instead of re-forming ``*b*`` into a span one position later.
+        """
+        if self.in_escape_trial:
+            return None
+        if not self._matches_at_pos(_ESCAPE_MARKER):
+            return None
+        start = self.pos
+        body = self._escaped_construct_start(start)
+        self.pos = body
+        with self._escape_trial():
+            recognised = self._recognise_escaped_construct(
+                body, close=close, forbid_link=forbid_link
+            )
+        if not recognised:
+            self.pos = start
+            return None
+        return self.text[body:self.pos]
+
+    def _escaped_construct_start(self, start: int) -> int:
+        """Index of the construct the backslash at ``start`` escapes.
+
+        Normally one past the backslash. A *doubled* marker may carry a
+        redundant second backslash — ``\\\\__func__`` is the spelling the
+        AsciiDoc language documents for a two-character marker — and both
+        backslashes are then absorbed, so the documented form does not
+        leave one behind. The absorption is deliberately narrow: it needs
+        a doubled marker immediately after, so ``\\\\``, ``\\\\*bold*``
+        and ``\\\\_it_`` all keep their first backslash.
+        """
+        body = start + len(_ESCAPE_MARKER)
+        if not self.text.startswith(_ESCAPE_MARKER, body):
+            return body
+        doubled = body + len(_ESCAPE_MARKER)
+        if any(
+            self.text.startswith(marker, doubled)
+            for marker in _UNCONSTRAINED_MARKERS
+        ):
+            return doubled
+        return body
+
+    def _recognise_escaped_construct(
+        self,
+        body: int,
+        *,
+        close: _CloseMarker | None,
+        forbid_link: bool,
+    ) -> bool:
+        """Would a construct have been recognised at the cursor?
+
+        Answered by *running* the ordinary recogniser, so "what can be
+        escaped" is by construction the same set as "what is recognised"
+        — a new construct becomes escapable without touching this code.
+        The backslash is left in place as the preceding character, which
+        is the whole reason ``word\\_word_`` escapes (a backslash is not a
+        word character, so the constrained opener test passes) while
+        ``x\\_y_z`` does not (its closer is followed by a word
+        character).
+
+        On a hit the cursor is left one past the construct; on a miss it
+        is wherever the failed attempt left it and the caller restores
+        it.
+
+        The two construct families need different failure policies, which
+        is why they are stepped through separately here rather than via
+        :meth:`_try_consume_construct`:
+
+        * a **prefix** construct commits on its prefix and raises on a
+          malformed remainder. The author escaped it, so it is prose, not
+          a failure: the error is caught and the literal run is the
+          lexical one, out to the next URL terminator. This is what turns
+          ``\\link:https://x`` from a hard error into text.
+        * a **span** trial raises only the nesting cap, and that
+          propagates. The cap is a refusal to spend stack, not a claim
+          about the document, and swallowing it would change nothing
+          anyway: the deep nesting is still in the text for the ordinary
+          scan to walk into.
+        """
+        if self._try_consume_monospace() is not None:
+            return True
+        try:
+            prefix_construct = self._try_consume_prefix_construct(
+                close=close, forbid_link=forbid_link
+            )
+        except ParseError:
+            self.pos = self._url_extent(body, close)
+            return True
+        if prefix_construct is not None:
+            return True
+        return self._try_consume_span() is not None
+
+    def _try_consume_construct(
+        self,
+        *,
+        close: _CloseMarker | None,
+        forbid_link: bool,
+    ) -> InlineNode | None:
+        """Try to consume any inline construct at the cursor.
+
+        The single definition of *what the grammar recognises and in what
+        order*. Returns :data:`None`, cursor untouched, when the character
+        at the cursor starts no construct — the caller then treats it as
+        prose.
+
+        The three steps differ in how their extent is known, which is why
+        they are named separately rather than inlined here: monospace and
+        the prefix constructs have a **lexical** extent (scanned, never
+        recursive), while a span's extent is only known once its body has
+        been parsed and a valid closer found.
+        """
+        # Monospace: matched-pair span with verbatim body. Consumed
+        # before the recursive-span dispatch table because a backtick
+        # would otherwise fall through to plain text.
+        monospace = self._try_consume_monospace()
+        if monospace is not None:
+            return monospace
+        prefix_construct = self._try_consume_prefix_construct(
+            close=close, forbid_link=forbid_link
+        )
+        if prefix_construct is not None:
+            return prefix_construct
+        return self._try_consume_span()
+
+    def _try_consume_prefix_construct(
+        self,
+        *,
+        close: _CloseMarker | None,
+        forbid_link: bool,
+    ) -> Link | AttachmentLink | None:
+        """Try to consume a construct introduced by a literal prefix.
+
+        URLs, addresses and the two macros, in the order the grammar
+        requires. Grouped because they share a property the spans do not:
+        each commits on a prefix at a word boundary, so each can raise
+        rather than return :data:`None` — which is what makes them the
+        family the escape trial must be prepared to catch (see
+        :meth:`_try_consume_escape`).
+        """
+        # Bare URL (recognised at a word boundary) — covers both
+        # the ``https://x`` shape and the ``https://x[t]`` shape.
+        url_link = self._try_consume_bare_url(
+            forbid_link=forbid_link,
+            active_close=close,
+        )
+        if url_link is not None:
+            return url_link
+
+        # ``link:`` macro — also boundary-required. Distinct from
+        # bare URL because the URL part may carry any scheme
+        # (validated downstream).
+        macro_link = self._try_consume_link_macro(
+            forbid_link=forbid_link,
+            active_close=close,
+        )
+        if macro_link is not None:
+            return macro_link
+
+        # Bare email address — autolinked to a ``mailto:`` target.
+        # Attempted after the URL and macro forms so that an address
+        # inside a URL path or after a ``mailto:`` prefix is already
+        # consumed (or already suppressed) by the time the index is
+        # consulted.
+        email_link = self._try_consume_email(forbid_link=forbid_link)
+        if email_link is not None:
+            return email_link
+
+        # ``attachment:FILE[label]`` — the save-link sibling of
+        # ``link:``. Consumed before the recursive-span dispatch so
+        # its bracketed label is never mistaken for a span opener,
+        # and gated by the same ``forbid_link`` flag: activatable
+        # things do not nest.
+        return self._try_consume_attachment_macro(forbid_link=forbid_link)
 
     def _try_consume_span(self) -> InlineNode | None:
         """Try to consume a dispatch-table span at the cursor.

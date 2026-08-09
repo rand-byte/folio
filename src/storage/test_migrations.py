@@ -497,6 +497,99 @@ class V5CacheRederiveTests(unittest.TestCase):
         self.assertEqual(after["modified_at"], before["modified_at"])
 
 
+class V6EscapeRederiveTests(unittest.TestCase):
+    """A v5-shaped database upgraded to v6 has its caches recomputed.
+
+    Escaping removes characters from the flattened text, so a note
+    written before it derives a different title and snippet after: the
+    backslash the old parser kept is gone, and a line the old parser
+    could not read at all now reads as prose.
+    """
+
+    def setUp(self) -> None:
+        self.db = Database.in_memory()
+        self.addCleanup(self.db.close)
+        self.db.connection.execute(
+            "CREATE TABLE IF NOT EXISTS schema_version "
+            "(version INTEGER NOT NULL PRIMARY KEY)"
+        )
+        for migration in (m for m in ALL_MIGRATIONS if m.version <= 5):
+            with self.db.transaction() as connection:
+                migration.apply(connection, _FIXED_NOW)
+                connection.execute(
+                    "INSERT INTO schema_version (version) VALUES (?)",
+                    (migration.version,),
+                )
+
+    def _insert_note(
+        self, *, note_id: str, source: str, title: str, snippet: str,
+    ) -> None:
+        timestamp = _FIXED_NOW.isoformat()
+        self.db.connection.execute(
+            "INSERT INTO notes "
+            "(id, title, source, snippet, created_at, modified_at) "
+            "VALUES (?, ?, ?, ?, ?, ?)",
+            (note_id, title, source, snippet, timestamp, timestamp),
+        )
+
+    def test_v6_recomputes_a_title_holding_an_escape(self) -> None:
+        source = "= Report \\*starred* item\n\nBody text.\n"
+        self._insert_note(
+            note_id="n-escaped",
+            source=source,
+            title="Report \\starred item",
+            snippet="Body text.",
+        )
+
+        apply_pending(self.db, now=_FIXED_NOW)
+
+        row = self.db.connection.execute(
+            "SELECT title FROM notes WHERE id = 'n-escaped'"
+        ).fetchone()
+        self.assertEqual(row["title"], derive_summary(source).title)
+        self.assertEqual(row["title"], "Report *starred* item")
+
+    def test_v6_recomputes_a_snippet_that_used_to_be_unreadable(
+        self,
+    ) -> None:
+        source = "= T\n\nSee \\link:https://example.com for the docs.\n"
+        self._insert_note(
+            note_id="n-unread",
+            source=source,
+            title="T",
+            snippet="",
+        )
+
+        apply_pending(self.db, now=_FIXED_NOW)
+
+        row = self.db.connection.execute(
+            "SELECT snippet FROM notes WHERE id = 'n-unread'"
+        ).fetchone()
+        self.assertEqual(row["snippet"], derive_summary(source).snippet)
+        self.assertEqual(
+            row["snippet"], "See link:https://example.com for the docs."
+        )
+
+    def test_v6_leaves_timestamps_alone(self) -> None:
+        self._insert_note(
+            note_id="n-time",
+            source="= Untouched\n\nA \\_quoted_ word.\n",
+            title="Untouched",
+            snippet="stale",
+        )
+        before = self.db.connection.execute(
+            "SELECT created_at, modified_at FROM notes WHERE id = 'n-time'"
+        ).fetchone()
+
+        apply_pending(self.db, now=_FIXED_NOW)
+
+        after = self.db.connection.execute(
+            "SELECT created_at, modified_at FROM notes WHERE id = 'n-time'"
+        ).fetchone()
+        self.assertEqual(after["created_at"], before["created_at"])
+        self.assertEqual(after["modified_at"], before["modified_at"])
+
+
 # ---------------------------------------------------------------------------
 # Migration registry shape
 # ---------------------------------------------------------------------------

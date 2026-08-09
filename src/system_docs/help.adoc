@@ -139,6 +139,30 @@ pressed against a word character does not open. A marker that never
 finds its partner is simply the text you typed, and the rest of the
 line still renders normally.
 
+=== Escaping
+
+To stop a marker taking effect, put a backslash in front of it. The
+backslash does not appear in the note; the markup it prevented does:
+
+* \*not bold* — type `\*not bold*`
+* \_not italic_ — type `\_not italic_`
+* \`not monospace` — type a backslash before the opening backtick
+* \https://example.com stays plain — type `\https://example.com`
+
+The rule is that a backslash disappears only when it actually prevented
+something. Everywhere else it is an ordinary character you typed, so a
+Windows path such as `C:\folio\notes` needs no special treatment and
+renders exactly as written. Likewise `a\_b_c` keeps its backslash,
+because `a_b_c` was never going to be italic in the first place — there
+was nothing to prevent.
+
+A doubled marker takes one backslash or two, so both `\**not bold**` and
+the `\\**not bold**` form used elsewhere in AsciiDoc do the same thing
+here.
+
+To emphasise text that itself contains a marker, escape inside the pair:
+**\*starred*** — type `**\*starred***`.
+
 === Hard line breaks
 
 A paragraph normally reflows — a plain source newline becomes a space,
