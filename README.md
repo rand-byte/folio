@@ -30,9 +30,10 @@ A few things define it:
   pane between **Source** (the raw markup you edit) and **View** (the rendered
   page you read).
 - **A strict, predictable subset.** Folio understands a carefully chosen slice
-  of AsciiDoc. Well-formed markup renders; a malformed marker shows a clear,
-  specific error in the View instead of silently rendering garbage — so you
-  always know whether what you wrote came out the way you meant.
+  of AsciiDoc, plus two additions of its own for attachments. A marker that
+  does not form a pair is simply the text you typed, and source Folio cannot
+  read is shown as you wrote it and marked where it sits rather than replacing
+  the page — so a stray character never costs you the rest of the note.
 - **Tag-based organisation.** Instead of folders, notes are filed with tags.
   The sidebar lets you filter by one or more tags, plus built-in "All notes"
   and "Untagged" views, and a search box filters the whole library as you
@@ -99,7 +100,9 @@ Be clear-eyed about the limits before you commit your notes to it:
 - **AsciiDoc, and only a subset of it.** Most of the note-taking world speaks
   Markdown. Folio uses AsciiDoc — a fine format, but a smaller ecosystem — and
   it supports only a strict subset, so advanced AsciiDoc features are
-  unavailable. If you want Markdown, Joplin or Obsidian are the natural homes.
+  unavailable. It also adds two attachment macros of its own, so a note using
+  those is not portable to other AsciiDoc tools. If you want Markdown, Joplin
+  or Obsidian are the natural homes.
 - **No sync, no mobile, no web, no encryption.** Folio runs on one Linux desktop
   and stays there. If you need your notes on a phone, synced across machines,
   or encrypted at rest, look at Joplin, Standard Notes, or Notesnook.

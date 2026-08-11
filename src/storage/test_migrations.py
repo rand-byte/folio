@@ -190,15 +190,23 @@ class V1SeedGoldenTests(unittest.TestCase):
     (by length and SHA-256) so such an edit fails loudly instead.
 
     The digest is over the UTF-8 encoding of the seeded ``source`` column
-    — identical to the bytes of ``welcome.adoc`` on disk. If the welcome
-    text is *intentionally* revised, that is a new note for users to
-    receive via a *new* migration, not an edit to v1; this test failing
-    is the reminder.
+    — identical to the bytes of ``welcome.adoc`` on disk.
+
+    The pin is a tripwire against *accidental* drift, not a veto on
+    revising the text: v1's frozen-migration contract governs databases
+    that already exist, and v1 never replays there, so an intentional
+    rewording changes only what a *fresh* database is seeded with. The
+    correct response to this test failing on purpose is to update the
+    two constants below. It is **not** to add a migration that rewrites
+    the note for existing users: that row is theirs the moment the app
+    opens — it may have been edited, and re-inserting it after a delete
+    would break the "It will not come back" promise the note itself
+    makes.
     """
 
-    _EXPECTED_LENGTH: int = 960
+    _EXPECTED_LENGTH: int = 939
     _EXPECTED_SHA256: str = (
-        "26d9fcbb8c098f38e6213a46cb939f4578b281b653554c8fea3992313ff9b5a3"
+        "35d2e2c864214ff4ecacbeb43142f1767f2f3aa66da0f27c0123c001c945ea44"
     )
 
     def setUp(self) -> None:

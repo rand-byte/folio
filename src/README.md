@@ -148,6 +148,7 @@ for the rules; open its `test_*.py` sibling for the behaviour it must keep.
 | Change the `attachment:` save link | `asciidoc/inline_parser.py` (the macro) → `note_render/textbuffer_renderer.py` (`_emit_activatable`) → `link_handler.py` (dispatch) → `note_view.py` `_activate_attachment` (resolve → save dialog → `NoteController.export_attachment`) | `_file_picker.py` (`FileSaveDialogOpener`); `help_window.py` (its demo activator) |
 | Change the `attachments::[]` table | `asciidoc/parser.py` `_parse_attachment_table` (the `cols` attrlist) + `enums.AttachmentTableColumn` → `note_render/attachment_table.py` (the pure AST → AST expansion: header labels, cell builders, the empty-list paragraph) | nothing in the renderer: the expansion produces an ordinary `Table`, so `_emit_table` is reused by construction |
 | Change the attachments panel | `giruntime/ui/attachments_panel.py`; size formatting in `_filesize.py`; picker in `_file_picker.py` | `note_controller.py` (`attachments-changed`); `note_list.py` (📎 badge) |
+| State or revise what folio claims about AsciiDoc conformance | `src/README.md` §4 `asciidoc/` — the property has one home | `system_docs/help.adoc` (intro + *Tables* + *Attachments*), top-level `README.md` §1 |
 | Edit the help reference text | `system_docs/help.adoc` (must stay inside the supported subset; §7 coverage test requires every node kind to appear) | `enums.py` (`HelpSection`) if buckets change; `test_help_window.py` |
 | Add a bundled system document | `enums.py` (`SystemDocument` member) → drop the file under `system_docs/` → read via `system_docs.load_text` / `load_bytes` | its consumer (`migrations.py` seed / `help_window.py`); `system_docs/test___init__.py` |
 | Change the help window | `giruntime/ui/help_window.py` (builds its pane from the shared `note_view.build_article_surface()`) | `note_view.py`; `application.py` (`app.help` action + `F1`); `toolbar.py` (Help button) |
@@ -185,7 +186,7 @@ gi-free via `importlib.resources` — **not** gresource content. Read by both
 
 - **`__init__.py`** — the shared loader keyed by the `SystemDocument` enum: `load_text(...) -> str`, `load_bytes(...) -> bytes`.
 - **`welcome.adoc`** — seed welcome note source (v1 seeds it; a golden test pins its exact bytes).
-- **`help.adoc`** — the help reference, authored in the supported subset (tested to parse clean and to exercise every node kind).
+- **`help.adoc`** — the help reference, authored in the supported subset (tested to parse clean and to exercise every node kind), and the user-facing home of the conformance stance (the two macro extensions and the table-header divergence — see §4 `asciidoc/`).
 - **`help-demo.png`** — demo image served to the help's `image::` example, and (via `HelpWindow`'s static demo attachment list) to its `attachment:` / `attachments::[]` examples.
 
 ### `models/` — frozen dataclasses
@@ -199,6 +200,26 @@ gi-free via `importlib.resources` — **not** gresource content. Read by both
 
 A **pure** format library: GTK-free and storage-free, importing only `enums` /
 `models` / `config`.
+
+**Conformance property.** folio implements *a subset of AsciiDoc plus two
+documented macro extensions* (`attachment:f[l]`, `attachments::[]`). The property
+the core holds itself to is one-directional: any source folio renders means what
+Asciidoctor means by it, and a construct outside the subset is **declined
+visibly** — a `ParseError` under strict `parse`, an `UnreadBlock` under
+`parse_recovering` — never given a different meaning. Being smaller or stricter
+than the reference is conformant; rendering the same source to a *different*
+meaning is not, and is the thing to treat as a bug. Deliberate exceptions are
+recorded rather than fixed: the four escape divergences and the email
+non-retreat rule in `inline_parser.py`'s docstring, and the table header (folio
+always styles `rows[0]`; the reference promotes it only when a blank line
+follows the first row — documented to users in `help.adoc`'s *Tables*). There is
+**no corpus-level conformance harness in-repo**; enforcement today is per-rule
+unit tests pinned against Asciidoctor 4.0.7 output — `test_inline_parser.py`'s
+`ConstrainedOpenerTests`, `ConstrainedCloserTests`, `UnconstrainedMarkerTests`,
+`UrlTrailingPunctuationTests`, `UrlExtentTests`, `UrlDoubledMarkerTests`,
+`EmailAutolinkTests` and `EscapeDivergesFromTheReferenceTests` — plus the
+decisions in that module's docstring. A comparison against the reference that
+"finds a bug" in one of those is finding a decision.
 
 - **`lexer.py`** — `tokenize(source) -> tuple[Token, ...]`. Line-based, context-free, **permissive** (never raises on grammar issues).
 - **`inline_parser.py`** — `parse_inline(line, line_no) -> tuple[InlineNode, ...]`. A bare URL ends at whitespace, a bracket, a doubled marker that pairs later on the line, or the enclosing span's valid closer — nothing else, so `https://x/a_b_c` links whole — and trailing sentence punctuation is peeled off the target rather than swallowed. A bare email address autolinks to a `mailto:` target under the language's own shape (final domain label of two to five letters); the `mailto:` prefix itself activates only in its macro form. A match never retreats to a shorter address, so folio declines where the reference would link a truncated one. **Total over formatting markers**: a `*`, `_`, `#` or backtick that does not resolve to a span is returned as `Text`, never an error — an opener with no valid closer backtracks. Errors are reserved for constructs the source *reached for*: the `link:` / `attachment:` macros, an unterminated passthrough, and the nesting cap. Which positions a marker may open and close at is decided by `enums.MarkerForm` (constrained vs unconstrained/doubled). **A backslash escapes the construct that would have followed it** — the test is the recogniser itself, run one position along, so what can be escaped is by construction what is recognised, and a construct with no valid closer escapes nothing (`\*bold*` is literal, `\*bold` keeps its backslash). The escaped construct's whole source is emitted verbatim; a doubled marker takes one backslash or two. Four escape divergences from the reference are deliberate and recorded in the module docstring — read it before "fixing" one. Nesting is bounded by `MAX_INLINE_DEPTH` (one Python frame per level), so a pathological line raises `ParseError` rather than `RecursionError`; backtracking stays linear via the per-line closer index, which is an invariant of the design and not an optimisation to be removed.

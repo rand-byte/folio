@@ -11,12 +11,13 @@ understands, one construct at a time.
 You edit a note in the *Source* view and read it in the *View* view; the
 toggle at the top switches between them. The View view is exactly what
 the examples below preview. Folio accepts a deliberately *strict subset*
-of AsciiDoc, so most of what you write is ordinary prose with the
-occasional marker. Two promises make that subset safe to live in: your
-note always renders, with anything folio cannot read shown as you typed
-it and marked in place rather than replacing the page — and a note still
-saves while you are mid-edit, so a half-finished line never costs you
-your work.
+of AsciiDoc, plus two additions of its own for attachments — marked as
+such where they appear — so most of what you write is ordinary prose
+with the occasional marker. Two promises make that subset safe to live
+in: your note always renders, with anything folio cannot read shown as
+you typed it and marked in place rather than replacing the page — and a
+note still saves while you are mid-edit, so a half-finished line never
+costs you your work.
 
 This page is itself a Folio note, written in the very subset it
 documents. The full AsciiDoc language is much larger; for anything beyond
@@ -387,11 +388,14 @@ form is inline text only, not nested blocks.
 
 === Tables
 
-A table is fenced by `|===`, with one `|cell` per cell. The first row is
-read as the header. Rendered:
+A table is fenced by `|===`, with one `|cell` per cell, and its first row
+is the header. Leave a blank line after that first row: Folio does not
+need it, but AsciiDoc does, so writing it keeps the table looking the
+same anywhere else you paste the note. Rendered:
 
 |===
 |Markup |Renders as
+
 |*stars* |bold text
 |_underscores_ |italic text
 |===
@@ -401,6 +405,7 @@ Its source places each cell after a leading `|`:
 ----
 |===
 |Markup |Renders as
+
 |*stars* |bold text
 |_underscores_ |italic text
 |===
@@ -408,8 +413,10 @@ Its source places each cell after a leading `|`:
 
 Limit: each cell is *single-line and inline-only*, and cell text does not
 wrap — a cell too wide for its column is truncated with an ellipsis
-rather than flowing onto a second line. Keep cells short. (The full table
-syntax is in the official
+rather than flowing onto a second line. Keep cells short. Folio also
+reads the first row as the header whether or not the blank line is there;
+full AsciiDoc gives a table with no blank line after its first row no
+header at all. (The full table syntax is in the official
 https://docs.asciidoctor.org/asciidoc/latest/tables/build-a-basic-table/[build a basic table]
 page.)
 
@@ -466,6 +473,12 @@ order, pass `cols` — the two column names are `name` and `size`:
 ----
 attachments::[cols="size,name"]
 ----
+
+Both macros are Folio's own, not part of AsciiDoc: they are the one place
+this page teaches something the wider format does not have. They are
+built on AsciiDoc's own extension point — inline and block macros — which
+is why they look like the rest of the language, but another AsciiDoc tool
+reading the same note shows them as plain text rather than as links.
 
 Limit: the filename names an attachment of *this* note (no paths, no
 other notes), an attachment link never nests inside another link, and a

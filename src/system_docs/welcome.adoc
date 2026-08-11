@@ -3,9 +3,9 @@
 
 This is your first note. You can keep it, edit it, or delete it.
 
-Notes are written in *AsciiDoc* — a plain-text format. The toolbar above
-gives you formatting buttons for the most common things, but you can also
-type the markup directly.
+Notes are written in *AsciiDoc* — a plain-text format. Press *F1*, or
+click *Syntax* on the toolbar, to see every marker Folio understands on
+one page.
 
 == A few features to try
 
