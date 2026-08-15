@@ -1058,3 +1058,120 @@ class ArticleInkTests(unittest.TestCase):
             ArticleTextView._scheme_from_style(text_view),
             text_view.color_scheme(),
         )
+
+
+@unittest.skipUnless(display_available(), "no GDK display")
+class ArticleTextViewLayoutValidationTests(unittest.TestCase):
+    """Wash geometry is measured against a *validated* text layout.
+
+    The sheet and the washes size themselves with
+    :meth:`Gtk.TextView.get_line_yrange`, which reads per-line heights
+    out of the ``GtkTextBTree``. Those heights are only meaningful once
+    ``GtkTextLayout`` has been validated, and validation happens inside
+    the parent snapshot: ``gtk_text_view_paint`` flushes the pending
+    first-validate idle before it draws, because drawing cannot fix bad
+    heights. Measuring before that flush reads *unvalidated* lines,
+    which report height 0 — every wash collapses to a degenerate rect at
+    the document's end.
+
+    Nothing repairs it afterwards. The ``queue_draw`` that validation
+    emits is issued from inside the snapshot, where
+    ``gtk_widget_queue_draw``'s walk breaks at the first ancestor with
+    ``draw_needed`` already set — so it never reaches the ``GtkNative``
+    and no frame is requested — and ``gtk_widget_do_snapshot`` then
+    clears ``draw_needed`` on return. The wrong frame is what the user
+    sees until some unrelated redraw arrives.
+
+    :meth:`ArticleTextView.do_snapshot` therefore builds the text layer
+    *first* (appending it last, so painting order is unchanged) and
+    measures afterwards.
+
+    **These tests must not settle a main loop between mutating the
+    buffer and snapshotting.** Settling lets the validation idle run, so
+    the geometry comes out right either way and the test passes against
+    the unfixed code — which is exactly how this bug survived the
+    existing wash suite.
+    """
+
+    _WASH_LINE = 2
+    _LINE_COUNT = 6
+    _VIEW_WIDTH_PX = 400
+    _VIEW_HEIGHT_PX = 300
+
+    def _present_view(self) -> tuple[ArticleTextView, Gtk.TextBuffer]:
+        text_view, buffer, _table = _build_article_text_view_with_buffer()
+        window = Gtk.Window()
+        window.set_default_size(self._VIEW_WIDTH_PX, self._VIEW_HEIGHT_PX)
+        window.set_child(text_view)
+        window.present()
+        _settle_real_main_loop()
+        self.addCleanup(_teardown_window, window)
+        return text_view, buffer
+
+    def _fill_and_tag(self, buffer: Gtk.TextBuffer) -> None:
+        """Replace the buffer contents and tag one line with a wash.
+
+        Replacing the text is what invalidates the layout: it is the
+        test's stand-in for the re-render that
+        :meth:`NoteView.refresh` performs, and it leaves the
+        first-validate idle pending exactly as that does.
+        """
+        buffer.set_text("".join(f"line {i}\n" for i in range(self._LINE_COUNT)))
+        _apply_tag_across_line(
+            buffer,
+            self._WASH_LINE,
+            admonition_body_tag_name(AdmonitionKind.NOTE).value,
+        )
+
+    def _wash_rects_measured_during_snapshot(
+        self, text_view: ArticleTextView,
+    ) -> list[tuple[Gdk.RGBA, Graphene.Rect]]:
+        """Snapshot once, returning the rects that paint actually used.
+
+        Recorded through :meth:`ArticleTextView._compute_wash_rects` as
+        the snapshot calls it, rather than by calling that method
+        afterwards: by then the parent snapshot has validated the
+        layout, so a later call reports healthy numbers for a frame that
+        painted degenerate ones.
+        """
+        recorded: list[tuple[Gdk.RGBA, Graphene.Rect]] = []
+        original = text_view._compute_wash_rects
+
+        def _record() -> list[tuple[Gdk.RGBA, Graphene.Rect]]:
+            rects = original()
+            recorded.extend(rects)
+            return rects
+
+        text_view._compute_wash_rects = _record  # type: ignore[method-assign]
+        try:
+            text_view.do_snapshot(Gtk.Snapshot())
+        finally:
+            del text_view._compute_wash_rects
+        return recorded
+
+    def test_wash_is_measured_with_real_line_height_on_the_first_paint(
+        self,
+    ) -> None:
+        # An unvalidated layout reports height 0 for every line, so the
+        # single wash would come out with no height at all.
+        text_view, buffer = self._present_view()
+        self._fill_and_tag(buffer)
+        rects = self._wash_rects_measured_during_snapshot(text_view)
+        self.assertEqual(len(rects), 1)
+        _color, rect = rects[0]
+        self.assertGreater(rect.get_height(), 0.0)
+
+    def test_first_paint_agrees_with_the_settled_paint(self) -> None:
+        # The stronger statement: the first frame is not merely non-zero
+        # but identical to what a settled frame produces, so the reveal
+        # needs no correcting redraw.
+        text_view, buffer = self._present_view()
+        self._fill_and_tag(buffer)
+        first = self._wash_rects_measured_during_snapshot(text_view)
+        _settle_real_main_loop(200)
+        settled = self._wash_rects_measured_during_snapshot(text_view)
+        self.assertEqual(len(first), len(settled))
+        self.assertEqual(
+            [(r.get_y(), r.get_height()) for _c, r in first],
+            [(r.get_y(), r.get_height()) for _c, r in settled],
+        )

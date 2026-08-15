@@ -60,7 +60,7 @@ from __future__ import annotations
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 
-from gi.repository import Gdk, Graphene, Gtk
+from gi.repository import Gdk, Graphene, Gsk, Gtk
 
 from enums import ColorScheme, WashShape
 from giruntime.ui.note_render.palette import (
@@ -466,7 +466,29 @@ class ArticleTextView(Gtk.TextView):
            and after it;
         2. the per-paragraph *washes*, behind the text;
         3. the *text*, via the parent snapshot.
+
+        **The text layer is built first and appended last.** Painting
+        order is unchanged; *computation* order is not. The sheet and the
+        washes derive their geometry from :meth:`Gtk.TextView.get_line_yrange`,
+        which reads per-line heights out of the ``GtkTextBTree`` — and
+        those heights are only correct once ``GtkTextLayout`` has been
+        validated. Validation happens inside the parent snapshot:
+        ``gtk_text_view_paint`` flushes the pending first-validate idle
+        before it draws, because drawing has no way to fix bad heights.
+        Computing layers 1 and 2 before that flush therefore reads
+        *unvalidated* lines, which report height 0 — the whole wash layer
+        collapses into degenerate rects at the document's end, and no
+        corrected frame follows, because the ``queue_draw`` the
+        validation emits is issued from inside the snapshot and is
+        swallowed (``gtk_widget_do_snapshot`` clears ``draw_needed``
+        after ``create_render_node`` returns). Building the text layer
+        into a detached :class:`Gtk.Snapshot` first forces the flush, so
+        layers 1 and 2 are computed against a validated layout.
+
+        The invariant: **no geometry may be read from the text layout
+        before the text layer has been built.**
         """
+        text_node = self._snapshot_text_layer()
         sheet_top = self._sheet_top_px()
         sheet_bottom = self._sheet_bottom_px()
         width = self.get_width()
@@ -476,9 +498,48 @@ class ArticleTextView(Gtk.TextView):
             self._sheet_wash.tint,
         )
         snapshot.append_color(*sheet)
-        for color, rect in self._compute_wash_rects():
+        washes = self._compute_wash_rects()
+        for color, rect in washes:
             snapshot.append_color(color, rect)
-        Gtk.TextView.do_snapshot(self, snapshot)
+        if text_node is not None:
+            snapshot.append_node(text_node)
+
+    def _snapshot_text_layer(self) -> Gsk.RenderNode | None:
+        """Build the parent's text layer into a detached snapshot.
+
+        Returns the resulting node, or ``None`` when the parent painted
+        nothing (an empty buffer produces no node —
+        :meth:`Gtk.Snapshot.to_node` returns ``None`` rather than an
+        empty container, so callers must not assume a node exists).
+
+        Called first by :meth:`do_snapshot` for its *side effect* as much
+        as its result: the parent snapshot flushes ``GtkTextLayout``
+        validation, and the sheet and wash geometry are only correct once
+        that has happened. The node is appended last so painting order is
+        unaffected.
+
+        A detached :class:`Gtk.Snapshot` starts with an identity
+        transform and no clip, which is the state the snapshot GTK hands
+        to :meth:`do_snapshot` is also in — the widget's own transform
+        and clip are applied by ``gtk_widget_create_render_node`` around
+        the call, not inside it. The layer is therefore recorded in
+        widget-local coordinates either way.
+
+        The node also carries anything else the parent snapshots,
+        including widgets at :class:`Gtk.TextChildAnchor`\\ s. That is
+        currently vacuous — ``textbuffer_renderer`` renders *every*
+        block-level construct as buffer text or an inline paintable and
+        anchors no widget at all (tables, once the sole anchored widget,
+        are native text; images go through
+        :meth:`Gtk.TextBuffer.insert_paintable`) — so this layer is only
+        ever text. **A construct that anchors a widget would change
+        that**, and this method would need re-checking: such children
+        would move inside the detached node rather than being snapshotted
+        against the live one.
+        """
+        text_snapshot = Gtk.Snapshot()
+        Gtk.TextView.do_snapshot(self, text_snapshot)
+        return text_snapshot.to_node()
 
     def _compute_wash_rects(
         self,
