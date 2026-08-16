@@ -705,10 +705,15 @@ _UNREAD_REASON_GAP_ABOVE_LINES: float = 5 / REFERENCE_LINE_HEIGHT_PX
 _UNREAD_REASON_GAP_BELOW_LINES: float = 6 / REFERENCE_LINE_HEIGHT_PX
 
 
-def build_tag_table(
-    *, char_width_px: int, line_height_px: int, palette: Palette,
+def _build_tags(
+    *, char_width_px: int, line_height_px: int,
 ) -> Gtk.TextTagTable:
-    """Construct the rendered-view tag table for the current subset.
+    """Create every tag, with structure and geometry but no colour.
+
+    The single writer of every font-derived value, reached both by
+    :func:`build_tag_table` and — for a live table — by
+    :func:`apply_metrics`, which builds a specimen here and copies the
+    geometry across rather than re-deriving it.
 
     ``char_width_px`` is the measured M-width of the body font in
     pixels. It is required (no default) because there is no sensible
@@ -734,9 +739,9 @@ def build_tag_table(
     a tag by name use :meth:`Gtk.TextTagTable.lookup` with the
     corresponding :class:`TagName` value.
 
-    **This function sets no colour itself.** It builds the structural
-    tags and then hands the table to :func:`apply_palette`, which is the
-    single place any foreground is written. That is what keeps the
+    **This function sets no colour itself.** :func:`apply_palette` is
+    the single place any foreground is written, and
+    :func:`build_tag_table` calls it after this. That is what keeps the
     "build" and "re-theme" paths from drifting: there is only one path.
 
     Note that link *identity* (which URL each link points at) is
@@ -851,8 +856,98 @@ def build_tag_table(
             TagName.UNREAD_REASON, line_height_px=line_height_px,
         )
     )
+    return table
+
+
+def build_tag_table(
+    *, char_width_px: int, line_height_px: int, palette: Palette,
+) -> Gtk.TextTagTable:
+    """Construct the rendered-view tag table for the current subset.
+
+    Thin composition of the three single-writer passes: :func:`_build_tags`
+    creates every tag and writes the structure that does not depend on
+    the font or the theme, and :func:`apply_palette` writes every colour.
+    Both are also reachable on their own — :func:`apply_metrics` re-runs
+    the font-dependent geometry and :func:`apply_palette` the colours,
+    against a *live* table — so a font change and a theme change each
+    take the same code path a fresh build does and cannot drift from it.
+
+    See :func:`_build_tags` for what the arguments mean and why none of
+    them has a default.
+    """
+    table = _build_tags(
+        char_width_px=char_width_px, line_height_px=line_height_px,
+    )
     apply_palette(table, palette)
     return table
+
+
+METRIC_DEPENDENT_PROPERTIES: tuple[str, ...] = (
+    "left-margin",
+    "right-margin",
+    "indent",
+    "tabs",
+    "pixels-above-lines",
+    "pixels-below-lines",
+    "pixels-inside-wrap",
+)
+"""Every tag property whose value is derived from the measured font.
+
+The horizontal ones are multiples of the M-width, the vertical ones
+ratios of the line height. Nothing else on a tag moves when the font
+changes: ``scale`` is a multiplier the font resolves itself, and weight,
+family, justification and wrap mode are font-independent.
+"""
+
+
+def apply_metrics(
+    table: Gtk.TextTagTable, *, char_width_px: int, line_height_px: int,
+) -> None:
+    """Rewrite every font-derived geometry value on ``table``, in place.
+
+    The geometry twin of :func:`apply_palette`, and in place for the
+    identical reason: a :class:`Gtk.TextBuffer` is bound to its tag table
+    for life, so a font change cannot swap in a freshly built table
+    without rebuilding the buffer.
+
+    Unlike a re-theme, a metric change is *not* sufficient on its own —
+    table column widths and image scaling are computed during
+    :meth:`TextBufferRenderer.render_into` from the injected measurers
+    rather than stored on tags, so the caller must also re-render. This
+    function is the tag half of that sequence.
+
+    It works by building a specimen table at the new metrics and copying
+    the geometry across, rather than by re-deriving the values. That
+    keeps :func:`_build_tags` the only place any geometry is computed:
+    a second implementation here would be a second thing to keep in step
+    with it, which is exactly the drift :func:`apply_palette` exists to
+    prevent. The cost is one discarded table per font change, which is
+    not a hot path.
+
+    A property is copied only when the specimen actually *sets* it. This
+    matters: writing ``left-margin = 0`` onto a tag that never set one
+    would flip its ``left-margin-set`` flag on, and a paragraph tag with
+    an explicit zero margin overrides the textview's own margin instead
+    of accumulating with it — the text would escape the prose column.
+
+    Raises :class:`LookupError` if ``table`` is missing a tag, i.e. if it
+    was not built by :func:`build_tag_table`. That is a wiring bug and
+    deserves to fail loudly.
+    """
+    specimen = _build_tags(
+        char_width_px=char_width_px, line_height_px=line_height_px,
+    )
+    for name in TagName:
+        source = specimen.lookup(name.value)
+        target = table.lookup(name.value)
+        if target is None:
+            raise LookupError(f"tag table is missing {name.value!r}")
+        for prop in METRIC_DEPENDENT_PROPERTIES:
+            flag = f"{prop}-set"
+            if source.get_property(flag):
+                target.set_property(prop, source.get_property(prop))
+            else:
+                target.set_property(flag, False)
 
 
 def apply_palette(table: Gtk.TextTagTable, palette: Palette) -> None:

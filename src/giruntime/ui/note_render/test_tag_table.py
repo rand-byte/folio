@@ -9,6 +9,8 @@ from gi.repository import Gtk, Pango
 from giruntime.ui.note_render.palette import DARK_PALETTE, LIGHT_PALETTE
 from giruntime.ui.note_render.tag_table import (
     REFERENCE_LINE_HEIGHT_PX,
+    METRIC_DEPENDENT_PROPERTIES,
+    apply_metrics,
     apply_palette,
     SheetWash,
     TagName,
@@ -718,6 +720,81 @@ class VerticalGapsScaleWithTheFontTests(unittest.TestCase):
                     label.get_property("pixels-below-lines"),
                     label.get_property("pixels-above-lines"),
                 )
+
+
+class ApplyMetricsMatchesAFreshBuildTests(unittest.TestCase):
+    """Re-measuring a live table gives what building at that size gives.
+
+    The geometry twin of the guarantee ``apply_palette`` already has. A
+    :class:`Gtk.TextBuffer` is bound to its tag table for life, so a font
+    change cannot swap in a freshly built table without rebuilding the
+    buffer; the geometry has to be rewritten in place instead. That only
+    works if the in-place path and the build path agree, at every size
+    and in both directions.
+    """
+
+    def _geometry(self, table: Gtk.TextTagTable) -> dict[tuple[str, str], object]:
+        """Every metric-dependent property, including whether it is set."""
+        out: dict[tuple[str, str], object] = {}
+        for name in TagName:
+            tag = table.lookup(name.value)
+            for prop in METRIC_DEPENDENT_PROPERTIES:
+                flag = f"{prop}-set"
+                is_set = tag.get_property(flag)
+                out[(name.value, flag)] = is_set
+                if is_set and prop != "tabs":
+                    out[(name.value, prop)] = tag.get_property(prop)
+        return out
+
+    def test_re_measuring_matches_building_at_the_new_size(self) -> None:
+        for start, end in ((REFERENCE_LINE_HEIGHT_PX, 42), (42, 12), (17, 17)):
+            with self.subTest(start=start, end=end):
+                live = build_tag_table(
+                    char_width_px=9,
+                    line_height_px=start,
+                    palette=LIGHT_PALETTE,
+                )
+                apply_metrics(live, char_width_px=14, line_height_px=end)
+                fresh = build_tag_table(
+                    char_width_px=14,
+                    line_height_px=end,
+                    palette=LIGHT_PALETTE,
+                )
+                self.assertEqual(self._geometry(live), self._geometry(fresh))
+
+    def test_re_measuring_leaves_colour_alone(self) -> None:
+        # Metrics and palette are separate writers. A font change must
+        # not quietly re-theme the view.
+        table = build_tag_table(
+            char_width_px=9,
+            line_height_px=REFERENCE_LINE_HEIGHT_PX,
+            palette=DARK_PALETTE,
+        )
+        apply_metrics(table, char_width_px=14, line_height_px=42)
+        self.assertEqual(
+            _foreground_of(table, TagName.LINK), DARK_PALETTE.link_foreground,
+        )
+
+    def test_unset_geometry_is_not_silently_set(self) -> None:
+        # Copying a property the specimen never set would flip its
+        # "-set" flag on. For a paragraph margin that is not cosmetic:
+        # an explicit zero overrides the textview's own margin instead
+        # of accumulating with it, and the text leaves the prose column.
+        table = build_tag_table(
+            char_width_px=9,
+            line_height_px=REFERENCE_LINE_HEIGHT_PX,
+            palette=LIGHT_PALETTE,
+        )
+        apply_metrics(table, char_width_px=14, line_height_px=42)
+        for name in (TagName.BOLD, TagName.ITALIC, TagName.LINK):
+            with self.subTest(tag=name):
+                tag = table.lookup(name.value)
+                self.assertFalse(tag.get_property("left-margin-set"))
+
+    def test_missing_tag_is_a_loud_failure(self) -> None:
+        empty = Gtk.TextTagTable.new()
+        with self.assertRaises(LookupError):
+            apply_metrics(empty, char_width_px=9, line_height_px=24)
 
 
 class ParagraphBackgroundIsNotOnTagsTests(unittest.TestCase):

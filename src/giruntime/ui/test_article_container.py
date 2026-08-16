@@ -641,6 +641,57 @@ class ArticleContainerMeasureTests(unittest.TestCase):
 
 
 @unittest.skipUnless(display_available(), "no GDK display")
+class ArticleContainerFontMetricInvalidationTests(unittest.TestCase):
+    """Cached measurements can be dropped when the font changes.
+
+    Both measurements are memoised for the life of the surface, which is
+    only correct while the font is fixed. A font change arrives through
+    ``do_css_changed`` — the same hook as a theme change — so without an
+    invalidation path the text redraws at the new size while the column
+    width, the block margins baked into the tag table and the per-table
+    tab stops all keep the old geometry.
+    """
+
+    def test_re_measures_after_invalidation(self) -> None:
+        measured = [10]
+        container = ArticleContainer(
+            char_width_measurer=lambda: measured[0],
+            line_height_measurer=lambda: 20,
+        )
+        self.assertEqual(container.char_width_px(), 10)
+
+        measured[0] = 17
+        # Without the invalidation the cache would still answer 10.
+        container.invalidate_font_metrics()
+
+        self.assertEqual(container.char_width_px(), 17)
+
+    def test_reports_whether_the_metrics_moved(self) -> None:
+        # do_css_changed also fires on hover and focus, so the caller
+        # needs to tell a real font change from a colour-only one before
+        # rebuilding tag geometry and re-rendering the buffer.
+        measured = [10]
+        container = ArticleContainer(
+            char_width_measurer=lambda: measured[0],
+            line_height_measurer=lambda: 20,
+        )
+        # Both caches have to be primed: an unmeasured metric counts as
+        # a change, because the surface has no geometry to keep.
+        container.char_width_px()
+        container.line_height_px()
+
+        self.assertFalse(container.invalidate_font_metrics())
+
+        measured[0] = 17
+        self.assertTrue(container.invalidate_font_metrics())
+
+    def test_first_invalidation_reports_a_change(self) -> None:
+        # Nothing was measured yet, so the surface has no geometry to
+        # keep — reporting "changed" makes the caller establish it.
+        container = _make_test_article_container()
+        self.assertTrue(container.invalidate_font_metrics())
+
+
 class ArticleContainerScrollableTests(unittest.TestCase):
     """Pin Option C: :class:`ArticleContainer` implements ``Gtk.Scrollable``.
 

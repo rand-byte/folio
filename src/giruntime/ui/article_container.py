@@ -432,6 +432,36 @@ class ArticleContainer(Gtk.Widget, Gtk.Scrollable):
             )
         return self._cached_line_height_px
 
+    def invalidate_font_metrics(self) -> bool:
+        """Drop the cached measurements and re-measure; report a change.
+
+        Both measurements are cached for the life of the surface, which
+        is correct as long as the font never changes — and it does. A
+        font change reaches GTK through :meth:`Gtk.Widget.do_css_changed`,
+        the same door as a theme change, so without this the widget
+        redraws its text at the new size while every value derived from
+        the old measurement — the article column width, the block-level
+        margins baked into the tag table, per-table tab stops — silently
+        keeps the old geometry.
+
+        Returns ``True`` when either measurement actually moved, so the
+        caller can skip the expensive half of a font change (rebuilding
+        the tag geometry and re-rendering the buffer) on the far more
+        common case of a CSS change that touched only colour. The check
+        must stay this cheap for that reason: ``do_css_changed`` also
+        fires on hover and focus.
+
+        Re-measuring here is not sufficient on its own. Callers own the
+        rest of the sequence — :func:`note_render.tag_table.apply_metrics`
+        for the tags, then a re-render, because table column widths and
+        image scaling are computed during rendering rather than stored
+        on tags.
+        """
+        previous = (self._cached_char_width_px, self._cached_line_height_px)
+        self._cached_char_width_px = None
+        self._cached_line_height_px = None
+        return (self.char_width_px(), self.line_height_px()) != previous
+
     def text_column_width(self) -> int:
         """Return the pixel width of the *text area* (no padding).
 
