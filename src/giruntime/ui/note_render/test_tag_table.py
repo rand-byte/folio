@@ -490,6 +490,91 @@ class HeadingTagPropertyTests(unittest.TestCase):
         self.assertEqual(tag.get_property("pixels-below-lines"), 0)
 
 
+class SubordinateLineGapTests(unittest.TestCase):
+    """A subordinate line is bound to the line it belongs to.
+
+    Two places in the rendered view stack a *primary* line above a line
+    that is subordinate to it: the document title with its metadata line
+    (Created / Modified / tags), and an admonition's kind label with its
+    body. In both, the pair has to read as one unit, which puts two
+    requirements on the gap between them.
+
+    It must be **non-zero**. With no padding the only separation is the
+    font's own leading, which a descender in the line above consumes —
+    a title such as ``git cheat sheet`` collides with the metadata line
+    beneath it.
+
+    It must also be **smaller than the gap that bounds the unit**: the
+    metadata line's gap down to its hairline rule, and the admonition
+    card's outer padding. A subordinate line separated from its primary
+    by as much space as separates the unit from its surroundings floats
+    between the two and groups with neither.
+
+    These are ordering assertions, not value assertions, deliberately.
+    The literals are a visual judgement that will be re-tuned (and are
+    expected to become ratios of the measured line height rather than
+    fixed pixels); the ordering is the invariant that must survive it.
+    """
+
+    table: Gtk.TextTagTable
+
+    def setUp(self) -> None:
+        self.table = build_tag_table(
+            char_width_px=_TEST_CHAR_WIDTH_PX, palette=LIGHT_PALETTE,
+        )
+
+    def test_metadata_line_has_a_gap_above_it(self) -> None:
+        tag = self.table.lookup(TagName.METADATA.value)
+        self.assertGreater(tag.get_property("pixels-above-lines"), 0)
+
+    def test_metadata_binds_upward_to_the_title(self) -> None:
+        # The gap up to the title must be tighter than the gap down to
+        # the rule, or the line reads as belonging to neither.
+        tag = self.table.lookup(TagName.METADATA.value)
+        self.assertLess(
+            tag.get_property("pixels-above-lines"),
+            tag.get_property("pixels-below-lines"),
+        )
+
+    def test_admonition_label_has_a_gap_below_it(self) -> None:
+        for kind in AdmonitionKind:
+            with self.subTest(kind=kind):
+                label = self.table.lookup(admonition_label_tag_name(kind).value)
+                self.assertGreater(label.get_property("pixels-below-lines"), 0)
+
+    def test_admonition_label_binds_downward_to_its_body(self) -> None:
+        # The label-to-body gap is tighter than the card's own top
+        # padding, so the two read as one block inside the tint.
+        for kind in AdmonitionKind:
+            with self.subTest(kind=kind):
+                label = self.table.lookup(admonition_label_tag_name(kind).value)
+                self.assertLess(
+                    label.get_property("pixels-below-lines"),
+                    label.get_property("pixels-above-lines"),
+                )
+
+    def test_admonition_inner_gap_is_contributed_once(self) -> None:
+        # Only the label carries it. ``pixels-above-lines`` applies to
+        # every logical line of the body, so setting it there would
+        # space the body's own lines apart as well as opening the gap.
+        for kind in AdmonitionKind:
+            with self.subTest(kind=kind):
+                body = self.table.lookup(admonition_body_tag_name(kind).value)
+                self.assertEqual(body.get_property("pixels-above-lines"), 0)
+
+    def test_admonition_card_padding_stays_symmetric(self) -> None:
+        # The outer gaps bracket the card evenly: above the label, below
+        # the body. The inner gap must not have disturbed that.
+        for kind in AdmonitionKind:
+            with self.subTest(kind=kind):
+                label = self.table.lookup(admonition_label_tag_name(kind).value)
+                body = self.table.lookup(admonition_body_tag_name(kind).value)
+                self.assertEqual(
+                    label.get_property("pixels-above-lines"),
+                    body.get_property("pixels-below-lines"),
+                )
+
+
 class ParagraphBackgroundIsNotOnTagsTests(unittest.TestCase):
     """No block-level paragraph tag carries ``paragraph-background-rgba``.
 

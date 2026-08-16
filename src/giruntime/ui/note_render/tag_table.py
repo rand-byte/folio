@@ -512,8 +512,20 @@ _MONOSPACE_FAMILY: str = "monospace"
 # here. To re-introduce an outer indent, raise this above ``0`` — the
 # paragraph margin and the wash inset both read it, so card and text
 # move together.
+#
+# ``VPADDING`` is the card's *outer* breathing room: above the label and
+# below the body. ``INNER_GAP`` is the gap *between* them, and is a
+# separate constant because it plays the opposite role — the outer pair
+# insets the card's contents from its tinted edge, while the inner one
+# separates a label from the text it labels. It must be non-zero (with
+# ``0`` the kind word sits flush on the first body line) and smaller
+# than ``VPADDING``, so the label and its body read as one unit inside
+# the card rather than as two stacked lines. Same pairing as the
+# document title and its metadata line; ``test_tag_table.py`` asserts
+# the ordering for both.
 _ADMONITION_HMARGIN_PX: int = 0
 _ADMONITION_VPADDING_PX: int = 8
+_ADMONITION_INNER_GAP_PX: int = 6
 _ADMONITION_LINE_GAP_PX: int = 2
 
 # Paragraph metrics for blockquotes. The box insets are ``0`` so the
@@ -578,7 +590,24 @@ _TABLE_HEADER_VPADDING_PX: int = 8
 # body, and a gap below the text that separates it from the hairline
 # rule the wash painter draws. Both the text colour and the rule colour
 # come from the palette.
+#
+# The gap *above* the metadata line is what binds it to the title. It
+# must be non-zero: with no padding the gap is the font's own leading
+# alone, which a descender in the title ("git", "python", "grep")
+# consumes entirely, so the two lines collide. It must also stay
+# *smaller* than ``_METADATA_PIXELS_BELOW_LINES_PX`` -- the two gaps
+# bracket the metadata line, and if the one above is not the tighter of
+# the pair the line floats midway between the title and the rule and
+# reads as belonging to neither. That ordering, not the literal value,
+# is what ``test_tag_table.py`` asserts.
+#
+# The value is roughly a fifth of the title's size (body x
+# ``_HEADING_SCALES[0]``). Padding is geometric while a collision is
+# optical, so it is tuned against a title *with* descenders -- the worst
+# case; an ascender-only title sits a hair loose, which is invisible in
+# practice where the collision is not.
 _METADATA_SCALE: float = 0.85
+_METADATA_PIXELS_ABOVE_LINES_PX: int = 6
 _METADATA_PIXELS_BELOW_LINES_PX: int = 8
 _METADATA_RULE_INSET_PX: int = 0
 
@@ -997,10 +1026,16 @@ def _make_admonition_paragraph_tag(
     matching tinted wash is painted separately by ``ArticleTextView``
     in :mod:`ui.note_view` (see :func:`build_wash_specs`).
 
-    ``is_label`` toggles where the block padding sits: the *label*
-    paragraph gets padding above so the block has an even top margin,
-    and the *body* paragraph gets padding below for a symmetric bottom
-    margin. Side margins and the in-wrap line spacing are shared.
+    ``is_label`` selects which of the two roles the tag plays, and both
+    of its vertical gaps follow from that. The card's *outer* padding
+    (:data:`_ADMONITION_VPADDING_PX`) sits above the label and below the
+    body, giving the block an even top and bottom margin. The gap
+    *between* them (:data:`_ADMONITION_INNER_GAP_PX`) is contributed
+    once, by the label's ``pixels-below-lines`` — the body's
+    ``pixels-above-lines`` stays ``0`` so the two do not add up, since
+    ``pixels-above-lines`` applies to every logical line of a multi-line
+    body and putting the gap there would also space the body's own lines
+    apart. Side margins and the in-wrap line spacing are shared.
     """
     tag = Gtk.TextTag.new(name.value)
     tag.set_property("accumulative-margin", True)
@@ -1012,7 +1047,7 @@ def _make_admonition_paragraph_tag(
     )
     tag.set_property(
         "pixels-below-lines",
-        0 if is_label else _ADMONITION_VPADDING_PX,
+        _ADMONITION_INNER_GAP_PX if is_label else _ADMONITION_VPADDING_PX,
     )
     tag.set_property("pixels-inside-wrap", _ADMONITION_LINE_GAP_PX)
     return tag
@@ -1190,9 +1225,12 @@ def _make_metadata_tag(name: TagName) -> Gtk.TextTag:
     """Build the metadata-line tag (Created / Modified / tags).
 
     Carries the *non-colour* text appearance: a slightly reduced scale
-    so the line reads as secondary to the title and body, plus
-    ``pixels-below-lines`` to open the gap that separates the text from
-    the hairline rule the wash painter draws at the bottom of the line.
+    so the line reads as secondary to the title and body, plus the pair
+    of pixel gaps that bracket it — ``pixels-above-lines`` binding it to
+    the title above (without which a descender in the title collides
+    with it) and ``pixels-below-lines`` separating it from the hairline
+    rule the wash painter draws at the bottom of the line. The above gap
+    is deliberately the smaller of the two; see the constants for why.
     The dim foreground is applied by :func:`apply_palette`. The line
     sits in the same column as the body, so it sets no left/right
     margins — unlike the block-level paragraph tags it is not inset.
@@ -1202,6 +1240,7 @@ def _make_metadata_tag(name: TagName) -> Gtk.TextTag:
     """
     tag = Gtk.TextTag.new(name.value)
     tag.set_property("scale", _METADATA_SCALE)
+    tag.set_property("pixels-above-lines", _METADATA_PIXELS_ABOVE_LINES_PX)
     tag.set_property("pixels-below-lines", _METADATA_PIXELS_BELOW_LINES_PX)
     return tag
 
