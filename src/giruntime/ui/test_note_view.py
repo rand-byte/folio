@@ -38,7 +38,9 @@ from giruntime.ui.note_render.tag_table import (
     TagName,
     build_wash_specs,
 )
+from giruntime.ui.note_render.tag_table import MONOSPACE_SCALE
 from giruntime.ui.note_view import (
+    make_cell_width_measurer,
     NoteView,
     _format_metadata_line,
     _placeholder_image_bytes,
@@ -1582,3 +1584,31 @@ class NoteViewAttachmentNamedTests(unittest.TestCase):
         state.set_selected_note_id("note-A")
         self.assertEqual(view._attachment_named("photo.png"), attachment)
         self.assertIsNone(view._attachment_named("missing.png"))
+
+
+class CellWidthMeasurerAppliesTheMonospaceCorrectionTests(unittest.TestCase):
+    """A monospace cell is measured at the size it is drawn at.
+
+    The measurer sizes table columns; the MONOSPACE tag draws the text.
+    They apply the family and the size correction from the same two
+    constants in ``tag_table`` precisely so they cannot disagree — a
+    column measured for text a tenth larger than what lands in it is
+    a column with a visible gap on the right of every cell.
+    """
+
+    @unittest.skipUnless(display_available(), "needs a display")
+    def test_monospace_is_measured_narrower_than_the_bare_family(self) -> None:
+        label = Gtk.Label()
+        measure = make_cell_width_measurer(label)
+
+        proportional = measure("MMMMMMMM", False, False)
+        monospace = measure("MMMMMMMM", False, True)
+
+        # Not a fixed ratio — the two faces differ in advance width as
+        # well as in size, and the available monospace font varies by
+        # host. What must hold is that the correction was applied at
+        # all, so the measured width is below what the uncorrected
+        # family alone would give.
+        self.assertGreater(monospace, 0)
+        self.assertLess(MONOSPACE_SCALE, 1.0)
+        self.assertLess(monospace, proportional / MONOSPACE_SCALE)

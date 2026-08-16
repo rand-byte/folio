@@ -8,8 +8,9 @@ from gi.repository import Gtk, Pango
 
 from giruntime.ui.note_render.palette import DARK_PALETTE, LIGHT_PALETTE
 from giruntime.ui.note_render.tag_table import (
-    REFERENCE_LINE_HEIGHT_PX,
     METRIC_DEPENDENT_PROPERTIES,
+    MONOSPACE_SCALE,
+    REFERENCE_LINE_HEIGHT_PX,
     apply_metrics,
     apply_palette,
     SheetWash,
@@ -829,6 +830,51 @@ class ApplyMetricsMatchesAFreshBuildTests(unittest.TestCase):
         empty = Gtk.TextTagTable.new()
         with self.assertRaises(LookupError):
             apply_metrics(empty, char_width_px=9, line_height_px=24)
+
+
+class MonospaceSizeCorrectionTests(unittest.TestCase):
+    """Monospace runs are set slightly smaller than the body face.
+
+    At an equal nominal size a monospace face renders optically larger
+    than a proportional one — greater x-height, wider glyphs, heavier
+    stems — so an uncorrected inline code span reads as a bump in the
+    prose line and a code block reads heavier than the paragraphs around
+    it.
+    """
+
+    table: Gtk.TextTagTable
+
+    def setUp(self) -> None:
+        self.table = build_tag_table(
+            char_width_px=_TEST_CHAR_WIDTH_PX,
+            line_height_px=_TEST_LINE_HEIGHT_PX,
+            palette=LIGHT_PALETTE,
+        )
+
+    def test_monospace_tag_carries_the_correction(self) -> None:
+        tag = self.table.lookup(TagName.MONOSPACE.value)
+        self.assertEqual(tag.get_property("scale"), MONOSPACE_SCALE)
+
+    def test_correction_shrinks_rather_than_grows(self) -> None:
+        # The direction is the whole point: a value above 1.0 would make
+        # the defect worse rather than fixing it.
+        self.assertLess(MONOSPACE_SCALE, 1.0)
+
+    def test_unread_source_carries_the_same_correction(self) -> None:
+        # The unread block's source text is monospace too, and there is
+        # no reason for it to be sized differently from a code block.
+        tag = self.table.lookup(TagName.UNREAD_SOURCE.value)
+        self.assertEqual(tag.get_property("scale"), MONOSPACE_SCALE)
+
+    def test_a_heading_outranks_the_monospace_correction(self) -> None:
+        # Both tags set "scale", and GTK gives the property to the
+        # highest-priority tag rather than combining them. Inline code
+        # inside a heading must therefore take the heading's size — a
+        # code span in an H2 that shrank to 0.9 of *body* text would be
+        # smaller than the words beside it.
+        heading = self.table.lookup(TagName.HEADING_2.value)
+        monospace = self.table.lookup(TagName.MONOSPACE.value)
+        self.assertGreater(heading.get_priority(), monospace.get_priority())
 
 
 class ParagraphBackgroundIsNotOnTagsTests(unittest.TestCase):

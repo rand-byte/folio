@@ -259,6 +259,8 @@ from giruntime.ui.link_handler import (
 )
 from giruntime.ui.note_render.article_text_view import ArticleTextView
 from giruntime.ui.note_render.tag_table import (
+    MONOSPACE_FAMILY,
+    MONOSPACE_SCALE,
     TagName,
     build_tag_table,
 )
@@ -1109,22 +1111,17 @@ def _make_pango_line_height_measurer(widget: Gtk.Widget) -> LineHeightMeasurer:
     return measure
 
 
-_CELL_MEASURE_MONOSPACE_FAMILY: str = "monospace"
-"""Font family the cell-width measurer applies for monospace runs.
-
-It must match the family the :data:`TagName.MONOSPACE` tag sets (also
-``"monospace"``) so a measured monospace cell width tracks how the tag
-actually renders it. Kept local to the production measurer; the small
-per-column gutter absorbs any residual difference.
-"""
-
-
 def make_cell_width_measurer(widget: Gtk.Widget) -> CellWidthMeasurer:
     """Build the production :data:`CellWidthMeasurer` for a widget's font.
 
     The returned closure lays the run's text out in the widget's Pango
-    context, applying a bold-weight and/or monospace-family attribute to
-    match the run's width class, and returns the logical pixel width.
+    context, applying a bold-weight attribute and/or the monospace
+    family *and size correction* to match the run's width class, and
+    returns the logical pixel width. The monospace attributes come
+    from :data:`tag_table.MONOSPACE_FAMILY` /
+    :data:`tag_table.MONOSPACE_SCALE` rather than from local copies:
+    a cell measured with different attributes than it is drawn with
+    sizes its column wrong, and the two would drift apart silently.
     Shared by :class:`NoteView` and
     :class:`giruntime.ui.help_window.HelpWindow` — both build their own
     renderer and wire its ``cell_width_px`` from the article view via
@@ -1143,10 +1140,17 @@ def make_cell_width_measurer(widget: Gtk.Widget) -> CellWidthMeasurer:
                 weight.end_index = end_index
                 attrs.insert(weight)
             if monospace:
-                family = Pango.attr_family_new(_CELL_MEASURE_MONOSPACE_FAMILY)
+                family = Pango.attr_family_new(MONOSPACE_FAMILY)
                 family.start_index = 0
                 family.end_index = end_index
                 attrs.insert(family)
+                # The tag applies this too. Measuring without it
+                # would size every monospace column for text a
+                # tenth larger than what is drawn.
+                scale = Pango.attr_scale_new(MONOSPACE_SCALE)
+                scale.start_index = 0
+                scale.end_index = end_index
+                attrs.insert(scale)
             layout.set_attributes(attrs)
         _, log_rect = layout.get_pixel_extents()
         return int(log_rect.width)

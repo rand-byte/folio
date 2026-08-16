@@ -586,7 +586,26 @@ _ADMONITION_KIND_TAG_NAMES: dict[AdmonitionKind, TagName] = {
 # settings rather than categorical concepts — there's no closed set of
 # legal monospace families or paddings, only one current choice each.
 
-_MONOSPACE_FAMILY: str = "monospace"
+MONOSPACE_FAMILY: str = "monospace"
+"""Font family for every monospace run in the rendered view."""
+
+
+MONOSPACE_SCALE: float = 0.9
+"""Optical size correction applied wherever MONOSPACE_FAMILY is.
+
+At an equal nominal size a monospace face renders optically larger
+than the proportional body face: greater x-height, wider glyphs,
+heavier stems. Without a correction an inline code span reads as a
+bump in the prose line and a code block reads heavier than the
+paragraphs around it. Roughly a tenth is the conventional amount.
+
+Both constants are public because they are a *contract*, not a local
+choice. ``note_view.make_cell_width_measurer`` measures a table's
+monospace cells by laying text out with these same two attributes
+applied; if it used its own copy of either, cells would be measured
+at one size and drawn at another and the columns would not line up.
+One definition, imported by both.
+"""
 
 
 # The ratios below are now stated directly rather than as
@@ -804,7 +823,13 @@ def _build_tags(
     table.add(_make_inline_tag(TagName.ITALIC, style=Pango.Style.ITALIC))
     table.add(_make_inline_tag(TagName.STRIKETHROUGH, strikethrough=True))
     table.add(_make_inline_tag(TagName.UNDERLINE, underline=Pango.Underline.SINGLE))
-    table.add(_make_inline_tag(TagName.MONOSPACE, family=_MONOSPACE_FAMILY))
+    table.add(
+        _make_inline_tag(
+            TagName.MONOSPACE,
+            family=MONOSPACE_FAMILY,
+            scale=MONOSPACE_SCALE,
+        )
+    )
     table.add(
         _make_inline_tag(TagName.LINK, underline=Pango.Underline.SINGLE)
     )
@@ -1144,6 +1169,7 @@ def _make_inline_tag(  # pylint: disable=too-many-arguments
     strikethrough: bool | None = None,
     underline: Pango.Underline | None = None,
     family: str | None = None,
+    scale: float | None = None,
 ) -> Gtk.TextTag:
     """Build a single inline-style tag with the requested visual rule.
 
@@ -1176,6 +1202,8 @@ def _make_inline_tag(  # pylint: disable=too-many-arguments
         tag.set_property("underline", underline)
     if family is not None:
         tag.set_property("family", family)
+    if scale is not None:
+        tag.set_property("scale", scale)
     return tag
 
 
@@ -1555,7 +1583,8 @@ def _make_unread_source_tag(
         "pixels-above-lines",
         _gap_px(_UNREAD_SOURCE_VPADDING_LINES, line_height_px),
     )
-    tag.set_property("family", _MONOSPACE_FAMILY)
+    tag.set_property("family", MONOSPACE_FAMILY)
+    tag.set_property("scale", MONOSPACE_SCALE)
     return tag
 
 
