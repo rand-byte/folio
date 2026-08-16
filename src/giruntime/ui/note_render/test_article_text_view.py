@@ -70,7 +70,9 @@ def _build_article_text_view_with_buffer() -> tuple[
     fail for reasons that have nothing to do with what they test. Cases
     that are *about* the dark path install their own probe afterwards.
     """
-    table = build_tag_table(char_width_px=9, palette=LIGHT_PALETTE)
+    table = build_tag_table(
+        char_width_px=9, line_height_px=24, palette=LIGHT_PALETTE,
+    )
     text_view = ArticleTextView()
     buffer = Gtk.TextBuffer.new(table)
     text_view.set_buffer(buffer)
@@ -280,7 +282,9 @@ class ArticleTextViewWashRectTests(unittest.TestCase):
         # painter is a no-op. This is the right behaviour for tests
         # that construct the subclass standalone, and for the brief
         # window between constructor and wash-spec install.
-        table = build_tag_table(char_width_px=9, palette=LIGHT_PALETTE)
+        table = build_tag_table(
+        char_width_px=9, line_height_px=24, palette=LIGHT_PALETTE,
+    )
         text_view = ArticleTextView()
         buffer = Gtk.TextBuffer.new(table)
         text_view.set_buffer(buffer)

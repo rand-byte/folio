@@ -8,6 +8,7 @@ from gi.repository import Gtk, Pango
 
 from giruntime.ui.note_render.palette import DARK_PALETTE, LIGHT_PALETTE
 from giruntime.ui.note_render.tag_table import (
+    REFERENCE_LINE_HEIGHT_PX,
     apply_palette,
     SheetWash,
     TagName,
@@ -37,6 +38,14 @@ from config.defaults import (
 # arbitrary but typical (close to a real body font's M-width); what
 # matters is that it's a positive int.
 _TEST_CHAR_WIDTH_PX: int = 9
+_TEST_LINE_HEIGHT_PX: int = 24
+"""Line height the tag tables under test are built at.
+
+Set to :data:`tag_table._REFERENCE_LINE_HEIGHT_PX` so a vertical gap
+resolves to exactly the pixel value its ratio was authored with, which
+keeps a test that names a literal readable. Tests that care about
+*scaling* build at other values explicitly.
+"""
 
 
 # Tag names that *used* to carry ``paragraph-background-rgba`` directly
@@ -218,7 +227,11 @@ class ListItemTagPropertyTests(unittest.TestCase):
     table: Gtk.TextTagTable
 
     def setUp(self) -> None:
-        self.table = build_tag_table(char_width_px=_TEST_CHAR_WIDTH_PX, palette=LIGHT_PALETTE)
+        self.table = build_tag_table(
+            char_width_px=_TEST_CHAR_WIDTH_PX,
+            line_height_px=_TEST_LINE_HEIGHT_PX,
+            palette=LIGHT_PALETTE,
+        )
 
     @property
     def _field(self) -> int:
@@ -323,7 +336,11 @@ class BuildTagTableStructureTests(unittest.TestCase):
     """
 
     def setUp(self) -> None:
-        self.table = build_tag_table(char_width_px=_TEST_CHAR_WIDTH_PX, palette=LIGHT_PALETTE)
+        self.table = build_tag_table(
+            char_width_px=_TEST_CHAR_WIDTH_PX,
+            line_height_px=_TEST_LINE_HEIGHT_PX,
+            palette=LIGHT_PALETTE,
+        )
 
     def test_every_enum_member_has_a_tag(self) -> None:
         for name in TagName:
@@ -346,7 +363,11 @@ class BuildTagTableStructureTests(unittest.TestCase):
     def test_each_call_returns_a_fresh_table(self) -> None:
         # Per the module's invariant: a fresh table per call. This lets
         # tests construct independent buffers without aliasing.
-        another = build_tag_table(char_width_px=_TEST_CHAR_WIDTH_PX, palette=LIGHT_PALETTE)
+        another = build_tag_table(
+            char_width_px=_TEST_CHAR_WIDTH_PX,
+            line_height_px=_TEST_LINE_HEIGHT_PX,
+            palette=LIGHT_PALETTE,
+        )
         self.assertIsNot(self.table, another)
         # The tags inside are also fresh — not aliased.
         self.assertIsNot(
@@ -370,7 +391,11 @@ class InlineTagPropertyTests(unittest.TestCase):
     """The four inline tags carry the visual properties they advertise."""
 
     def setUp(self) -> None:
-        self.table = build_tag_table(char_width_px=_TEST_CHAR_WIDTH_PX, palette=LIGHT_PALETTE)
+        self.table = build_tag_table(
+            char_width_px=_TEST_CHAR_WIDTH_PX,
+            line_height_px=_TEST_LINE_HEIGHT_PX,
+            palette=LIGHT_PALETTE,
+        )
 
     def test_bold_tag_uses_bold_weight(self) -> None:
         tag = self.table.lookup(TagName.BOLD.value)
@@ -436,7 +461,11 @@ class HeadingTagPropertyTests(unittest.TestCase):
     """Heading tags are bold-weight + scale, in monotone-decreasing scale."""
 
     def setUp(self) -> None:
-        self.table = build_tag_table(char_width_px=_TEST_CHAR_WIDTH_PX, palette=LIGHT_PALETTE)
+        self.table = build_tag_table(
+            char_width_px=_TEST_CHAR_WIDTH_PX,
+            line_height_px=_TEST_LINE_HEIGHT_PX,
+            palette=LIGHT_PALETTE,
+        )
 
     def test_every_heading_tag_is_bold(self) -> None:
         for level in (0, 2, 3, 4, 5, 6):
@@ -520,7 +549,9 @@ class SubordinateLineGapTests(unittest.TestCase):
 
     def setUp(self) -> None:
         self.table = build_tag_table(
-            char_width_px=_TEST_CHAR_WIDTH_PX, palette=LIGHT_PALETTE,
+            char_width_px=_TEST_CHAR_WIDTH_PX,
+            line_height_px=_TEST_LINE_HEIGHT_PX,
+            palette=LIGHT_PALETTE,
         )
 
     def test_metadata_line_has_a_gap_above_it(self) -> None:
@@ -575,6 +606,120 @@ class SubordinateLineGapTests(unittest.TestCase):
                 )
 
 
+class VerticalGapsScaleWithTheFontTests(unittest.TestCase):
+    """Vertical gaps are ratios of the measured line height, not pixels.
+
+    The rhythm a designed gap is judged against is itself font-relative:
+    one blank line between two blocks is one body line height. A gap
+    fixed in pixels is therefore correct at one font size and drifts at
+    every other — which is how the gap above a section heading came to
+    be *smaller* than the gap between two paragraphs at a large font.
+
+    Two properties together pin the conversion. At
+    :data:`_TEST_LINE_HEIGHT_PX` — the reference the ratios were
+    authored against — every gap must resolve to the pixel value it
+    carried before the ratios existed, so the change of unit is provably
+    not a change of appearance. Away from the reference every gap must
+    move with the font.
+    """
+
+    def test_reference_line_height_matches_the_module_anchor(self) -> None:
+        # If these drift apart the literals below stop being the values
+        # the ratios were authored with, and the identity test loses its
+        # meaning without failing.
+        self.assertEqual(_TEST_LINE_HEIGHT_PX, REFERENCE_LINE_HEIGHT_PX)
+
+    def test_gaps_are_unchanged_at_the_reference_line_height(self) -> None:
+        # The pixel values every one of these gaps carried before the
+        # conversion. Spelled out rather than derived, so the test would
+        # catch a ratio that was mistyped in a way that still scales.
+        table = build_tag_table(
+            char_width_px=_TEST_CHAR_WIDTH_PX,
+            line_height_px=REFERENCE_LINE_HEIGHT_PX,
+            palette=LIGHT_PALETTE,
+        )
+        expected: dict[tuple[TagName, str], int] = {
+            (TagName.HEADING_2, "pixels-above-lines"): 18,
+            (TagName.HEADING_2, "pixels-below-lines"): 9,
+            (TagName.METADATA, "pixels-above-lines"): 6,
+            (TagName.METADATA, "pixels-below-lines"): 8,
+            (TagName.ADMONITION_NOTE_LABEL, "pixels-above-lines"): 8,
+            (TagName.ADMONITION_NOTE_LABEL, "pixels-below-lines"): 6,
+            (TagName.ADMONITION_NOTE_BODY, "pixels-below-lines"): 8,
+            (TagName.BLOCKQUOTE_BODY, "pixels-above-lines"): 6,
+            (TagName.BLOCKQUOTE_BODY, "pixels-below-lines"): 6,
+            (TagName.CODE_BLOCK_TOP_PAD, "pixels-above-lines"): 8,
+            (TagName.CODE_BLOCK_BOTTOM_PAD, "pixels-below-lines"): 8,
+            (TagName.TABLE_ROW, "pixels-above-lines"): 7,
+            (TagName.TABLE_HEADER, "pixels-above-lines"): 8,
+            (TagName.UNREAD_SOURCE, "pixels-above-lines"): 4,
+            (TagName.UNREAD_REASON, "pixels-above-lines"): 5,
+            (TagName.UNREAD_REASON, "pixels-below-lines"): 6,
+        }
+        for key, want in expected.items():
+            name, prop = key
+            with self.subTest(tag=name, property=prop):
+                tag = table.lookup(name.value)
+                self.assertEqual(tag.get_property(prop), want)
+
+    def test_gaps_grow_with_the_line_height(self) -> None:
+        small = build_tag_table(
+            char_width_px=_TEST_CHAR_WIDTH_PX,
+            line_height_px=REFERENCE_LINE_HEIGHT_PX,
+            palette=LIGHT_PALETTE,
+        )
+        large = build_tag_table(
+            char_width_px=_TEST_CHAR_WIDTH_PX,
+            line_height_px=REFERENCE_LINE_HEIGHT_PX * 2,
+            palette=LIGHT_PALETTE,
+        )
+        for name in (TagName.HEADING_2, TagName.METADATA,
+                     TagName.BLOCKQUOTE_BODY, TagName.TABLE_ROW):
+            with self.subTest(tag=name):
+                self.assertGreater(
+                    large.lookup(name.value).get_property("pixels-above-lines"),
+                    small.lookup(name.value).get_property("pixels-above-lines"),
+                )
+
+    def test_heading_ratio_holds_across_font_sizes(self) -> None:
+        # The 2 : 1 model is the reason the ratios exist: it has to
+        # survive the font, not just the reference size.
+        for line_height_px in (12, 17, 24, 42):
+            with self.subTest(line_height_px=line_height_px):
+                table = build_tag_table(
+                    char_width_px=_TEST_CHAR_WIDTH_PX,
+                    line_height_px=line_height_px,
+                    palette=LIGHT_PALETTE,
+                )
+                tag = table.lookup(TagName.HEADING_2.value)
+                self.assertEqual(
+                    tag.get_property("pixels-above-lines"),
+                    2 * tag.get_property("pixels-below-lines"),
+                )
+
+    def test_subordinate_line_ordering_holds_across_font_sizes(self) -> None:
+        # The Phase 1 invariant, re-asserted over the range a user can
+        # actually reach. An ordering that only holds at one font size
+        # is the defect this conversion exists to remove.
+        for line_height_px in (12, 17, 24, 42):
+            with self.subTest(line_height_px=line_height_px):
+                table = build_tag_table(
+                    char_width_px=_TEST_CHAR_WIDTH_PX,
+                    line_height_px=line_height_px,
+                    palette=LIGHT_PALETTE,
+                )
+                metadata = table.lookup(TagName.METADATA.value)
+                self.assertLess(
+                    metadata.get_property("pixels-above-lines"),
+                    metadata.get_property("pixels-below-lines"),
+                )
+                label = table.lookup(TagName.ADMONITION_NOTE_LABEL.value)
+                self.assertLess(
+                    label.get_property("pixels-below-lines"),
+                    label.get_property("pixels-above-lines"),
+                )
+
+
 class ParagraphBackgroundIsNotOnTagsTests(unittest.TestCase):
     """No block-level paragraph tag carries ``paragraph-background-rgba``.
 
@@ -598,7 +743,11 @@ class ParagraphBackgroundIsNotOnTagsTests(unittest.TestCase):
     """
 
     def setUp(self) -> None:
-        self.table = build_tag_table(char_width_px=_TEST_CHAR_WIDTH_PX, palette=LIGHT_PALETTE)
+        self.table = build_tag_table(
+            char_width_px=_TEST_CHAR_WIDTH_PX,
+            line_height_px=_TEST_LINE_HEIGHT_PX,
+            palette=LIGHT_PALETTE,
+        )
 
     def test_no_paragraph_tag_carries_a_paragraph_background_rgba(self) -> None:
         for name in _PARAGRAPH_BACKGROUND_TAGS:
@@ -622,7 +771,11 @@ class AdmonitionTagPropertyTests(unittest.TestCase):
     """Admonition tags carry the visual properties the layout requires."""
 
     def setUp(self) -> None:
-        self.table = build_tag_table(char_width_px=_TEST_CHAR_WIDTH_PX, palette=LIGHT_PALETTE)
+        self.table = build_tag_table(
+            char_width_px=_TEST_CHAR_WIDTH_PX,
+            line_height_px=_TEST_LINE_HEIGHT_PX,
+            palette=LIGHT_PALETTE,
+        )
 
     def test_every_label_paragraph_tag_has_left_and_right_margins(self) -> None:
         # The card spans the prose column (wash inset 0); the paragraph
@@ -717,7 +870,11 @@ class TableRowTagPropertyTests(unittest.TestCase):
     """The table row / header paragraph tags carry the row treatment."""
 
     def setUp(self) -> None:
-        self.table = build_tag_table(char_width_px=_TEST_CHAR_WIDTH_PX, palette=LIGHT_PALETTE)
+        self.table = build_tag_table(
+            char_width_px=_TEST_CHAR_WIDTH_PX,
+            line_height_px=_TEST_LINE_HEIGHT_PX,
+            palette=LIGHT_PALETTE,
+        )
 
     def test_both_row_tags_set_wrap_mode_none(self) -> None:
         # A row is one logical line aligned by a per-table tab array;
@@ -765,7 +922,11 @@ class BlockquoteTagPropertyTests(unittest.TestCase):
     """Blockquote body and attribution tags."""
 
     def setUp(self) -> None:
-        self.table = build_tag_table(char_width_px=_TEST_CHAR_WIDTH_PX, palette=LIGHT_PALETTE)
+        self.table = build_tag_table(
+            char_width_px=_TEST_CHAR_WIDTH_PX,
+            line_height_px=_TEST_LINE_HEIGHT_PX,
+            palette=LIGHT_PALETTE,
+        )
 
     def test_body_left_margin_is_one_m_width_internal_padding(self) -> None:
         # The blockquote card aligns with the prose column (wash inset 0);
@@ -826,7 +987,11 @@ class CodeBlockTagPropertyTests(unittest.TestCase):
     """Code-block tag carries layout but not the monospace family."""
 
     def setUp(self) -> None:
-        self.table = build_tag_table(char_width_px=_TEST_CHAR_WIDTH_PX, palette=LIGHT_PALETTE)
+        self.table = build_tag_table(
+            char_width_px=_TEST_CHAR_WIDTH_PX,
+            line_height_px=_TEST_LINE_HEIGHT_PX,
+            palette=LIGHT_PALETTE,
+        )
 
     def test_has_left_and_right_margins(self) -> None:
         # The code card aligns with the prose column (wash inset 0); the
@@ -894,7 +1059,9 @@ class UnreadMarkTagPropertyTests(unittest.TestCase):
 
     def setUp(self) -> None:
         self.table = build_tag_table(
-            char_width_px=_TEST_CHAR_WIDTH_PX, palette=LIGHT_PALETTE,
+            char_width_px=_TEST_CHAR_WIDTH_PX,
+            line_height_px=_TEST_LINE_HEIGHT_PX,
+            palette=LIGHT_PALETTE,
         )
 
     def test_both_parts_set_an_explicit_foreground(self) -> None:
@@ -954,7 +1121,11 @@ class WashSpecTests(unittest.TestCase):
 
     def setUp(self) -> None:
         self.specs = build_wash_specs(LIGHT_PALETTE)
-        self.table = build_tag_table(char_width_px=_TEST_CHAR_WIDTH_PX, palette=LIGHT_PALETTE)
+        self.table = build_tag_table(
+            char_width_px=_TEST_CHAR_WIDTH_PX,
+            line_height_px=_TEST_LINE_HEIGHT_PX,
+            palette=LIGHT_PALETTE,
+        )
 
     def test_keys_are_tag_names(self) -> None:
         for name in self.specs:
@@ -1185,7 +1356,9 @@ class ApplyPaletteTests(unittest.TestCase):
 
     def test_build_uses_the_palette_it_is_given(self) -> None:
         table = build_tag_table(
-            char_width_px=_TEST_CHAR_WIDTH_PX, palette=DARK_PALETTE,
+            char_width_px=_TEST_CHAR_WIDTH_PX,
+            line_height_px=_TEST_LINE_HEIGHT_PX,
+            palette=DARK_PALETTE,
         )
         self.assertEqual(
             _foreground_of(table, TagName.LINK),
@@ -1200,11 +1373,15 @@ class ApplyPaletteTests(unittest.TestCase):
         # build_tag_table set directly, instead of via apply_palette,
         # would survive here and show up as a mismatch.
         rethemed = build_tag_table(
-            char_width_px=_TEST_CHAR_WIDTH_PX, palette=LIGHT_PALETTE,
+            char_width_px=_TEST_CHAR_WIDTH_PX,
+            line_height_px=_TEST_LINE_HEIGHT_PX,
+            palette=LIGHT_PALETTE,
         )
         apply_palette(rethemed, DARK_PALETTE)
         fresh = build_tag_table(
-            char_width_px=_TEST_CHAR_WIDTH_PX, palette=DARK_PALETTE,
+            char_width_px=_TEST_CHAR_WIDTH_PX,
+            line_height_px=_TEST_LINE_HEIGHT_PX,
+            palette=DARK_PALETTE,
         )
         for name in _COLOURED_TAG_NAMES:
             with self.subTest(tag=name):
@@ -1217,7 +1394,9 @@ class ApplyPaletteTests(unittest.TestCase):
         # Switching to dark and back must be lossless — the user who
         # toggles their desktop theme twice ends where they started.
         table = build_tag_table(
-            char_width_px=_TEST_CHAR_WIDTH_PX, palette=LIGHT_PALETTE,
+            char_width_px=_TEST_CHAR_WIDTH_PX,
+            line_height_px=_TEST_LINE_HEIGHT_PX,
+            palette=LIGHT_PALETTE,
         )
         apply_palette(table, DARK_PALETTE)
         apply_palette(table, LIGHT_PALETTE)
@@ -1230,10 +1409,14 @@ class ApplyPaletteTests(unittest.TestCase):
         # If a tag resolved to the same colour in both, it would be a
         # value someone forgot to re-derive for the dark sheet.
         light = build_tag_table(
-            char_width_px=_TEST_CHAR_WIDTH_PX, palette=LIGHT_PALETTE,
+            char_width_px=_TEST_CHAR_WIDTH_PX,
+            line_height_px=_TEST_LINE_HEIGHT_PX,
+            palette=LIGHT_PALETTE,
         )
         dark = build_tag_table(
-            char_width_px=_TEST_CHAR_WIDTH_PX, palette=DARK_PALETTE,
+            char_width_px=_TEST_CHAR_WIDTH_PX,
+            line_height_px=_TEST_LINE_HEIGHT_PX,
+            palette=DARK_PALETTE,
         )
         for name in _COLOURED_TAG_NAMES:
             with self.subTest(tag=name):
@@ -1243,7 +1426,9 @@ class ApplyPaletteTests(unittest.TestCase):
 
     def test_admonition_kind_labels_take_their_kind_colour(self) -> None:
         table = build_tag_table(
-            char_width_px=_TEST_CHAR_WIDTH_PX, palette=DARK_PALETTE,
+            char_width_px=_TEST_CHAR_WIDTH_PX,
+            line_height_px=_TEST_LINE_HEIGHT_PX,
+            palette=DARK_PALETTE,
         )
         for kind in AdmonitionKind:
             with self.subTest(kind=kind):
@@ -1254,7 +1439,9 @@ class ApplyPaletteTests(unittest.TestCase):
 
     def test_unread_mark_parts_take_their_part_colour(self) -> None:
         table = build_tag_table(
-            char_width_px=_TEST_CHAR_WIDTH_PX, palette=DARK_PALETTE,
+            char_width_px=_TEST_CHAR_WIDTH_PX,
+            line_height_px=_TEST_LINE_HEIGHT_PX,
+            palette=DARK_PALETTE,
         )
         expected = {
             UnreadMarkPart.SOURCE: TagName.UNREAD_SOURCE,
@@ -1278,7 +1465,9 @@ class ApplyPaletteTests(unittest.TestCase):
         # from the measured font at construction and re-measuring is not
         # part of a theme change.
         table = build_tag_table(
-            char_width_px=_TEST_CHAR_WIDTH_PX, palette=LIGHT_PALETTE,
+            char_width_px=_TEST_CHAR_WIDTH_PX,
+            line_height_px=_TEST_LINE_HEIGHT_PX,
+            palette=LIGHT_PALETTE,
         )
         tag = table.lookup(TagName.CODE_BLOCK.value)
         assert tag is not None

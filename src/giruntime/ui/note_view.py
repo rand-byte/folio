@@ -440,10 +440,11 @@ def build_article_surface() -> ArticleSurface:
     2. the body-font measurers (M-width + line height) off that view's
        Pango context — :func:`_build_font_measurers` is the single seam
        tests stub;
-    3. the shared tag table, parameterised by the measured M-width and by
-       the view's own palette (the view owns the colour-scheme decision,
-       so asking it here is what starts the surface self-consistent), and
-       a buffer on it;
+    3. the shared tag table, parameterised by both font measurements —
+       the M-width sets the block-level horizontal insets, the line
+       height sets every vertical gap — and by the view's own palette
+       (the view owns the colour-scheme decision, so asking it here is
+       what starts the surface self-consistent), and a buffer on it;
     4. the block-tint wash map, installed via the one shared seam
        :meth:`ArticleTextView.install_wash_specs_from_table`;
     5. the fixed-width :class:`ArticleContainer` wrapping the view, with
@@ -472,6 +473,7 @@ def build_article_surface() -> ArticleSurface:
 
     tag_table = build_tag_table(
         char_width_px=char_width_measurer(),
+        line_height_px=line_height_measurer(),
         palette=text_view.palette(),
     )
     buffer = Gtk.TextBuffer.new(tag_table)

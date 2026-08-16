@@ -216,7 +216,7 @@ def _build_renderer(
 ) -> tuple[TextBufferRenderer, Gtk.TextBuffer, Gtk.TextTagTable]:
     """Construct a renderer and a buffer wired to a fresh tag table."""
     table = tag_table if tag_table is not None else build_tag_table(
-        char_width_px=9, palette=LIGHT_PALETTE,
+        char_width_px=9, line_height_px=24, palette=LIGHT_PALETTE,
     )
     renderer = TextBufferRenderer(
         image_bytes_for=image_bytes_for if image_bytes_for is not None else (lambda _f: _PNG_1X1),
@@ -556,7 +556,11 @@ class ListRenderingTests(unittest.TestCase):
         #      GAP   = round(LIST_MARKER_GAP_CHARS * char_width_px),
         #      STEP  = FIELD + GAP.
         char_width_px = 9
-        table = build_tag_table(char_width_px=char_width_px, palette=LIGHT_PALETTE)
+        table = build_tag_table(
+            char_width_px=char_width_px,
+            line_height_px=24,
+            palette=LIGHT_PALETTE,
+        )
         field = LIST_MARKER_FIELD_CHARS * char_width_px
         gap = round(LIST_MARKER_GAP_CHARS * char_width_px)
         step = field + gap
@@ -947,8 +951,12 @@ class RebuildSemanticsTests(unittest.TestCase):
         # If the buffer was constructed with a different tag table,
         # the renderer raises rather than silently writing tags that
         # are missing from the buffer.
-        wrong_table = build_tag_table(char_width_px=9, palette=LIGHT_PALETTE)
-        right_table = build_tag_table(char_width_px=9, palette=LIGHT_PALETTE)
+        wrong_table = build_tag_table(
+        char_width_px=9, line_height_px=24, palette=LIGHT_PALETTE,
+    )
+        right_table = build_tag_table(
+        char_width_px=9, line_height_px=24, palette=LIGHT_PALETTE,
+    )
         renderer = TextBufferRenderer(
             image_bytes_for=lambda _f: _PNG_1X1,
             attachments_for=lambda: (),

@@ -369,10 +369,70 @@ _HEADING_SCALES: dict[int, float] = {
 }
 
 
+# --- Vertical rhythm -------------------------------------------------------
+#
+# Every *vertical* gap below is a ratio of the body font's measured line
+# height, resolved to pixels by :func:`_gap_px` at table-build time. The
+# horizontal insets are unrelated and stay derived from the measured
+# M-width; only the vertical axis is expressed this way.
+#
+# Why a ratio and not a pixel count. The block rhythm the gaps are judged
+# against is not a constant: one blank line between two paragraphs is one
+# body line height, so it grows with the user's font while a literal
+# ``18`` does not. A gap tuned in pixels is therefore correct at exactly
+# one font size and drifts at every other -- at a large accessibility
+# font the gap above a section heading fell to roughly half the gap
+# between two paragraphs, so a section break was announced by *less* air
+# than separated two paragraphs inside it. Ratios keep the whole design
+# proportional, which is what the module already does for type (see the
+# ``scale`` note in the module docstring); this extends it to spacing.
+#
+# Each ratio is written as ``N / REFERENCE_LINE_HEIGHT_PX`` rather than
+# as a decimal, so the pixel value it was authored at stays visible next
+# to it. The awkward-looking ones (``7 /``, ``5 /``) are not design
+# choices -- they are the pixel literals these gaps carried before the
+# conversion, preserved exactly. Rounding them to tidier fractions would
+# be a *tuning* decision and belongs in its own change, not in the one
+# that switches the unit.
+REFERENCE_LINE_HEIGHT_PX: int = 24
+"""Line height the vertical ratios below were authored against.
+
+The measured height of one body line at Cantarell 15, a typical desktop
+default. It exists so :func:`_gap_px` is an exact identity at that size
+-- every gap resolves to the pixel value it had before the ratios were
+introduced -- which is what makes the conversion reviewable: at the
+reference font nothing may move, and at any other font everything moves
+*because that was the defect*.
+
+It is a documentation anchor, not a runtime input: nothing reads the
+user's font and compares it against this. It is public only so
+``test_tag_table.py`` can assert the identity -- a test that hard-codes
+``24`` instead would keep passing if the anchor moved.
+"""
+
+
+def _gap_px(gap_lines: float, line_height_px: int) -> int:
+    """Resolve a vertical gap ratio to pixels for the measured font.
+
+    GTK's pixel-padding properties are integers, so two ratios that
+    differ by less than half a pixel at the current line height collapse
+    to the same gap. That is accepted rather than defended against: at a
+    small font the distinctions these ratios draw are below what a
+    reader can see anyway, and rounding up to force them apart would
+    make a small font's rhythm looser than its type.
+    """
+    return round(gap_lines * line_height_px)
+
+
 # Asymmetric vertical spacing for *body* headings (levels 2-6): the gap
 # above a heading is twice the gap below it, so the heading binds
 # visually to the content beneath it rather than floating midway between
-# two blocks. Applied as the heading paragraph tag's pixel padding so the
+# two blocks. Only the *below* gap is a ratio of the line height; the
+# above gap is a whole multiple of the resolved pixel result, so the
+# 2 : 1 model is exact at every font size. Resolving two independent
+# ratios would not be exact -- integer rounding turns them into 13 : 6
+# at a 17 px line -- and the whole point of the pair is the ratio.
+# Applied as the heading paragraph tag's pixel padding so the
 # ratio is exact and font-agnostic; the renderer pairs this with
 # stripping the preceding block's trailing blank line and trimming the
 # heading's own trailing separator to a single newline, so each gap is
@@ -380,8 +440,8 @@ _HEADING_SCALES: dict[int, float] = {
 # ``textbuffer_renderer._emit_section``). The document title (level 0)
 # is out of scope — its spacing is governed by the title -> metadata-line
 # -> body sequence in ``render_into`` and carries no padding here.
-_HEADING_PIXELS_ABOVE_PX: int = 18
-_HEADING_PIXELS_BELOW_PX: int = 9
+_HEADING_GAP_BELOW_LINES: float = 9 / REFERENCE_LINE_HEIGHT_PX
+_HEADING_GAP_ABOVE_MULTIPLE: int = 2
 
 
 def heading_tag_name(level: int) -> TagName:
@@ -524,9 +584,9 @@ _MONOSPACE_FAMILY: str = "monospace"
 # document title and its metadata line; ``test_tag_table.py`` asserts
 # the ordering for both.
 _ADMONITION_HMARGIN_PX: int = 0
-_ADMONITION_VPADDING_PX: int = 8
-_ADMONITION_INNER_GAP_PX: int = 6
-_ADMONITION_LINE_GAP_PX: int = 2
+_ADMONITION_VPADDING_LINES: float = 8 / REFERENCE_LINE_HEIGHT_PX
+_ADMONITION_INNER_GAP_LINES: float = 6 / REFERENCE_LINE_HEIGHT_PX
+_ADMONITION_LINE_GAP_LINES: float = 2 / REFERENCE_LINE_HEIGHT_PX
 
 # Paragraph metrics for blockquotes. The box insets are ``0`` so the
 # quote's left rule aligns with the full prose column like a table; the
@@ -538,8 +598,8 @@ _ADMONITION_LINE_GAP_PX: int = 2
 # :data:`WashSpec.bar_width_px`.
 _BLOCKQUOTE_HMARGIN_PX: int = 0
 _BLOCKQUOTE_RIGHT_MARGIN_PX: int = 0
-_BLOCKQUOTE_VPADDING_PX: int = 6
-_BLOCKQUOTE_LINE_GAP_PX: int = 2
+_BLOCKQUOTE_VPADDING_LINES: float = 6 / REFERENCE_LINE_HEIGHT_PX
+_BLOCKQUOTE_LINE_GAP_LINES: float = 2 / REFERENCE_LINE_HEIGHT_PX
 _BLOCKQUOTE_BAR_WIDTH_PX: int = 3
 
 # Paragraph metrics for code blocks. The box insets are ``0`` so the
@@ -549,13 +609,13 @@ _BLOCKQUOTE_BAR_WIDTH_PX: int = 3
 # ``pixels-inside-wrap`` are all ``0`` on the ``CODE_BLOCK`` tag itself —
 # see :func:`_make_code_block_tag`) so consecutive code lines abut at
 # the bare font line height and box-drawing glyphs connect into
-# continuous rules. ``_CODE_BLOCK_EDGE_PADDING_PX`` is instead applied
+# continuous rules. ``_CODE_BLOCK_EDGE_PADDING_LINES`` is instead applied
 # only at the block's top and bottom edge, via the
 # :data:`TagName.CODE_BLOCK_TOP_PAD` / :data:`TagName.CODE_BLOCK_BOTTOM_PAD`
 # tags the renderer layers across the block's first and last logical
 # line respectively.
 _CODE_BLOCK_HMARGIN_PX: int = 0
-_CODE_BLOCK_EDGE_PADDING_PX: int = 8
+_CODE_BLOCK_EDGE_PADDING_LINES: float = 8 / REFERENCE_LINE_HEIGHT_PX
 
 # Scale multiplier for the blockquote attribution line. Slightly
 # smaller than body text so the citation reads as secondary metadata.
@@ -581,8 +641,8 @@ _BLOCKQUOTE_ATTRIBUTION_SCALE: float = 0.9
 # and the rule lands centred between them — and the header's text is
 # centred within its tint band rather than hugging the top edge.
 _TABLE_BOX_INSET_PX: int = 0
-_TABLE_ROW_VPADDING_PX: int = 7
-_TABLE_HEADER_VPADDING_PX: int = 8
+_TABLE_ROW_VPADDING_LINES: float = 7 / REFERENCE_LINE_HEIGHT_PX
+_TABLE_HEADER_VPADDING_LINES: float = 8 / REFERENCE_LINE_HEIGHT_PX
 
 
 # Metadata line (Created / Modified / tags) under the document title.
@@ -595,7 +655,7 @@ _TABLE_HEADER_VPADDING_PX: int = 8
 # must be non-zero: with no padding the gap is the font's own leading
 # alone, which a descender in the title ("git", "python", "grep")
 # consumes entirely, so the two lines collide. It must also stay
-# *smaller* than ``_METADATA_PIXELS_BELOW_LINES_PX`` -- the two gaps
+# *smaller* than ``_METADATA_GAP_BELOW_LINES`` -- the two gaps
 # bracket the metadata line, and if the one above is not the tighter of
 # the pair the line floats midway between the title and the rule and
 # reads as belonging to neither. That ordering, not the literal value,
@@ -607,8 +667,8 @@ _TABLE_HEADER_VPADDING_PX: int = 8
 # case; an ascender-only title sits a hair loose, which is invisible in
 # practice where the collision is not.
 _METADATA_SCALE: float = 0.85
-_METADATA_PIXELS_ABOVE_LINES_PX: int = 6
-_METADATA_PIXELS_BELOW_LINES_PX: int = 8
+_METADATA_GAP_ABOVE_LINES: float = 6 / REFERENCE_LINE_HEIGHT_PX
+_METADATA_GAP_BELOW_LINES: float = 8 / REFERENCE_LINE_HEIGHT_PX
 _METADATA_RULE_INSET_PX: int = 0
 
 
@@ -634,19 +694,19 @@ _UNREAD_TAG_NAMES: dict[UnreadMarkPart, TagName] = {
 # so the two left-ruled blocks read as one family.
 _UNREAD_HMARGIN_PX: int = 0
 _UNREAD_BAR_WIDTH_PX: int = 3
-_UNREAD_SOURCE_VPADDING_PX: int = 4
+_UNREAD_SOURCE_VPADDING_LINES: float = 4 / REFERENCE_LINE_HEIGHT_PX
 _UNREAD_REASON_SCALE: float = 0.9
 # The reason must read as annotation *about* the source above it, not as
 # one more line of it. At the source's line spacing a 2px gap put it
 # closer to the last source line than those lines are to each other,
 # which grouped it with the quarantined text; 5px separates the two
 # without detaching the reason from what it explains.
-_UNREAD_REASON_PIXELS_ABOVE_PX: int = 5
-_UNREAD_REASON_PIXELS_BELOW_PX: int = 6
+_UNREAD_REASON_GAP_ABOVE_LINES: float = 5 / REFERENCE_LINE_HEIGHT_PX
+_UNREAD_REASON_GAP_BELOW_LINES: float = 6 / REFERENCE_LINE_HEIGHT_PX
 
 
 def build_tag_table(
-    *, char_width_px: int, palette: Palette,
+    *, char_width_px: int, line_height_px: int, palette: Palette,
 ) -> Gtk.TextTagTable:
     """Construct the rendered-view tag table for the current subset.
 
@@ -656,6 +716,14 @@ def build_tag_table(
     on every block-level paragraph tag. Tests pass an explicit small
     int (e.g. ``9``); production passes the result of
     :meth:`ui.article_container.ArticleContainer.char_width_px`.
+
+    ``line_height_px`` is the measured height of one body line, and is
+    required for the same reason: every vertical gap on the returned
+    tags is a ratio of it (see :func:`_gap_px`), so a default would
+    silently mis-space the whole rendered view. Production passes
+    :meth:`ui.article_container.ArticleContainer.line_height_px`, the
+    same measurement the article margins are derived from, so the block
+    rhythm and the designed gaps are proportional to one quantity.
 
     ``palette`` supplies every colour. It is required for the same
     reason: defaulting to the light set would make "which sheet is this
@@ -690,7 +758,10 @@ def build_tag_table(
     for level, scale in _HEADING_SCALES.items():
         table.add(
             _make_heading_tag(
-                _LEVEL_TO_TAG_NAME[level], scale=scale, is_body=level != 0,
+                _LEVEL_TO_TAG_NAME[level],
+                scale=scale,
+                is_body=level != 0,
+                line_height_px=line_height_px,
             )
         )
     for depth, list_item_name in _DEPTH_TO_LIST_ITEM_TAG_NAME.items():
@@ -705,6 +776,7 @@ def build_tag_table(
                 _ADMONITION_LABEL_TAG_NAMES[kind],
                 is_label=True,
                 char_width_px=char_width_px,
+                line_height_px=line_height_px,
             )
         )
         table.add(
@@ -712,6 +784,7 @@ def build_tag_table(
                 _ADMONITION_BODY_TAG_NAMES[kind],
                 is_label=False,
                 char_width_px=char_width_px,
+                line_height_px=line_height_px,
             )
         )
         table.add(
@@ -722,7 +795,9 @@ def build_tag_table(
         )
     table.add(
         _make_blockquote_body_tag(
-            TagName.BLOCKQUOTE_BODY, char_width_px=char_width_px,
+            TagName.BLOCKQUOTE_BODY,
+            char_width_px=char_width_px,
+            line_height_px=line_height_px,
         )
     )
     table.add(
@@ -737,19 +812,45 @@ def build_tag_table(
     # property each carries — GTK resolves a paragraph property from the
     # highest-priority tag on the line that sets it, and later table
     # insertion order is higher priority.
-    table.add(_make_code_block_pad_tag(TagName.CODE_BLOCK_TOP_PAD, is_top=True))
     table.add(
-        _make_code_block_pad_tag(TagName.CODE_BLOCK_BOTTOM_PAD, is_top=False)
-    )
-    table.add(_make_table_row_tag(TagName.TABLE_ROW, is_header=False))
-    table.add(_make_table_row_tag(TagName.TABLE_HEADER, is_header=True))
-    table.add(_make_metadata_tag(TagName.METADATA))
-    table.add(
-        _make_unread_source_tag(
-            TagName.UNREAD_SOURCE, char_width_px=char_width_px,
+        _make_code_block_pad_tag(
+            TagName.CODE_BLOCK_TOP_PAD,
+            is_top=True,
+            line_height_px=line_height_px,
         )
     )
-    table.add(_make_unread_reason_tag(TagName.UNREAD_REASON))
+    table.add(
+        _make_code_block_pad_tag(
+            TagName.CODE_BLOCK_BOTTOM_PAD,
+            is_top=False,
+            line_height_px=line_height_px,
+        )
+    )
+    table.add(
+        _make_table_row_tag(
+            TagName.TABLE_ROW, is_header=False, line_height_px=line_height_px,
+        )
+    )
+    table.add(
+        _make_table_row_tag(
+            TagName.TABLE_HEADER, is_header=True, line_height_px=line_height_px,
+        )
+    )
+    table.add(
+        _make_metadata_tag(TagName.METADATA, line_height_px=line_height_px)
+    )
+    table.add(
+        _make_unread_source_tag(
+            TagName.UNREAD_SOURCE,
+            char_width_px=char_width_px,
+            line_height_px=line_height_px,
+        )
+    )
+    table.add(
+        _make_unread_reason_tag(
+            TagName.UNREAD_REASON, line_height_px=line_height_px,
+        )
+    )
     apply_palette(table, palette)
     return table
 
@@ -935,14 +1036,16 @@ def _make_inline_tag(  # pylint: disable=too-many-arguments
     return tag
 
 
-def _make_heading_tag(name: TagName, *, scale: float, is_body: bool) -> Gtk.TextTag:
+def _make_heading_tag(
+    name: TagName, *, scale: float, is_body: bool, line_height_px: int,
+) -> Gtk.TextTag:
     """Build a heading-style tag: bold weight at the given scale.
 
     ``is_body`` selects the asymmetric vertical spacing (2 : 1 above :
     below) that applies to body section headings (levels 2-6): when
     ``True`` the tag also carries ``pixels-above-lines`` /
-    ``pixels-below-lines`` from :data:`_HEADING_PIXELS_ABOVE_PX` /
-    :data:`_HEADING_PIXELS_BELOW_PX`, driving both gaps directly so the
+    ``pixels-below-lines`` derived from :data:`_HEADING_GAP_BELOW_LINES`
+    and :data:`_HEADING_GAP_ABOVE_MULTIPLE`, driving both gaps directly so the
     ratio is exact and independent of the surrounding block separators
     (see ``textbuffer_renderer._emit_section``, which strips the
     preceding blank line and trims the heading's own trailing separator
@@ -954,8 +1057,15 @@ def _make_heading_tag(name: TagName, *, scale: float, is_body: bool) -> Gtk.Text
     tag.set_property("weight", Pango.Weight.BOLD)
     tag.set_property("scale", scale)
     if is_body:
-        tag.set_property("pixels-above-lines", _HEADING_PIXELS_ABOVE_PX)
-        tag.set_property("pixels-below-lines", _HEADING_PIXELS_BELOW_PX)
+        # The gap below is resolved first and the gap above derived
+        # from it, so the 2 : 1 model survives integer rounding at every
+        # font size. Resolving both ratios independently does not: at a
+        # 17 px line the two round to 13 and 6, which is 2.17 : 1.
+        gap_below_px = _gap_px(_HEADING_GAP_BELOW_LINES, line_height_px)
+        tag.set_property(
+            "pixels-above-lines", _HEADING_GAP_ABOVE_MULTIPLE * gap_below_px,
+        )
+        tag.set_property("pixels-below-lines", gap_below_px)
     return tag
 
 
@@ -1010,6 +1120,7 @@ def _make_admonition_paragraph_tag(
     *,
     is_label: bool,
     char_width_px: int,
+    line_height_px: int,
 ) -> Gtk.TextTag:
     """Build an admonition paragraph tag (label or body role).
 
@@ -1028,9 +1139,9 @@ def _make_admonition_paragraph_tag(
 
     ``is_label`` selects which of the two roles the tag plays, and both
     of its vertical gaps follow from that. The card's *outer* padding
-    (:data:`_ADMONITION_VPADDING_PX`) sits above the label and below the
+    (:data:`_ADMONITION_VPADDING_LINES`) sits above the label and below the
     body, giving the block an even top and bottom margin. The gap
-    *between* them (:data:`_ADMONITION_INNER_GAP_PX`) is contributed
+    *between* them (:data:`_ADMONITION_INNER_GAP_LINES`) is contributed
     once, by the label's ``pixels-below-lines`` — the body's
     ``pixels-above-lines`` stays ``0`` so the two do not add up, since
     ``pixels-above-lines`` applies to every logical line of a multi-line
@@ -1043,18 +1154,25 @@ def _make_admonition_paragraph_tag(
     tag.set_property("right-margin", _ADMONITION_HMARGIN_PX + char_width_px)
     tag.set_property(
         "pixels-above-lines",
-        _ADMONITION_VPADDING_PX if is_label else 0,
+        _gap_px(_ADMONITION_VPADDING_LINES, line_height_px) if is_label else 0,
     )
     tag.set_property(
         "pixels-below-lines",
-        _ADMONITION_INNER_GAP_PX if is_label else _ADMONITION_VPADDING_PX,
+        _gap_px(
+            _ADMONITION_INNER_GAP_LINES if is_label
+            else _ADMONITION_VPADDING_LINES,
+            line_height_px,
+        ),
     )
-    tag.set_property("pixels-inside-wrap", _ADMONITION_LINE_GAP_PX)
+    tag.set_property(
+        "pixels-inside-wrap",
+        _gap_px(_ADMONITION_LINE_GAP_LINES, line_height_px),
+    )
     return tag
 
 
 def _make_blockquote_body_tag(
-    name: TagName, *, char_width_px: int,
+    name: TagName, *, char_width_px: int, line_height_px: int,
 ) -> Gtk.TextTag:
     """Build the blockquote-body paragraph tag.
 
@@ -1078,9 +1196,13 @@ def _make_blockquote_body_tag(
     tag.set_property(
         "right-margin", _BLOCKQUOTE_RIGHT_MARGIN_PX + char_width_px,
     )
-    tag.set_property("pixels-above-lines", _BLOCKQUOTE_VPADDING_PX)
-    tag.set_property("pixels-below-lines", _BLOCKQUOTE_VPADDING_PX)
-    tag.set_property("pixels-inside-wrap", _BLOCKQUOTE_LINE_GAP_PX)
+    vpadding = _gap_px(_BLOCKQUOTE_VPADDING_LINES, line_height_px)
+    tag.set_property("pixels-above-lines", vpadding)
+    tag.set_property("pixels-below-lines", vpadding)
+    tag.set_property(
+        "pixels-inside-wrap",
+        _gap_px(_BLOCKQUOTE_LINE_GAP_LINES, line_height_px),
+    )
     return tag
 
 
@@ -1140,12 +1262,14 @@ def _make_code_block_tag(name: TagName, *, char_width_px: int) -> Gtk.TextTag:
     return tag
 
 
-def _make_code_block_pad_tag(name: TagName, *, is_top: bool) -> Gtk.TextTag:
+def _make_code_block_pad_tag(
+    name: TagName, *, is_top: bool, line_height_px: int,
+) -> Gtk.TextTag:
     """Build a code-block edge-padding tag (top or bottom role).
 
     Carries only the one pixel-padding property its role needs —
     ``pixels-above-lines`` for the top-pad tag, ``pixels-below-lines``
-    for the bottom-pad tag — from :data:`_CODE_BLOCK_EDGE_PADDING_PX`.
+    for the bottom-pad tag — from :data:`_CODE_BLOCK_EDGE_PADDING_LINES`.
     The renderer layers this on top of :data:`TagName.CODE_BLOCK` across
     only the block's first (top role) or last (bottom role) logical
     line, mirroring the admonition label/body padding-role split. Not
@@ -1154,13 +1278,21 @@ def _make_code_block_pad_tag(name: TagName, *, is_top: bool) -> Gtk.TextTag:
     """
     tag = Gtk.TextTag.new(name.value)
     if is_top:
-        tag.set_property("pixels-above-lines", _CODE_BLOCK_EDGE_PADDING_PX)
+        tag.set_property(
+            "pixels-above-lines",
+            _gap_px(_CODE_BLOCK_EDGE_PADDING_LINES, line_height_px),
+        )
     else:
-        tag.set_property("pixels-below-lines", _CODE_BLOCK_EDGE_PADDING_PX)
+        tag.set_property(
+            "pixels-below-lines",
+            _gap_px(_CODE_BLOCK_EDGE_PADDING_LINES, line_height_px),
+        )
     return tag
 
 
-def _make_table_row_tag(name: TagName, *, is_header: bool) -> Gtk.TextTag:
+def _make_table_row_tag(
+    name: TagName, *, is_header: bool, line_height_px: int,
+) -> Gtk.TextTag:
     """Build a table-row paragraph tag (header or data role).
 
     A rendered table is native buffer text: every row is one logical
@@ -1215,13 +1347,16 @@ def _make_table_row_tag(name: TagName, *, is_header: bool) -> Gtk.TextTag:
     tag.set_property("wrap-mode", Gtk.WrapMode.NONE)
     tag.set_property("accumulative-margin", True)
     tag.set_property("left-margin", TABLE_CELL_HPADDING_PX)
-    vpadding = _TABLE_HEADER_VPADDING_PX if is_header else _TABLE_ROW_VPADDING_PX
+    vpadding = _gap_px(
+        _TABLE_HEADER_VPADDING_LINES if is_header else _TABLE_ROW_VPADDING_LINES,
+        line_height_px,
+    )
     tag.set_property("pixels-above-lines", vpadding)
     tag.set_property("pixels-below-lines", vpadding)
     return tag
 
 
-def _make_metadata_tag(name: TagName) -> Gtk.TextTag:
+def _make_metadata_tag(name: TagName, *, line_height_px: int) -> Gtk.TextTag:
     """Build the metadata-line tag (Created / Modified / tags).
 
     Carries the *non-colour* text appearance: a slightly reduced scale
@@ -1240,13 +1375,19 @@ def _make_metadata_tag(name: TagName) -> Gtk.TextTag:
     """
     tag = Gtk.TextTag.new(name.value)
     tag.set_property("scale", _METADATA_SCALE)
-    tag.set_property("pixels-above-lines", _METADATA_PIXELS_ABOVE_LINES_PX)
-    tag.set_property("pixels-below-lines", _METADATA_PIXELS_BELOW_LINES_PX)
+    tag.set_property(
+        "pixels-above-lines",
+        _gap_px(_METADATA_GAP_ABOVE_LINES, line_height_px),
+    )
+    tag.set_property(
+        "pixels-below-lines",
+        _gap_px(_METADATA_GAP_BELOW_LINES, line_height_px),
+    )
     return tag
 
 
 def _make_unread_source_tag(
-    name: TagName, *, char_width_px: int,
+    name: TagName, *, char_width_px: int, line_height_px: int,
 ) -> Gtk.TextTag:
     """Build the paragraph tag for verbatim unread source lines.
 
@@ -1264,12 +1405,17 @@ def _make_unread_source_tag(
     tag.set_property("accumulative-margin", True)
     tag.set_property("left-margin", _UNREAD_HMARGIN_PX + char_width_px)
     tag.set_property("right-margin", _UNREAD_HMARGIN_PX + char_width_px)
-    tag.set_property("pixels-above-lines", _UNREAD_SOURCE_VPADDING_PX)
+    tag.set_property(
+        "pixels-above-lines",
+        _gap_px(_UNREAD_SOURCE_VPADDING_LINES, line_height_px),
+    )
     tag.set_property("family", _MONOSPACE_FAMILY)
     return tag
 
 
-def _make_unread_reason_tag(name: TagName) -> Gtk.TextTag:
+def _make_unread_reason_tag(
+    name: TagName, *, line_height_px: int,
+) -> Gtk.TextTag:
     """Build the paragraph tag for the reason line under unread source.
 
     Dimmed and slightly reduced, with a gap below that separates the mark
@@ -1287,6 +1433,12 @@ def _make_unread_reason_tag(name: TagName) -> Gtk.TextTag:
     tag.set_property("accumulative-margin", True)
     tag.set_property("left-margin", _UNREAD_HMARGIN_PX)
     tag.set_property("scale", _UNREAD_REASON_SCALE)
-    tag.set_property("pixels-above-lines", _UNREAD_REASON_PIXELS_ABOVE_PX)
-    tag.set_property("pixels-below-lines", _UNREAD_REASON_PIXELS_BELOW_PX)
+    tag.set_property(
+        "pixels-above-lines",
+        _gap_px(_UNREAD_REASON_GAP_ABOVE_LINES, line_height_px),
+    )
+    tag.set_property(
+        "pixels-below-lines",
+        _gap_px(_UNREAD_REASON_GAP_BELOW_LINES, line_height_px),
+    )
     return tag
