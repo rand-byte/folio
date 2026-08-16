@@ -424,24 +424,50 @@ def _gap_px(gap_lines: float, line_height_px: int) -> int:
     return round(gap_lines * line_height_px)
 
 
-# Asymmetric vertical spacing for *body* headings (levels 2-6): the gap
-# above a heading is twice the gap below it, so the heading binds
-# visually to the content beneath it rather than floating midway between
-# two blocks. Only the *below* gap is a ratio of the line height; the
-# above gap is a whole multiple of the resolved pixel result, so the
-# 2 : 1 model is exact at every font size. Resolving two independent
-# ratios would not be exact -- integer rounding turns them into 13 : 6
-# at a 17 px line -- and the whole point of the pair is the ratio.
-# Applied as the heading paragraph tag's pixel padding so the
-# ratio is exact and font-agnostic; the renderer pairs this with
-# stripping the preceding block's trailing blank line and trimming the
-# heading's own trailing separator to a single newline, so each gap is
-# the tag's padding alone (see :func:`_make_heading_tag` and
-# ``textbuffer_renderer._emit_section``). The document title (level 0)
-# is out of scope — its spacing is governed by the title -> metadata-line
-# -> body sequence in ``render_into`` and carries no padding here.
+# Asymmetric vertical spacing for *body* headings (levels 2-6). Two
+# separate jobs, so two separate rules.
+#
+# The gap *below* binds the heading to the content it introduces. That
+# relationship does not depend on the heading's rank -- an H6 owns the
+# paragraph under it exactly as much as an H2 owns the section under it
+# -- so it is one ratio for every level, and comfortably under one line
+# so the heading reads as attached to what follows rather than floating
+# between two blocks.
+#
+# The gap *above* separates one section from the previous one, and that
+# job does scale with rank: a major section deserves more air than a
+# sub-sub-heading. It is therefore the level's own ``scale`` times a
+# per-scale ratio, which makes the spacing ramp track the type ramp
+# using the numbers already in ``_HEADING_SCALES`` rather than a second
+# table to keep in step.
+#
+# The per-scale ratio is set by the *smallest* body heading, not the
+# largest. Level 6 has no size cue at all (scale 1.0, identical to body
+# text, bold alone distinguishes it), so it is the level where the gap
+# is doing all the work, and it is the one that must clear one full line
+# -- the block rhythm, since one blank line between paragraphs is one
+# line height. At 1.15 the ramp runs 1.15 L at level 6 up to 1.84 L at
+# level 2, so every level announces a section with more space than
+# separates two paragraphs inside it, which is the property that was
+# missing.
+#
+# There is deliberately no fixed ratio between the two gaps any more.
+# The previous 2 : 1 was a proxy for "binds downward"; the real
+# invariants are that the gap above exceeds the gap below and exceeds
+# one line, and those are what ``test_tag_table.py`` asserts. A fixed
+# ratio cannot survive the above gap ranking with level while the below
+# gap does not.
+#
+# Applied as the heading paragraph tag's pixel padding; the renderer
+# pairs this with stripping the preceding block's trailing blank line
+# and trimming the heading's own trailing separator to a single newline,
+# so each gap is the tag's padding alone (see :func:`_make_heading_tag`
+# and ``textbuffer_renderer._emit_section``). The document title
+# (level 0) is out of scope -- its spacing is governed by the
+# title -> metadata-line -> body sequence in ``render_into`` and carries
+# no padding here.
 _HEADING_GAP_BELOW_LINES: float = 9 / REFERENCE_LINE_HEIGHT_PX
-_HEADING_GAP_ABOVE_MULTIPLE: int = 2
+_HEADING_GAP_ABOVE_PER_SCALE_LINES: float = 1.15
 
 
 def heading_tag_name(level: int) -> TagName:
@@ -563,6 +589,28 @@ _ADMONITION_KIND_TAG_NAMES: dict[AdmonitionKind, TagName] = {
 _MONOSPACE_FAMILY: str = "monospace"
 
 
+# The ratios below are now stated directly rather than as
+# "N / REFERENCE_LINE_HEIGHT_PX". That form was how they were carried
+# through the change of unit, so the pixel value each was authored at
+# stayed visible while nothing about the design moved; once the values
+# were deliberately re-tuned it stopped being true and would have been
+# a misleading thing to keep. REFERENCE_LINE_HEIGHT_PX is still what
+# they are ratios *of*.
+
+_SECONDARY_TEXT_SCALE: float = 0.9
+"""Scale for a line that supports a primary one.
+
+Three lines are subordinate in exactly this sense -- the under-title
+metadata, a blockquote's attribution, and the reason on an unread
+block. They carried 0.85, 0.9 and 0.9, with nothing recorded to
+justify the odd one out, which left the metadata line the smallest
+text in a rendered note for no stated reason. One constant instead:
+if a future change wants them to differ, the difference needs its own
+name and its own rationale rather than arriving as a typo nobody can
+tell apart from a decision.
+"""
+
+
 # Paragraph metrics applied to admonition paragraph tags. ``HMARGIN``
 # is the *box inset* from the textview's widget left/right margin to
 # the tinted box's edge. It is ``0`` so the card spans the full prose
@@ -584,8 +632,8 @@ _MONOSPACE_FAMILY: str = "monospace"
 # document title and its metadata line; ``test_tag_table.py`` asserts
 # the ordering for both.
 _ADMONITION_HMARGIN_PX: int = 0
-_ADMONITION_VPADDING_LINES: float = 8 / REFERENCE_LINE_HEIGHT_PX
-_ADMONITION_INNER_GAP_LINES: float = 6 / REFERENCE_LINE_HEIGHT_PX
+_ADMONITION_VPADDING_LINES: float = 0.40
+_ADMONITION_INNER_GAP_LINES: float = 0.25
 _ADMONITION_LINE_GAP_LINES: float = 2 / REFERENCE_LINE_HEIGHT_PX
 
 # Paragraph metrics for blockquotes. The box insets are ``0`` so the
@@ -598,7 +646,7 @@ _ADMONITION_LINE_GAP_LINES: float = 2 / REFERENCE_LINE_HEIGHT_PX
 # :data:`WashSpec.bar_width_px`.
 _BLOCKQUOTE_HMARGIN_PX: int = 0
 _BLOCKQUOTE_RIGHT_MARGIN_PX: int = 0
-_BLOCKQUOTE_VPADDING_LINES: float = 6 / REFERENCE_LINE_HEIGHT_PX
+_BLOCKQUOTE_VPADDING_LINES: float = 0.30
 _BLOCKQUOTE_LINE_GAP_LINES: float = 2 / REFERENCE_LINE_HEIGHT_PX
 _BLOCKQUOTE_BAR_WIDTH_PX: int = 3
 
@@ -615,11 +663,11 @@ _BLOCKQUOTE_BAR_WIDTH_PX: int = 3
 # tags the renderer layers across the block's first and last logical
 # line respectively.
 _CODE_BLOCK_HMARGIN_PX: int = 0
-_CODE_BLOCK_EDGE_PADDING_LINES: float = 8 / REFERENCE_LINE_HEIGHT_PX
+_CODE_BLOCK_EDGE_PADDING_LINES: float = 0.40
 
 # Scale multiplier for the blockquote attribution line. Slightly
 # smaller than body text so the citation reads as secondary metadata.
-_BLOCKQUOTE_ATTRIBUTION_SCALE: float = 0.9
+_BLOCKQUOTE_ATTRIBUTION_SCALE: float = _SECONDARY_TEXT_SCALE
 
 
 # Table rows. A rendered table is native buffer text: each row is one
@@ -641,8 +689,8 @@ _BLOCKQUOTE_ATTRIBUTION_SCALE: float = 0.9
 # and the rule lands centred between them — and the header's text is
 # centred within its tint band rather than hugging the top edge.
 _TABLE_BOX_INSET_PX: int = 0
-_TABLE_ROW_VPADDING_LINES: float = 7 / REFERENCE_LINE_HEIGHT_PX
-_TABLE_HEADER_VPADDING_LINES: float = 8 / REFERENCE_LINE_HEIGHT_PX
+_TABLE_ROW_VPADDING_LINES: float = 0.35
+_TABLE_HEADER_VPADDING_LINES: float = 0.40
 
 
 # Metadata line (Created / Modified / tags) under the document title.
@@ -666,9 +714,9 @@ _TABLE_HEADER_VPADDING_LINES: float = 8 / REFERENCE_LINE_HEIGHT_PX
 # optical, so it is tuned against a title *with* descenders -- the worst
 # case; an ascender-only title sits a hair loose, which is invisible in
 # practice where the collision is not.
-_METADATA_SCALE: float = 0.85
-_METADATA_GAP_ABOVE_LINES: float = 6 / REFERENCE_LINE_HEIGHT_PX
-_METADATA_GAP_BELOW_LINES: float = 8 / REFERENCE_LINE_HEIGHT_PX
+_METADATA_SCALE: float = _SECONDARY_TEXT_SCALE
+_METADATA_GAP_ABOVE_LINES: float = 0.25
+_METADATA_GAP_BELOW_LINES: float = 0.40
 _METADATA_RULE_INSET_PX: int = 0
 
 
@@ -695,7 +743,7 @@ _UNREAD_TAG_NAMES: dict[UnreadMarkPart, TagName] = {
 _UNREAD_HMARGIN_PX: int = 0
 _UNREAD_BAR_WIDTH_PX: int = 3
 _UNREAD_SOURCE_VPADDING_LINES: float = 4 / REFERENCE_LINE_HEIGHT_PX
-_UNREAD_REASON_SCALE: float = 0.9
+_UNREAD_REASON_SCALE: float = _SECONDARY_TEXT_SCALE
 # The reason must read as annotation *about* the source above it, not as
 # one more line of it. At the source's line spacing a 2px gap put it
 # closer to the last source line than those lines are to each other,
@@ -1136,31 +1184,34 @@ def _make_heading_tag(
 ) -> Gtk.TextTag:
     """Build a heading-style tag: bold weight at the given scale.
 
-    ``is_body`` selects the asymmetric vertical spacing (2 : 1 above :
-    below) that applies to body section headings (levels 2-6): when
-    ``True`` the tag also carries ``pixels-above-lines`` /
-    ``pixels-below-lines`` derived from :data:`_HEADING_GAP_BELOW_LINES`
-    and :data:`_HEADING_GAP_ABOVE_MULTIPLE`, driving both gaps directly so the
-    ratio is exact and independent of the surrounding block separators
-    (see ``textbuffer_renderer._emit_section``, which strips the
-    preceding blank line and trims the heading's own trailing separator
-    to a single newline so nothing else contributes to either gap). The
-    document title (level 0) passes ``False`` — its spacing is governed
-    by the title -> metadata-line -> body sequence in ``render_into``.
+    ``is_body`` selects the asymmetric vertical spacing that applies to
+    body section headings (levels 2-6): when ``True`` the tag also
+    carries ``pixels-above-lines`` — the level's own ``scale`` times
+    :data:`_HEADING_GAP_ABOVE_PER_SCALE_LINES`, so the spacing ramp
+    tracks the type ramp — and ``pixels-below-lines`` from
+    :data:`_HEADING_GAP_BELOW_LINES`, one value for every level. Both are
+    driven directly here so each gap is independent of the surrounding
+    block separators (see ``textbuffer_renderer._emit_section``, which
+    strips the preceding blank line and trims the heading's own trailing
+    separator to a single newline so nothing else contributes to either
+    gap). The document title (level 0) passes ``False`` — its spacing is
+    governed by the title -> metadata-line -> body sequence in
+    ``render_into``.
     """
     tag = Gtk.TextTag.new(name.value)
     tag.set_property("weight", Pango.Weight.BOLD)
     tag.set_property("scale", scale)
     if is_body:
-        # The gap below is resolved first and the gap above derived
-        # from it, so the 2 : 1 model survives integer rounding at every
-        # font size. Resolving both ratios independently does not: at a
-        # 17 px line the two round to 13 and 6, which is 2.17 : 1.
-        gap_below_px = _gap_px(_HEADING_GAP_BELOW_LINES, line_height_px)
+        # The gap above ranks with the heading's own scale; the gap
+        # below is the same for every level. See the constants.
         tag.set_property(
-            "pixels-above-lines", _HEADING_GAP_ABOVE_MULTIPLE * gap_below_px,
+            "pixels-above-lines",
+            _gap_px(_HEADING_GAP_ABOVE_PER_SCALE_LINES * scale, line_height_px),
         )
-        tag.set_property("pixels-below-lines", gap_below_px)
+        tag.set_property(
+            "pixels-below-lines",
+            _gap_px(_HEADING_GAP_BELOW_LINES, line_height_px),
+        )
     return tag
 
 

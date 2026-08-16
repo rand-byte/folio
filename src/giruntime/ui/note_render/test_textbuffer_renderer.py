@@ -296,14 +296,19 @@ class HeadingRenderingTests(unittest.TestCase):
             "First paragraph.\nA Heading\nSecond paragraph.",
         )
 
-    def test_body_heading_tag_carries_two_to_one_pixel_padding(self) -> None:
+    def test_body_heading_tag_carries_asymmetric_pixel_padding(self) -> None:
+        # The renderer's half of the contract: it strips the preceding
+        # blank line and trims the heading's trailing separator, so both
+        # gaps come from the tag's padding alone. What matters here is
+        # that the padding is present and asymmetric — the exact ramp
+        # belongs to test_tag_table.py, which owns those constants.
         renderer, buffer, table = _build_renderer()
         renderer.render_into("== A Heading\n", buffer, note_id="n1")
         tag = table.lookup(TagName.HEADING_2.value)
         above = tag.get_property("pixels-above-lines")
         below = tag.get_property("pixels-below-lines")
         self.assertGreater(below, 0)
-        self.assertEqual(above, 2 * below)
+        self.assertGreater(above, below)
 
     def test_title_and_metadata_path_is_unchanged_before_first_heading(
         self,

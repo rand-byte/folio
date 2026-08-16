@@ -500,17 +500,64 @@ class HeadingTagPropertyTests(unittest.TestCase):
         h2 = self.table.lookup(TagName.HEADING_2.value).get_property("scale")
         self.assertGreater(h0, h2)
 
-    def test_body_heading_pixel_padding_is_two_to_one(self) -> None:
-        # Body headings (levels 2-6) carry asymmetric vertical spacing —
-        # the gap above is twice the gap below — driven by pixel padding
-        # on the heading tag itself so the ratio is exact.
+    def test_body_heading_binds_downward(self) -> None:
+        # Body headings (levels 2-6) carry asymmetric vertical spacing,
+        # driven by pixel padding on the heading tag itself so each gap
+        # is independent of the surrounding block separators. This
+        # replaces an assertion that the ratio was exactly 2 : 1, which
+        # stopped being the model once the gap above began ranking with
+        # the heading's level while the gap below did not. The invariant
+        # the 2 : 1 stood for — a heading is attached to what follows it
+        # — is what is asserted instead.
         for level in (2, 3, 4, 5, 6):
             with self.subTest(level=level):
                 tag = self.table.lookup(heading_tag_name(level).value)
                 above = tag.get_property("pixels-above-lines")
                 below = tag.get_property("pixels-below-lines")
                 self.assertGreater(below, 0)
-                self.assertEqual(above, 2 * below)
+                self.assertGreater(above, below)
+
+    def test_body_heading_gap_above_exceeds_one_line(self) -> None:
+        # The defect this ramp exists to fix. One blank line between two
+        # paragraphs is one body line height, so a heading whose top gap
+        # is under that announces a *new section* with less air than
+        # separates two paragraphs inside it. Level 6 is the binding
+        # case: it has no size cue over body text at all.
+        for line_height_px in (12, 17, 24, 42):
+            table = build_tag_table(
+                char_width_px=_TEST_CHAR_WIDTH_PX,
+                line_height_px=line_height_px,
+                palette=LIGHT_PALETTE,
+            )
+            for level in (2, 3, 4, 5, 6):
+                with self.subTest(line_height_px=line_height_px, level=level):
+                    tag = table.lookup(heading_tag_name(level).value)
+                    self.assertGreater(
+                        tag.get_property("pixels-above-lines"), line_height_px,
+                    )
+
+    def test_body_heading_gap_above_ranks_with_level(self) -> None:
+        # A major section deserves more air than a sub-sub-heading, and
+        # the ramp is derived from _HEADING_SCALES so it cannot drift
+        # out of step with the type ramp.
+        gaps = [
+            self.table.lookup(
+                heading_tag_name(level).value,
+            ).get_property("pixels-above-lines")
+            for level in (2, 3, 4, 5, 6)
+        ]
+        self.assertEqual(gaps, sorted(gaps, reverse=True))
+
+    def test_body_heading_gap_below_is_uniform(self) -> None:
+        # The gap below binds a heading to its content, and that
+        # relationship does not depend on rank.
+        gaps = {
+            self.table.lookup(
+                heading_tag_name(level).value,
+            ).get_property("pixels-below-lines")
+            for level in (2, 3, 4, 5, 6)
+        }
+        self.assertEqual(len(gaps), 1)
 
     def test_document_title_has_no_pixel_padding(self) -> None:
         # The title (level 0) is out of scope for the 2 : 1 model — its
@@ -632,28 +679,31 @@ class VerticalGapsScaleWithTheFontTests(unittest.TestCase):
         self.assertEqual(_TEST_LINE_HEIGHT_PX, REFERENCE_LINE_HEIGHT_PX)
 
     def test_gaps_are_unchanged_at_the_reference_line_height(self) -> None:
-        # The pixel values every one of these gaps carried before the
-        # conversion. Spelled out rather than derived, so the test would
-        # catch a ratio that was mistyped in a way that still scales.
+        # The pixel value each gap resolves to at the reference line
+        # height. Spelled out rather than derived, so the test catches a
+        # ratio mistyped in a way that still scales. These were the
+        # pre-conversion values when the ratios were introduced; the
+        # spacing retune moved several of them deliberately.
         table = build_tag_table(
             char_width_px=_TEST_CHAR_WIDTH_PX,
             line_height_px=REFERENCE_LINE_HEIGHT_PX,
             palette=LIGHT_PALETTE,
         )
         expected: dict[tuple[TagName, str], int] = {
-            (TagName.HEADING_2, "pixels-above-lines"): 18,
+            # 1.15 L x the level-2 scale of 1.6, rounded.
+            (TagName.HEADING_2, "pixels-above-lines"): 44,
             (TagName.HEADING_2, "pixels-below-lines"): 9,
             (TagName.METADATA, "pixels-above-lines"): 6,
-            (TagName.METADATA, "pixels-below-lines"): 8,
-            (TagName.ADMONITION_NOTE_LABEL, "pixels-above-lines"): 8,
+            (TagName.METADATA, "pixels-below-lines"): 10,
+            (TagName.ADMONITION_NOTE_LABEL, "pixels-above-lines"): 10,
             (TagName.ADMONITION_NOTE_LABEL, "pixels-below-lines"): 6,
-            (TagName.ADMONITION_NOTE_BODY, "pixels-below-lines"): 8,
-            (TagName.BLOCKQUOTE_BODY, "pixels-above-lines"): 6,
-            (TagName.BLOCKQUOTE_BODY, "pixels-below-lines"): 6,
-            (TagName.CODE_BLOCK_TOP_PAD, "pixels-above-lines"): 8,
-            (TagName.CODE_BLOCK_BOTTOM_PAD, "pixels-below-lines"): 8,
-            (TagName.TABLE_ROW, "pixels-above-lines"): 7,
-            (TagName.TABLE_HEADER, "pixels-above-lines"): 8,
+            (TagName.ADMONITION_NOTE_BODY, "pixels-below-lines"): 10,
+            (TagName.BLOCKQUOTE_BODY, "pixels-above-lines"): 7,
+            (TagName.BLOCKQUOTE_BODY, "pixels-below-lines"): 7,
+            (TagName.CODE_BLOCK_TOP_PAD, "pixels-above-lines"): 10,
+            (TagName.CODE_BLOCK_BOTTOM_PAD, "pixels-below-lines"): 10,
+            (TagName.TABLE_ROW, "pixels-above-lines"): 8,
+            (TagName.TABLE_HEADER, "pixels-above-lines"): 10,
             (TagName.UNREAD_SOURCE, "pixels-above-lines"): 4,
             (TagName.UNREAD_REASON, "pixels-above-lines"): 5,
             (TagName.UNREAD_REASON, "pixels-below-lines"): 6,
@@ -681,22 +731,6 @@ class VerticalGapsScaleWithTheFontTests(unittest.TestCase):
                 self.assertGreater(
                     large.lookup(name.value).get_property("pixels-above-lines"),
                     small.lookup(name.value).get_property("pixels-above-lines"),
-                )
-
-    def test_heading_ratio_holds_across_font_sizes(self) -> None:
-        # The 2 : 1 model is the reason the ratios exist: it has to
-        # survive the font, not just the reference size.
-        for line_height_px in (12, 17, 24, 42):
-            with self.subTest(line_height_px=line_height_px):
-                table = build_tag_table(
-                    char_width_px=_TEST_CHAR_WIDTH_PX,
-                    line_height_px=line_height_px,
-                    palette=LIGHT_PALETTE,
-                )
-                tag = table.lookup(TagName.HEADING_2.value)
-                self.assertEqual(
-                    tag.get_property("pixels-above-lines"),
-                    2 * tag.get_property("pixels-below-lines"),
                 )
 
     def test_subordinate_line_ordering_holds_across_font_sizes(self) -> None:
